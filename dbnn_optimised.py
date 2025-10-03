@@ -492,6 +492,7 @@ class GPUDBNN:
         # Initialize pruning structures
         self.active_feature_mask = None
         self.original_feature_indices = None
+        self.pruning_enabled = True
 
         # Extract training configuration
         training_config = self.config.get('training_config', {})
@@ -659,6 +660,15 @@ class GPUDBNN:
         else:
             tensor = torch.tensor(data, dtype=dtype).to(self.device)
         return tensor
+
+
+    def set_pruning_enabled(self, enabled: bool):
+        """Enable or disable pruning during training"""
+        self.pruning_enabled = enabled
+        if enabled:
+            print("Pruning: ENABLED")
+        else:
+            print("Pruning: DISABLED")
 
     def _to_numpy(self, tensor):
         """Convert tensor to numpy array"""
@@ -2140,6 +2150,8 @@ class GPUDBNN:
 
     def _prune_stagnant_connections(self, epoch: int):
         """Prune connections that haven't changed significantly from initial values"""
+        if not self.pruning_enabled:
+            return
         if (self.pruning_warmup_epochs == 0 or
             self.model_type == 'histogram' or
             epoch <= self.pruning_warmup_epochs or
