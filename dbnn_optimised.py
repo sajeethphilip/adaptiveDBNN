@@ -23,6 +23,8 @@ import torch
 import os
 import pickle
 from tqdm import tqdm, trange
+from concurrent.futures import ThreadPoolExecutor
+import multiprocessing as mp
 
 # Assume no keyboard control by default. If you have X11 running and want to be interactive, set nokbd = False
 nokbd = True  # Disabled keyboard control for minimal systems
@@ -47,7 +49,6 @@ if nokbd==False:
             if os.path.isdir('/usr/lib/X11/'):
                 return True
 
-
         # Only try to import pynput if X11 is available
         if is_x11_available():
             try:
@@ -64,25 +65,40 @@ class DatasetConfig:
     """Handle dataset configuration loading and validation"""
 
     DEFAULT_CONFIG = {
-        "training_config": {
-            "trials": 100,
-            "cardinality_threshold": 0.9,
-            "cardinality_tolerance": 4,
-            "learning_rate": 0.1,
-            "random_seed": 42,
-            "epochs": 1000,
-            "test_fraction": 0.2,
-            "train": True,
-            "train_only": False,
-            "predict": True,
-            "gen_samples": False
-        },
-        "likelihood_config": {
-            "feature_group_size": 2,
-            "max_combinations": 1000,
-            "update_strategy": 3  # Default to option 3
+    "training_config": {
+        "trials": 100,
+        "cardinality_threshold": 0.9,
+        "cardinality_tolerance": 4,
+        "learning_rate": 0.1,
+        "random_seed": 42,
+        "epochs": 1000,
+        "test_fraction": 0.2,
+        "train": True,
+        "train_only": False,
+        "predict": True,
+        "gen_samples": False
+    },
+    "likelihood_config": {
+        "feature_group_size": 2,
+        "max_combinations": 1000,
+        "update_strategy": 3,
+        "model_type": "histogram",
+        "histogram_bins": 64,
+        "laplace_smoothing": 1.0,
+        "histogram_method": "vectorized"
+    },
+        "visualization_config": {
+            "enabled": False,
+            "output_dir": "visualizations",
+            "epoch_interval": 10,
+            "max_frames": 50,
+            "create_animations": True,
+            "create_reports": True,
+            "create_3d_visualizations": True,  # Enable 3D VR-style visuals
+            "rotation_speed": 5,              #  Degrees per frame
+            "elevation_oscillation": True     # Add camera movement
         }
-    }
+}
 
     @staticmethod
     def _get_user_input(prompt: str, default_value: Any = None, validation_fn: callable = None) -> Any:
@@ -163,8 +179,8 @@ class DatasetConfig:
 
         # Get header information
         config['has_header'] = DatasetConfig._get_user_input(
-            "Does the file have a header row? (yes/no)",
-            "yes",
+            "Does the file have a header row? True/False)",
+            True,
             DatasetConfig._validate_boolean
         )
 
@@ -207,23 +223,23 @@ class DatasetConfig:
                 DatasetConfig._validate_float
             ),
             'train': DatasetConfig._get_user_input(
-                "Enable training? (yes/no)",
-                "yes",
+                "Enable training?( True/False)",
+                True,
                 DatasetConfig._validate_boolean
             ),
             'train_only': DatasetConfig._get_user_input(
-                "Train only (no evaluation)? (yes/no)",
-                "no",
+                "Train only (no evaluation)? (True/False)",
+                False,
                 DatasetConfig._validate_boolean
             ),
             'predict': DatasetConfig._get_user_input(
-                "Enable prediction/evaluation? (yes/no)",
-                "yes",
+                "Enable prediction/evaluation? (True/Falseo)",
+                True,
                 DatasetConfig._validate_boolean
             ),
             'gen_samples': DatasetConfig._get_user_input(
-                "Enable sample generation? (yes/no)",
-                "no",
+                "Enable sample generation? (True/False)",
+                False,
                 DatasetConfig._validate_boolean
             )
         }
@@ -245,6 +261,69 @@ class DatasetConfig:
                 "Enter update strategy (1: batch average, 2: max error add to failed, 3: max error add/subtract, 4: max error subtract only)",
                 3,
                 lambda x: int(x) if int(x) in [1, 2, 3, 4] else ValueError("Must be 1, 2, 3, or 4")
+            ),
+            'model_type': DatasetConfig._get_user_input(
+                "Enter model type (gaussian/histogram)",
+                "gaussian",
+                lambda x: x if x in ['gaussian', 'histogram'] else ValueError("Must be 'gaussian' or 'histogram'")
+            ),
+            'histogram_bins': DatasetConfig._get_user_input(
+                "Enter number of bins for histogram model",
+                64,
+                DatasetConfig._validate_int
+            ),
+            'laplace_smoothing': DatasetConfig._get_user_input(
+                "Enter Laplace smoothing parameter for histogram",
+                1.0,
+                DatasetConfig._validate_float
+            ),
+            'histogram_method': DatasetConfig._get_user_input(
+                "Enter histogram method (traditional/vectorized)",
+                "traditional",
+                lambda x: x if x in ['traditional', 'vectorized'] else ValueError("Must be 'traditional' or 'vectorized'")
+            )
+        }
+        # Get visualization configuration
+        print("\nVisualization Configuration:")
+        config['visualization_config'] = {
+            'enabled': DatasetConfig._get_user_input(
+                "Enable visualization? (yes/no) - WARNING: This may slow down training",
+                "no",
+                DatasetConfig._validate_boolean
+            ),
+            'output_dir': DatasetConfig._get_user_input(
+                "Enter output directory for visualizations",
+                "visualizations"
+            ),
+            'epoch_interval': DatasetConfig._get_user_input(
+                "Enter epoch interval for animation frames",
+                10,
+                DatasetConfig._validate_int
+            ),
+            'max_frames': DatasetConfig._get_user_input(
+                "Enter maximum number of animation frames",
+                50,
+                DatasetConfig._validate_int
+            ),
+            'create_animations': DatasetConfig._get_user_input(
+                "Create animated GIFs? (True/False)",
+               True,
+                DatasetConfig._validate_boolean
+            ),
+            'create_reports': DatasetConfig._get_user_input(
+                "Create comprehensive reports? (True/False)",
+                True,
+                DatasetConfig._validate_boolean
+            ),
+            'create_3d_visualizations': DatasetConfig._get_user_input(  # NEW
+                "Create 3D VR-style visualizations? (True/False)",
+                True,
+                DatasetConfig._validate_boolean
+            ),
+            'rotation_speed': DatasetConfig._get_user_input(  # NEW
+                "Enter rotation speed (degrees per frame)",
+                5,
+                DatasetConfig._validate_int
             )
         }
 
@@ -298,7 +377,17 @@ class DatasetConfig:
                     if key not in config['likelihood_config']:
                         config['likelihood_config'][key] = default_value
 
-            # Save the configuration
+            # NEW: Ensure visualization_config exists with defaults (even if not in file)
+            if 'visualization_config' not in config:
+                config['visualization_config'] = DatasetConfig.DEFAULT_CONFIG['visualization_config']
+            else:
+                # Ensure all visualization_config fields exist
+                default_visualization = DatasetConfig.DEFAULT_CONFIG['visualization_config']
+                for key, default_value in default_visualization.items():
+                    if key not in config['visualization_config']:
+                        config['visualization_config'][key] = default_value
+
+            # Save the configuration (this will add the new visualization_config if it was missing)
             with open(config_path, 'w') as f:
                 json.dump(config, f, indent=4)
                 print(f"\nConfiguration saved to: {config_path}")
@@ -315,6 +404,7 @@ class DatasetConfig:
         # Look for .conf files in the current directory
         return [f.split('.')[0] for f in os.listdir()
                 if f.endswith('.conf') and os.path.isfile(f)]
+
 #---------------------------------------Feature Filter with a #------------------------------------
 def _filter_features_from_config(df: pd.DataFrame, config: Dict) -> pd.DataFrame:
     """
@@ -388,6 +478,17 @@ class GPUDBNN:
         # Load dataset configuration and data
         self.config = DatasetConfig.load_config(self.dataset_name)
 
+        # Get model filename from config
+        self.model_filename = None
+        if 'model_config' in self.config and 'model_filename' in self.config['model_config']:
+            self.model_filename = self.config['model_config']['model_filename']
+        elif 'training_columns' in self.config and 'model_filename' in self.config['training_columns']:
+            self.model_filename = self.config['training_columns']['model_filename']
+        else:
+            self.model_filename = f"Best_{self.dataset_name}"
+
+        print(f"Using model filename: {self.model_filename}")
+
         # Initialize pruning structures
         self.active_feature_mask = None
         self.original_feature_indices = None
@@ -406,6 +507,13 @@ class GPUDBNN:
         self.predict_enabled = training_config.get('predict', True)
         self.gen_samples_enabled = training_config.get('gen_samples', False)
 
+        # Extract likelihood configuration
+        likelihood_config = self.config.get('likelihood_config', {})
+        self.model_type = likelihood_config.get('model_type', 'histogram')
+        self.histogram_bins = likelihood_config.get('histogram_bins', 64)
+        self.laplace_smoothing = likelihood_config.get('laplace_smoothing', 1.0)
+        self.histogram_method = likelihood_config.get('histogram_method', 'vectorized')
+
         # Set random seed if specified
         if self.random_state is not None:
             np.random.seed(self.random_state)
@@ -419,9 +527,15 @@ class GPUDBNN:
         self.likelihood_params = None
         self.feature_pairs = None
         self.best_W = None
-        self.best_error = float('inf')
         self.current_W = None
+        self.best_error = float('inf')
         self.best_accuracy = 0.0
+
+        # Histogram model components
+        self.histograms = None
+        self.feature_min = None
+        self.feature_max = None
+        self.bin_edges = None
 
         # Categorical feature handling
         self.categorical_encoders = {}
@@ -437,26 +551,51 @@ class GPUDBNN:
         self._load_categorical_encoders()
 
         # Add tracking for initial weights and pruning
-        self.initial_W = None  # Store initial weights for reference
-        self.pruning_warmup_epochs = 3  # epochs before starting to prune
-        self.pruning_threshold = 1e-6   # minimum change from initial value to avoid pruning
-        self.pruning_aggressiveness = 0.1  # percentage of stagnant connections to prune per epoch
+        self.initial_W = None
+        self.pruning_warmup_epochs = 3
+        self.pruning_threshold = 1e-6
+        self.pruning_aggressiveness = 0.1
 
-    # -----------Enable/Disable pruning-------------
-    def set_pruning_enabled(self, enabled: bool):
-        """Enable or disable pruning"""
-        if enabled:
-            self.pruning_warmup_epochs = 3  # Default value
+        # Extract visualization configuration
+        visualization_config = self.config.get('visualization_config', {})
+        self.visualization_enabled = visualization_config.get('enabled', False)
+        self.visualization_output_dir = os.path.join(
+            visualization_config.get('output_dir', 'visualizations'),
+            self.dataset_name
+        )
+        self.visualization_epoch_interval = visualization_config.get('epoch_interval', 10)
+        self.visualization_max_frames = visualization_config.get('max_frames', 50)
+
+        print(f"Using {self.model_type} model for likelihood estimation")
+        if self.model_type == 'histogram':
+            print(f"Histogram method: {self.histogram_method}")
+
+        # Import and initialize visualizer (conditional import)
+        try:
+            from dbnn_visualizer import DBNNVisualizer
+            self.visualizer = DBNNVisualizer(
+                self,
+                output_dir=self.visualization_output_dir,
+                enabled=self.visualization_enabled
+            )
+            self.visualizer.configure(visualization_config)
+        except ImportError:
+            print("Warning: Visualization module not available. Continuing without visualization.")
+            self.visualizer = None
+            self.visualization_enabled = False
+
+        if self.visualization_enabled:
+            print("Visualization: ENABLED")
         else:
-            self.pruning_warmup_epochs = 0  # Disables pruning
+            print("Visualization: DISABLED (default for performance)")
+
+    def _get_weights_filename(self):
+        """Get the filename for saving/loading weights"""
+        return os.path.join('Model', f'{self.model_filename}_weights.json')
 
     def _calculate_cardinality_threshold(self):
         """Calculate the cardinality threshold based on the number of distinct classes"""
         return self.cardinality_threshold
-
-    def _get_weights_filename(self):
-        """Get the filename for saving/loading weights"""
-        return os.path.join('Model', f'Best_{self.dataset_name}_weights.json')
 
     def _get_dataset_fingerprint(self, df: pd.DataFrame) -> str:
         """Generate a fingerprint of the dataset to detect changes"""
@@ -663,8 +802,201 @@ class GPUDBNN:
             'classes': unique_classes
         }
 
+    def _compute_likelihood_parameters(self, X_train: np.ndarray, y_train: np.ndarray):
+        """Compute likelihood parameters based on selected model type"""
+        if self.model_type == 'histogram':
+            if self.histogram_method == 'vectorized':
+                self._compute_histogram_likelihood_vectorized(X_train, y_train)
+            else:
+                self._compute_histogram_likelihood_traditional(X_train, y_train)
+        else:  # gaussian
+            self._compute_gaussian_likelihood(X_train, y_train)
+
+    def _compute_gaussian_likelihood(self, X_train: np.ndarray, y_train: np.ndarray):
+        """Compute Gaussian likelihood parameters"""
+        print("Computing Gaussian likelihood parameters...")
+
+        # Get likelihood configuration
+        group_size = self.config.get('likelihood_config', {}).get('feature_group_size', 2)
+        max_combinations = self.config.get('likelihood_config', {}).get('max_combinations', None)
+
+        # Generate feature combinations
+        self.feature_pairs = self._generate_feature_combinations(
+            X_train.shape[1],
+            group_size,
+            max_combinations
+        )
+
+        # Compute likelihood parameters
+        self.likelihood_params = self._compute_pairwise_likelihood_parallel(
+            X_train, y_train, X_train.shape[1]
+        )
+
+        # Precompute inverse covariance matrices for faster prediction
+        if self.use_gpu:
+            covs = self.likelihood_params['covs']
+            n_classes, n_combinations, _, _ = covs.shape
+            eye = torch.eye(group_size, device=self.device)
+
+            # Initialize inv_covs with proper shape
+            inv_covs = torch.zeros_like(covs)
+
+            for class_idx in range(n_classes):
+                for comb_idx in range(n_combinations):
+                    inv_covs[class_idx, comb_idx] = torch.linalg.inv(
+                        covs[class_idx, comb_idx] + eye * 1e-6
+                    )
+
+            self.likelihood_params['inv_covs'] = inv_covs
+        else:
+            covs = self.likelihood_params['covs']
+            n_classes, n_combinations, _, _ = covs.shape
+            inv_covs = np.zeros_like(covs)
+            for class_idx in range(n_classes):
+                for comb_idx in range(n_combinations):
+                    inv_covs[class_idx, comb_idx] = np.linalg.inv(
+                        covs[class_idx, comb_idx] + np.eye(group_size) * 1e-6
+                    )
+            self.likelihood_params['inv_covs'] = inv_covs
+
+        # Initialize weights if not already loaded
+        if self.current_W is None:
+            n_classes = len(self.likelihood_params['classes'])
+            n_combinations = len(self.feature_pairs)
+            self.current_W = np.ones((n_classes, n_combinations)) / n_classes
+            self.best_W = self.current_W.copy()
+            self.initial_W = self.current_W.copy()
+
+            # Initialize pruning structures
+            self._initialize_pruning_structures(n_combinations)
+
+        print(f"Computed Gaussian parameters for {len(self.feature_pairs)} feature combinations")
+
+    def _compute_histogram_likelihood_traditional(self, X_train: np.ndarray, y_train: np.ndarray):
+        """Traditional histogram computation (original method)"""
+        print(f"Computing histogram likelihood parameters with {self.histogram_bins} bins (traditional method)...")
+
+        n_features = X_train.shape[1]
+        unique_classes = np.unique(y_train)
+        n_classes = len(unique_classes)
+
+        # Store feature ranges
+        self.feature_min = np.min(X_train, axis=0)
+        self.feature_max = np.max(X_train, axis=0)
+
+        # Initialize histograms
+        self.histograms = np.zeros((n_features, self.histogram_bins, n_classes))
+        self.bin_edges = np.zeros((n_features, self.histogram_bins + 1))
+
+        # Compute histograms for each feature and class (traditional loop-based)
+        for feature_idx in range(n_features):
+            # Compute bin edges for this feature
+            self.bin_edges[feature_idx] = np.linspace(
+                self.feature_min[feature_idx],
+                self.feature_max[feature_idx],
+                self.histogram_bins + 1
+            )
+
+            for class_idx, class_id in enumerate(unique_classes):
+                # Get data for this class and feature
+                class_mask = (y_train == class_id)
+                class_data = X_train[class_mask, feature_idx]
+
+                if len(class_data) > 0:
+                    # Traditional histogram computation
+                    hist, _ = np.histogram(class_data, bins=self.bin_edges[feature_idx])
+
+                    # Apply Laplace smoothing
+                    hist = hist + self.laplace_smoothing
+                    total = np.sum(hist)
+
+                    # Store normalized probabilities
+                    self.histograms[feature_idx, :, class_idx] = hist / total
+
+        # Initialize weights
+        if self.current_W is None:
+            self.current_W = np.ones((n_classes, n_features, self.histogram_bins))
+            self.best_W = self.current_W.copy()
+            self.initial_W = self.current_W.copy()
+
+        # Initialize dummy pruning structures for histogram model
+        self.active_feature_mask = np.ones(1, dtype=bool)
+        self.original_feature_indices = np.array([0])
+        self.feature_pairs = np.array([[0]])
+
+        print(f"Computed histogram parameters for {n_features} features (traditional method)")
+
+    def _compute_histogram_likelihood_vectorized(self, X_train: np.ndarray, y_train: np.ndarray):
+        """Vectorized histogram computation using advanced NumPy operations"""
+        print(f"Computing histogram likelihood parameters with {self.histogram_bins} bins (vectorized method)...")
+
+        n_samples, n_features = X_train.shape
+        unique_classes = np.unique(y_train)
+        n_classes = len(unique_classes)
+
+        # Store feature ranges
+        self.feature_min = np.min(X_train, axis=0)
+        self.feature_max = np.max(X_train, axis=0)
+
+        # Initialize histograms
+        self.histograms = np.zeros((n_features, self.histogram_bins, n_classes))
+        self.bin_edges = np.zeros((n_features, self.histogram_bins + 1))
+
+        # Precompute bin edges for all features at once
+        for feature_idx in range(n_features):
+            self.bin_edges[feature_idx] = np.linspace(
+                self.feature_min[feature_idx],
+                self.feature_max[feature_idx],
+                self.histogram_bins + 1
+            )
+
+        # Vectorized histogram computation using digitize and bincount
+        for class_idx, class_id in enumerate(unique_classes):
+            class_mask = (y_train == class_id)
+            class_data = X_train[class_mask]
+
+            if len(class_data) > 0:
+                # Vectorized bin assignment for all features
+                bin_indices = np.zeros((len(class_data), n_features), dtype=int)
+
+                for feature_idx in range(n_features):
+                    bin_indices[:, feature_idx] = np.digitize(
+                        class_data[:, feature_idx],
+                        self.bin_edges[feature_idx]
+                    ) - 1
+                    bin_indices[:, feature_idx] = np.clip(bin_indices[:, feature_idx], 0, self.histogram_bins - 1)
+
+                # Vectorized histogram accumulation using bincount
+                for feature_idx in range(n_features):
+                    hist = np.bincount(bin_indices[:, feature_idx], minlength=self.histogram_bins)
+                    hist = hist + self.laplace_smoothing  # Laplace smoothing
+                    self.histograms[feature_idx, :, class_idx] = hist / np.sum(hist)
+
+        # Initialize weights
+        if self.current_W is None:
+            self.current_W = np.ones((n_classes, n_features, self.histogram_bins))
+            self.best_W = self.current_W.copy()
+            self.initial_W = self.current_W.copy()
+
+        # Initialize dummy pruning structures for histogram model
+        self.active_feature_mask = np.ones(1, dtype=bool)
+        self.original_feature_indices = np.array([0])
+        self.feature_pairs = np.array([[0]])
+
+        print(f"Computed histogram parameters for {n_features} features (vectorized method)")
+
     def _compute_batch_posterior(self, features: np.ndarray, epsilon: float = 1e-10):
-        """Compute posterior probabilities, filtering out samples with sentinel values"""
+        """Compute posterior probabilities based on selected model"""
+        if self.model_type == 'histogram':
+            if self.histogram_method == 'vectorized':
+                return self._compute_histogram_posterior_vectorized(features, epsilon)
+            else:
+                return self._compute_histogram_posterior_traditional(features, epsilon)
+        else:
+            return self._compute_gaussian_posterior(features, epsilon)
+
+    def _compute_gaussian_posterior(self, features: np.ndarray, epsilon: float = 1e-10):
+        """Compute posterior probabilities for Gaussian model"""
         SENTINEL_VALUE = -9999
 
         # Identify samples with sentinel values
@@ -723,7 +1055,7 @@ class GPUDBNN:
             valid_posteriors = likelihoods / (torch.sum(likelihoods, dim=1, keepdim=True) + epsilon)
 
             # Convert back to numpy and transpose to get (batch_size, n_classes)
-            valid_posteriors = self._to_numpy(valid_posteriors).T  # Added .T to transpose
+            valid_posteriors = self._to_numpy(valid_posteriors).T
 
         else:
             # CPU implementation with optimized loops
@@ -789,15 +1121,179 @@ class GPUDBNN:
 
         return full_posteriors
 
-    # ============Ensure all  data is on the same device =============
+    def _compute_histogram_posterior_traditional(self, features: np.ndarray, epsilon: float = 1e-10):
+        """Traditional histogram posterior computation (loop-based)"""
+        SENTINEL_VALUE = -9999
+
+        # Identify samples with sentinel values
+        sentinel_mask = np.any(features == SENTINEL_VALUE, axis=1)
+        valid_features = features[~sentinel_mask]
+
+        if len(valid_features) == 0:
+            n_classes = self.histograms.shape[2]
+            uniform_probs = np.ones((len(features), n_classes)) / n_classes
+            return uniform_probs
+
+        n_samples = len(valid_features)
+        n_features = valid_features.shape[1]
+        n_classes = self.histograms.shape[2]
+
+        # Initialize posteriors (traditional loop-based approach)
+        posteriors = np.ones((n_samples, n_classes))
+
+        for sample_idx in range(n_samples):
+            for feature_idx in range(n_features):
+                value = valid_features[sample_idx, feature_idx]
+
+                # Find which bin this value falls into
+                bin_idx = np.digitize(value, self.bin_edges[feature_idx]) - 1
+                bin_idx = np.clip(bin_idx, 0, self.histogram_bins - 1)
+
+                # Get probabilities for this bin across all classes
+                bin_probs = self.histograms[feature_idx, bin_idx, :]
+
+                # Apply weights and multiply into posterior
+                weighted_probs = bin_probs * self.current_W[:, feature_idx, bin_idx]
+                posteriors[sample_idx] *= weighted_probs
+
+        # Normalize posteriors
+        posteriors = posteriors / (np.sum(posteriors, axis=1, keepdims=True) + epsilon)
+
+        # Handle samples with sentinel values
+        full_posteriors = np.ones((len(features), n_classes)) / n_classes
+        full_posteriors[~sentinel_mask] = posteriors
+
+        return full_posteriors
+
+    def _compute_histogram_posterior_vectorized(self, features: np.ndarray, epsilon: float = 1e-10):
+        """Vectorized histogram posterior computation"""
+        SENTINEL_VALUE = -9999
+
+        # Identify samples with sentinel values
+        sentinel_mask = np.any(features == SENTINEL_VALUE, axis=1)
+        valid_features = features[~sentinel_mask]
+
+        if len(valid_features) == 0:
+            n_classes = self.histograms.shape[2]
+            uniform_probs = np.ones((len(features), n_classes)) / n_classes
+            return uniform_probs
+
+        n_samples = len(valid_features)
+        n_features = valid_features.shape[1]
+        n_classes = self.histograms.shape[2]
+
+        if self.use_gpu:
+            return self._compute_histogram_posterior_gpu(valid_features, n_samples, n_features, n_classes, epsilon, sentinel_mask, features)
+        else:
+            return self._compute_histogram_posterior_cpu_vectorized(valid_features, n_samples, n_features, n_classes, epsilon, sentinel_mask, features)
+
+    def _compute_histogram_posterior_cpu_vectorized(self, valid_features, n_samples, n_features, n_classes, epsilon, sentinel_mask, original_features):
+        """CPU-optimized vectorized posterior computation"""
+
+        # Vectorized bin assignment for all samples and features
+        bin_indices = np.zeros((n_samples, n_features), dtype=int)
+
+        for feature_idx in range(n_features):
+            bin_indices[:, feature_idx] = np.digitize(
+                valid_features[:, feature_idx],
+                self.bin_edges[feature_idx]
+            ) - 1
+            bin_indices[:, feature_idx] = np.clip(bin_indices[:, feature_idx], 0, self.histogram_bins - 1)
+
+        # Vectorized probability lookup using advanced indexing
+        posteriors = np.ones((n_samples, n_classes))
+
+        for class_idx in range(n_classes):
+            class_posterior = np.ones(n_samples)
+
+            for feature_idx in range(n_features):
+                # Get probabilities for all samples at once using advanced indexing
+                feature_probs = self.histograms[feature_idx, bin_indices[:, feature_idx], class_idx]
+                # Apply weights
+                weighted_probs = feature_probs * self.current_W[class_idx, feature_idx, bin_indices[:, feature_idx]]
+                class_posterior *= weighted_probs
+
+            posteriors[:, class_idx] = class_posterior
+
+        # Normalize posteriors
+        posteriors = posteriors / (np.sum(posteriors, axis=1, keepdims=True) + epsilon)
+
+        # Handle samples with sentinel values
+        full_posteriors = np.ones((len(original_features), n_classes)) / n_classes
+        full_posteriors[~sentinel_mask] = posteriors
+
+        return full_posteriors
+
+    def _compute_histogram_posterior_gpu(self, valid_features, n_samples, n_features, n_classes, epsilon, sentinel_mask, original_features):
+        """GPU-accelerated histogram posterior computation"""
+        try:
+            # Convert to tensors
+            features_tensor = self._to_tensor(valid_features)
+            histograms_tensor = self._to_tensor(self.histograms)
+            current_W_tensor = self._to_tensor(self.current_W)
+            bin_edges_tensor = self._to_tensor(self.bin_edges)
+
+            # Vectorized bin assignment on GPU
+            bin_indices = torch.zeros((n_samples, n_features), dtype=torch.long, device=self.device)
+
+            for feature_idx in range(n_features):
+                # Find bins using GPU-accelerated search
+                edges = bin_edges_tensor[feature_idx]
+                # Expand dimensions for broadcasting
+                features_expanded = features_tensor[:, feature_idx].unsqueeze(1)
+                edges_expanded = edges.unsqueeze(0)
+
+                # Find where feature values fall between bin edges
+                in_bin = (features_expanded >= edges_expanded[:, :-1]) & (features_expanded < edges_expanded[:, 1:])
+                bin_idx = torch.argmax(in_bin.int(), dim=1)
+                bin_indices[:, feature_idx] = bin_idx
+
+            # GPU-accelerated probability computation
+            posteriors = torch.ones((n_samples, n_classes), device=self.device)
+
+            for class_idx in range(n_classes):
+                class_posterior = torch.ones(n_samples, device=self.device)
+
+                for feature_idx in range(n_features):
+                    # Advanced indexing on GPU
+                    feature_probs = histograms_tensor[feature_idx, bin_indices[:, feature_idx], class_idx]
+                    weights = current_W_tensor[class_idx, feature_idx, bin_indices[:, feature_idx]]
+                    weighted_probs = feature_probs * weights
+                    class_posterior *= weighted_probs
+
+                posteriors[:, class_idx] = class_posterior
+
+            # Normalize on GPU
+            posteriors = posteriors / (torch.sum(posteriors, dim=1, keepdim=True) + epsilon)
+
+            # Convert back to numpy and handle sentinel values
+            valid_posteriors = self._to_numpy(posteriors)
+            full_posteriors = np.ones((len(original_features), n_classes)) / n_classes
+            full_posteriors[~sentinel_mask] = valid_posteriors
+
+            return full_posteriors
+
+        except Exception as e:
+            print(f"GPU computation failed, falling back to CPU: {e}")
+            return self._compute_histogram_posterior_cpu_vectorized(valid_features, n_samples, n_features, n_classes, epsilon, sentinel_mask, original_features)
+
     def _ensure_numpy(self, data):
         """Convert data to numpy array if it's a tensor"""
         if isinstance(data, torch.Tensor):
             return data.cpu().numpy()
         return data
-    # ============Ensure all  data is on the same device =============
 
     def _update_priors_parallel(self, failed_cases: List[Tuple], batch_size: int = 32):
+        """Update priors based on selected model type"""
+        if self.model_type == 'histogram':
+            if self.histogram_method == 'vectorized':
+                self._update_histogram_priors_vectorized(failed_cases, batch_size)
+            else:
+                self._update_histogram_priors_traditional(failed_cases, batch_size)
+        else:
+            self._update_gaussian_priors(failed_cases, batch_size)
+
+    def _update_gaussian_priors(self, failed_cases: List[Tuple], batch_size: int = 32):
         """Update priors ONLY for hypercubes that contributed to failures"""
         n_failed = len(failed_cases)
 
@@ -868,6 +1364,139 @@ class GPUDBNN:
 
             # Clip weights for stability after each batch
             self.current_W = np.clip(self.current_W, 1e-10, 10.0)
+
+    def _update_histogram_priors_traditional(self, failed_cases: List[Tuple], batch_size: int = 32):
+        """Traditional weight updates for histogram model"""
+        n_failed = len(failed_cases)
+        update_strategy = self.config.get('likelihood_config', {}).get('update_strategy', 3)
+
+        # Process failed cases in batches
+        for batch_start in range(0, n_failed, batch_size):
+            batch_end = min(batch_start + batch_size, n_failed)
+            batch_cases = failed_cases[batch_start:batch_end]
+
+            for features, true_class, posteriors in batch_cases:
+                predicted_class = np.argmax(posteriors)
+
+                if predicted_class == true_class:
+                    continue
+
+                # Calculate adjustment based on error magnitude
+                true_prob = posteriors[true_class]
+                predicted_prob = posteriors[predicted_class]
+                adjustment = self.learning_rate * (1 - true_prob / (predicted_prob + 1e-10))
+                adjustment = np.clip(adjustment, -0.5, 0.5)
+
+                # Update weights for each feature (traditional loop)
+                for feature_idx in range(len(features)):
+                    value = features[feature_idx]
+
+                    # Find bin for this feature value
+                    bin_idx = np.digitize(value, self.bin_edges[feature_idx]) - 1
+                    bin_idx = np.clip(bin_idx, 0, self.histogram_bins - 1)
+
+                    # Apply update strategy
+                    if update_strategy == 1:
+                        # Update all bins
+                        self.current_W[true_class, feature_idx, :] *= (1 + adjustment)
+                        self.current_W[predicted_class, feature_idx, :] *= (1 - adjustment)
+                    elif update_strategy == 2:
+                        # Update only the specific bin
+                        self.current_W[true_class, feature_idx, bin_idx] *= (1 + adjustment)
+                        self.current_W[predicted_class, feature_idx, bin_idx] *= (1 - adjustment)
+                    elif update_strategy == 3:
+                        # Update specific bin with different rates
+                        self.current_W[true_class, feature_idx, bin_idx] *= (1 + adjustment)
+                        self.current_W[predicted_class, feature_idx, bin_idx] *= (1 - adjustment * 0.5)
+                    elif update_strategy == 4:
+                        # Only decrease wrong class
+                        self.current_W[predicted_class, feature_idx, bin_idx] *= (1 - adjustment)
+
+                # Clip weights for stability
+                self.current_W = np.clip(self.current_W, 1e-10, 10.0)
+
+    def _update_histogram_priors_vectorized(self, failed_cases: List[Tuple], batch_size: int = 32):
+        """Vectorized weight updates for histogram model"""
+        n_failed = len(failed_cases)
+        update_strategy = self.config.get('likelihood_config', {}).get('update_strategy', 3)
+
+        # Use ThreadPoolExecutor for parallel processing
+        with ThreadPoolExecutor(max_workers=min(mp.cpu_count(), 32)) as executor:
+            # Process batches in parallel
+            futures = []
+            for batch_start in range(0, n_failed, batch_size):
+                batch_end = min(batch_start + batch_size, n_failed)
+                batch_cases = failed_cases[batch_start:batch_end]
+
+                future = executor.submit(self._process_batch_weight_updates_vectorized, batch_cases, update_strategy)
+                futures.append(future)
+
+            # Collect results
+            for future in futures:
+                future.result()
+
+    def _process_batch_weight_updates_vectorized(self, batch_cases, update_strategy):
+        """Process a batch of weight updates in vectorized manner"""
+        batch_updates = []
+
+        for features, true_class, posteriors in batch_cases:
+            predicted_class = np.argmax(posteriors)
+
+            if predicted_class == true_class:
+                continue
+
+            # Calculate adjustment
+            true_prob = posteriors[true_class]
+            predicted_prob = posteriors[predicted_class]
+            adjustment = self.learning_rate * (1 - true_prob / (predicted_prob + 1e-10))
+            adjustment = np.clip(adjustment, -0.5, 0.5)
+
+            # Collect updates for batch processing
+            for feature_idx in range(len(features)):
+                value = features[feature_idx]
+                bin_idx = np.digitize(value, self.bin_edges[feature_idx]) - 1
+                bin_idx = np.clip(bin_idx, 0, self.histogram_bins - 1)
+
+                batch_updates.append((true_class, predicted_class, feature_idx, bin_idx, adjustment, update_strategy))
+
+        # Apply all updates at once (vectorized)
+        if batch_updates:
+            self._apply_batch_weight_updates_vectorized(batch_updates)
+
+    def _apply_batch_weight_updates_vectorized(self, batch_updates):
+        """Apply weight updates in a vectorized manner"""
+        # Group updates by type for vectorized operations
+        true_class_indices = []
+        pred_class_indices = []
+        true_adjustments = []
+        pred_adjustments = []
+
+        for true_class, predicted_class, feature_idx, bin_idx, adjustment, update_strategy in batch_updates:
+            if update_strategy in [1, 2, 3]:
+                true_class_indices.append((true_class, feature_idx, bin_idx))
+                true_adjustments.append(adjustment)
+
+            if update_strategy in [1, 2, 3, 4]:
+                decay_adjustment = adjustment if update_strategy != 3 else adjustment * 0.5
+                pred_class_indices.append((predicted_class, feature_idx, bin_idx))
+                pred_adjustments.append(-decay_adjustment)
+
+        # Vectorized weight updates
+        if true_class_indices:
+            classes, features, bins = zip(*true_class_indices)
+            indices = (np.array(classes), np.array(features), np.array(bins))
+            adjustments_array = 1 + np.array(true_adjustments)
+            # Use advanced indexing to update only the required elements
+            self.current_W[indices] *= adjustments_array
+
+        if pred_class_indices:
+            classes, features, bins = zip(*pred_class_indices)
+            indices = (np.array(classes), np.array(features), np.array(bins))
+            adjustments_array = 1 + np.array(pred_adjustments)
+            self.current_W[indices] *= adjustments_array
+
+        # Clip weights
+        self.current_W = np.clip(self.current_W, 1e-10, 10.0)
 
     def _compute_batch_pair_log_likelihood_gpu(self, feature_groups, class_idx):
         """Compute log-likelihood for a batch of feature pairs and specific class on GPU"""
@@ -1120,16 +1749,22 @@ class GPUDBNN:
         self._save_best_weights()
 
     def _load_best_weights(self):
-        """Load the best weights from file including pruning information"""
+        """Load the best weights from file including pruning information and likelihood parameters"""
         weights_file = self._get_weights_filename()
+
+        print(f"Looking for weights file: {weights_file}")
 
         if os.path.exists(weights_file):
             with open(weights_file, 'r') as f:
                 weights_dict = json.load(f)
 
+            print(f"DEBUG: Loaded weights dict keys: {weights_dict.keys()}")
+
             # Check if dataset has changed (compare fingerprints)
             current_fingerprint = self._get_dataset_fingerprint(self.data)
             saved_fingerprint = weights_dict.get('dataset_fingerprint')
+            print(f"DEBUG: Current fingerprint: {current_fingerprint}")
+            print(f"DEBUG: Saved fingerprint: {saved_fingerprint}")
 
             if saved_fingerprint and saved_fingerprint != current_fingerprint:
                 print(f"Dataset has changed since last training. Reinitializing weights.")
@@ -1138,12 +1773,57 @@ class GPUDBNN:
 
             try:
                 version = weights_dict.get('version', 1)
+                print(f"DEBUG: Model version: {version}")
 
-                if version >= 3:
-                    # New format with pruning info
+                if version >= 5:
+                    # New format with likelihood parameters support
                     weights_array = np.array(weights_dict['weights'])
                     self.best_W = weights_array.astype(np.float32)
                     self.current_W = self.best_W.copy()
+
+                    print(f"DEBUG: Loaded weights shape: {self.best_W.shape}")
+                    print(f"DEBUG: Weights min/max: {np.min(self.best_W):.6f}, {np.max(self.best_W):.6f}")
+
+                    # Load model type information
+                    self.model_type = weights_dict.get('model_type', 'histogram')
+                    self.histogram_bins = weights_dict.get('histogram_bins', 64)
+                    self.histogram_method = weights_dict.get('histogram_method', 'vectorized')
+                    print(f"DEBUG: Model type: {self.model_type}, bins: {self.histogram_bins}")
+
+                    # Load likelihood parameters
+                    likelihood_params = weights_dict.get('likelihood_params', {})
+                    print(f"DEBUG: Likelihood params keys: {likelihood_params.keys()}")
+
+                    if self.model_type == 'histogram':
+                        if 'histograms' in likelihood_params:
+                            self.histograms = np.array(likelihood_params['histograms'])
+                            print(f"DEBUG: Loaded histograms shape: {self.histograms.shape}")
+                        if 'bin_edges' in likelihood_params:
+                            self.bin_edges = np.array(likelihood_params['bin_edges'])
+                            print(f"DEBUG: Loaded bin_edges shape: {self.bin_edges.shape}")
+                        if 'feature_min' in likelihood_params:
+                            self.feature_min = np.array(likelihood_params['feature_min'])
+                        if 'feature_max' in likelihood_params:
+                            self.feature_max = np.array(likelihood_params['feature_max'])
+
+                    # Load scaler
+                    if 'scaler_mean' in weights_dict and weights_dict['scaler_mean'] is not None:
+                        self.scaler.mean_ = np.array(weights_dict['scaler_mean'])
+                        print(f"DEBUG: Loaded scaler mean shape: {self.scaler.mean_.shape}")
+                    if 'scaler_scale' in weights_dict and weights_dict['scaler_scale'] is not None:
+                        self.scaler.scale_ = np.array(weights_dict['scaler_scale'])
+                        print(f"DEBUG: Loaded scaler scale shape: {self.scaler.scale_.shape}")
+
+                    # Load label encoder - FIXED: Use the original class labels
+                    if 'label_encoder_classes' in weights_dict and weights_dict['label_encoder_classes'] is not None:
+                        original_classes = np.array(weights_dict['label_encoder_classes'])
+                        print(f"DEBUG: Loaded original label classes: {original_classes}")
+
+                        # Fit the label encoder with the original classes
+                        self.label_encoder.fit(original_classes)
+                        print(f"DEBUG: Label encoder classes after fitting: {self.label_encoder.classes_}")
+                    else:
+                        print("DEBUG: WARNING - No label encoder classes found in saved model!")
 
                     # Load pruning information
                     pruning_info = weights_dict.get('pruning_info', {})
@@ -1151,19 +1831,34 @@ class GPUDBNN:
                         self.active_feature_mask = np.array(pruning_info['active_feature_mask'], dtype=bool)
                     if pruning_info.get('original_feature_indices'):
                         self.original_feature_indices = np.array(pruning_info['original_feature_indices'])
-                    if pruning_info.get('feature_pairs'):
-                        self.feature_pairs = np.array(pruning_info['feature_pairs'])
+                    if weights_dict.get('feature_pairs'):
+                        self.feature_pairs = np.array(weights_dict['feature_pairs'])
 
-                    # Load pruning parameters
-                    self.pruning_warmup_epochs = pruning_info.get('pruning_warmup_epochs', 3)
-                    self.pruning_threshold = pruning_info.get('pruning_threshold', 1e-6)
-                    self.pruning_aggressiveness = pruning_info.get('pruning_aggressiveness', 0.1)
+                    print(f"Loaded {self.model_type} model with complete state from {weights_file}")
 
-                    print(f"Loaded best weights and pruning info from {weights_file}")
-                    print(f"Model has {len(self.feature_pairs)} feature pairs after pruning")
+                elif version >= 4:
+                    # Old format without likelihood parameters - need to compute them
+                    weights_array = np.array(weights_dict['weights'])
+                    self.best_W = weights_array.astype(np.float32)
+                    self.current_W = self.best_W.copy()
 
-                elif version == 2:
-                    # Old format without pruning info
+                    # Load model type information
+                    self.model_type = weights_dict.get('model_type', 'histogram')
+                    self.histogram_bins = weights_dict.get('histogram_bins', 64)
+                    self.histogram_method = weights_dict.get('histogram_method', 'vectorized')
+
+                    print(f"Loaded {self.model_type} model weights from {weights_file} (version 4 - no likelihood params)")
+                    print("Note: This model file is missing likelihood parameters. Consider retraining to save complete model state.")
+
+                    # Load label encoder for version 4
+                    if 'label_encoder_classes' in weights_dict and weights_dict['label_encoder_classes'] is not None:
+                        original_classes = np.array(weights_dict['label_encoder_classes'])
+                        print(f"DEBUG: Loaded original label classes: {original_classes}")
+                        self.label_encoder.fit(original_classes)
+                        print(f"DEBUG: Label encoder classes after fitting: {self.label_encoder.classes_}")
+
+                elif version == 3:
+                    # Old format without model type info
                     weights_array = np.array(weights_dict['weights'])
                     self.best_W = weights_array.astype(np.float32)
                     self.current_W = self.best_W.copy()
@@ -1172,7 +1867,10 @@ class GPUDBNN:
                     n_classes, n_pairs = self.best_W.shape
                     self._initialize_pruning_structures(n_pairs)
 
-                    print(f"Loaded best weights from {weights_file} (no pruning info)")
+                    print(f"Loaded best weights from {weights_file} (no model type info)")
+
+                    # For version 3, we need to infer label encoder from the data
+                    print("Version 3 model - label encoder will be inferred from current data")
 
                 else:
                     # Very old format conversion
@@ -1200,37 +1898,94 @@ class GPUDBNN:
                     self._initialize_pruning_structures(n_pairs)
 
                     print(f"Loaded best weights from {weights_file} (converted from old format)")
+                    print("Old format model - label encoder will be inferred from current data")
 
                 # For loaded weights, we can't track initial values, so disable pruning
                 self.initial_W = None
-                self.pruning_warmup_epochs = 0  # Disable pruning for pre-trained models
+                self.pruning_warmup_epochs = 0
 
             except Exception as e:
                 print(f"Warning: Could not load weights from {weights_file}: {str(e)}")
+                import traceback
+                traceback.print_exc()
                 print("Reinitializing weights...")
                 self.best_W = None
                 self.current_W = None
+        else:
+            print(f"Weights file {weights_file} not found. Model needs to be trained first.")
+            self.best_W = None
+            self.current_W = None
 
     def _save_best_weights(self):
-        """Save the best weights to file with pruning information"""
+        """Save the best weights to file with pruning information and likelihood parameters"""
         if self.best_W is not None:
+            # Handle None values for pruning structures
+            active_mask = None
+            original_indices = None
+            feature_pairs_list = None
+
+            if hasattr(self, 'active_feature_mask') and self.active_feature_mask is not None:
+                active_mask = self.active_feature_mask.tolist()
+
+            if hasattr(self, 'original_feature_indices') and self.original_feature_indices is not None:
+                original_indices = self.original_feature_indices.tolist()
+
+            if hasattr(self, 'feature_pairs') and self.feature_pairs is not None:
+                feature_pairs_list = self.feature_pairs.tolist()
+
+            # Prepare likelihood parameters for saving
+            likelihood_params = {}
+            if self.model_type == 'histogram':
+                if self.histograms is not None:
+                    likelihood_params['histograms'] = self.histograms.tolist()
+                if self.bin_edges is not None:
+                    likelihood_params['bin_edges'] = self.bin_edges.tolist()
+                if self.feature_min is not None:
+                    likelihood_params['feature_min'] = self.feature_min.tolist()
+                if self.feature_max is not None:
+                    likelihood_params['feature_max'] = self.feature_max.tolist()
+            else:  # gaussian
+                if self.likelihood_params is not None:
+                    # Convert tensors to numpy for saving
+                    likelihood_params = {
+                        'means': self._to_numpy(self.likelihood_params['means']).tolist() if self.use_gpu else self.likelihood_params['means'].tolist(),
+                        'covs': self._to_numpy(self.likelihood_params['covs']).tolist() if self.use_gpu else self.likelihood_params['covs'].tolist(),
+                        'classes': self._to_numpy(self.likelihood_params['classes']).tolist() if self.use_gpu else self.likelihood_params['classes'].tolist(),
+                        'inv_covs': self._to_numpy(self.likelihood_params['inv_covs']).tolist() if self.use_gpu else self.likelihood_params['inv_covs'].tolist()
+                    }
+
+            # Save the ORIGINAL label classes, not the encoded ones
+            original_classes = None
+            if hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
+                original_classes = self.label_encoder.classes_.tolist()
+                print(f"DEBUG: Saving original label classes: {original_classes}")
+
             weights_dict = {
-                'version': 3,  # Increment version to include pruning info
+                'version': 5,
                 'weights': self.best_W.tolist(),
                 'shape': list(self.best_W.shape),
                 'dataset_fingerprint': self._get_dataset_fingerprint(self.data),
+                'model_type': self.model_type,
+                'histogram_bins': self.histogram_bins if self.model_type == 'histogram' else None,
+                'histogram_method': self.histogram_method if self.model_type == 'histogram' else None,
+                'feature_pairs': feature_pairs_list,
+                'likelihood_params': likelihood_params,
                 'pruning_info': {
-                    'active_feature_mask': self.active_feature_mask.tolist() if hasattr(self, 'active_feature_mask') else None,
-                    'original_feature_indices': self.original_feature_indices.tolist() if hasattr(self, 'original_feature_indices') else None,
-                    'feature_pairs': self.feature_pairs.tolist() if self.feature_pairs is not None else None,
+                    'active_feature_mask': active_mask,
+                    'original_feature_indices': original_indices,
                     'pruning_warmup_epochs': self.pruning_warmup_epochs,
                     'pruning_threshold': self.pruning_threshold,
                     'pruning_aggressiveness': self.pruning_aggressiveness
-                }
+                },
+                'scaler_mean': self.scaler.mean_.tolist() if hasattr(self.scaler, 'mean_') and self.scaler.mean_ is not None else None,
+                'scaler_scale': self.scaler.scale_.tolist() if hasattr(self.scaler, 'scale_') and self.scaler.scale_ is not None else None,
+                'label_encoder_classes': original_classes  # Save the original class labels
             }
 
             with open(self._get_weights_filename(), 'w') as f:
-                json.dump(weights_dict, f)
+                json.dump(weights_dict, f, indent=4)
+
+            print(f"Saved complete model state to {self._get_weights_filename()}")
 
     def _load_categorical_encoders(self):
         """Load categorical encoders if available"""
@@ -1258,7 +2013,6 @@ class GPUDBNN:
 
     def _initialize_weights(self):
         """Initialize weights based on number of classes and feature combinations"""
-        # This will be properly initialized after computing likelihood parameters
         self.current_W = None
         self.best_W = None
 
@@ -1286,100 +2040,109 @@ class GPUDBNN:
         """Prepare training and test data"""
         # Encode categorical features
         df_encoded = self._encode_categorical_features(self.data)
+        print(f"DEBUG: Data shape after encoding: {df_encoded.shape}")
+
+        # Check if target column exists in the data
+        target_exists = False
+        if isinstance(self.target_column, int):
+            target_exists = self.target_column < len(df_encoded.columns)
+        else:
+            target_exists = self.target_column in df_encoded.columns
+
+        print(f"DEBUG: Target column '{self.target_column}' exists: {target_exists}")
 
         # Separate features and target
-        if isinstance(self.target_column, int):
-            X = df_encoded.drop(df_encoded.columns[self.target_column], axis=1).values
-            y = df_encoded.iloc[:, self.target_column].values
+        if target_exists:
+            if isinstance(self.target_column, int):
+                X = df_encoded.drop(df_encoded.columns[self.target_column], axis=1).values
+                y = df_encoded.iloc[:, self.target_column].values
+            else:
+                X = df_encoded.drop(self.target_column, axis=1).values
+                y = df_encoded[self.target_column].values
+            print(f"DEBUG: X shape: {X.shape}, y shape: {y.shape}")
+            print(f"DEBUG: Unique y values (raw): {np.unique(y)}")
         else:
-            X = df_encoded.drop(self.target_column, axis=1).values
-            y = df_encoded[self.target_column].values
+            # Target column doesn't exist - use all columns as features
+            X = df_encoded.values
+            y = None
+            print(f"DEBUG: Using all columns as features, X shape: {X.shape}")
 
         # Filter out samples with sentinel values
-        X, y = self._filter_sentinel_samples(X, y)
+        if y is not None:
+            X, y = self._filter_sentinel_samples(X, y)
+        else:
+            X, _ = self._filter_sentinel_samples(X, None)
 
-        # Encode target labels
-        y_encoded = self.label_encoder.fit_transform(y)
+        # FIX: Don't reset scaler and label encoder if we have loaded weights
+        weights_loaded = (self.best_W is not None and
+                         hasattr(self, 'scaler') and
+                         hasattr(self.scaler, 'mean_') and
+                         self.scaler.mean_ is not None)
 
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y_encoded, test_size=self.test_size, random_state=self.random_state
-        )
+        if weights_loaded and not self.train_enabled:
+            # Use pre-loaded scaler and label encoder for prediction
+            print("DEBUG: Using pre-loaded scaler and label encoder for prediction")
+            X_scaled = self.scaler.transform(X)
+
+            # Encode y using the pre-trained label encoder
+            if y is not None:
+                # Only encode classes that exist in the pre-trained encoder
+                valid_mask = np.isin(y, self.label_encoder.classes_)
+                y_encoded = np.full_like(y, -1, dtype=int)  # Use -1 for unknown classes
+                y_encoded[valid_mask] = self.label_encoder.transform(y[valid_mask])
+                print(f"DEBUG: Encoded y using pre-trained label encoder")
+            else:
+                y_encoded = None
+
+            # In predict-only mode, return all data
+            if not self.train_enabled and self.predict_enabled:
+                return X_scaled, None, y_encoded, y
+
+            # For training with loaded weights, still need train/test split
+            X_train, X_test, y_train, y_test = train_test_split(
+                X_scaled, y_encoded, test_size=self.test_size, random_state=self.random_state
+            )
+            return X_train, X_test, y_train, y_test
+
+        # Original training logic (only used when no weights are loaded or fresh training)
+        print("DEBUG: Training mode - creating fresh scaler and label encoder")
+        self.scaler = StandardScaler()
+
+        if y is not None:
+            self.label_encoder = LabelEncoder()
+            y_encoded = self.label_encoder.fit_transform(y)
+            print(f"DEBUG: Label encoder classes after fitting: {self.label_encoder.classes_}")
+            print(f"DEBUG: y_encoded unique values: {np.unique(y_encoded)}")
+        else:
+            y_encoded = None
+
+        # Split data only if we have target values
+        if y_encoded is not None:
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y_encoded, test_size=self.test_size, random_state=self.random_state
+            )
+            print(f"DEBUG: Train/test split - X_train: {X_train.shape}, X_test: {X_test.shape}")
+            print(f"DEBUG: y_train unique: {np.unique(y_train)}, y_test unique: {np.unique(y_test)}")
+        else:
+            X_train, X_test, y_train, y_test = X, X, None, None
+            print("DEBUG: No target values - using all data for both train and test")
 
         # Scale features
         X_train_scaled = self.scaler.fit_transform(X_train)
-        X_test_scaled = self.scaler.transform(X_test)
+        print(f"DEBUG: Fitted scaler on training data, mean shape: {self.scaler.mean_.shape}")
+
+        if X_test is not None:
+            X_test_scaled = self.scaler.transform(X_test)
+        else:
+            X_test_scaled = None
 
         return X_train_scaled, X_test_scaled, y_train, y_test
 
-    def _compute_likelihood_parameters(self, X_train: np.ndarray, y_train: np.ndarray):
-        """Compute likelihood parameters for all feature pairs"""
-        print("Computing likelihood parameters...")
-
-        # Get likelihood configuration
-        group_size = self.config.get('likelihood_config', {}).get('feature_group_size', 2)
-        max_combinations = self.config.get('likelihood_config', {}).get('max_combinations', None)
-
-        # Generate feature combinations
-        self.feature_pairs = self._generate_feature_combinations(
-            X_train.shape[1],
-            group_size,
-            max_combinations
-        )
-
-        # Compute likelihood parameters
-        self.likelihood_params = self._compute_pairwise_likelihood_parallel(
-            X_train, y_train, X_train.shape[1]
-        )
-
-        # Precompute inverse covariance matrices for faster prediction
-        if self.use_gpu:
-            covs = self.likelihood_params['covs']
-            n_classes, n_combinations, _, _ = covs.shape
-            eye = torch.eye(group_size, device=self.device)
-
-            # Initialize inv_covs with proper shape
-            inv_covs = torch.zeros_like(covs)
-
-            for class_idx in range(n_classes):
-                for comb_idx in range(n_combinations):
-                    inv_covs[class_idx, comb_idx] = torch.linalg.inv(
-                        covs[class_idx, comb_idx] + eye * 1e-6
-                    )
-
-            self.likelihood_params['inv_covs'] = inv_covs
-        else:
-            covs = self.likelihood_params['covs']
-            n_classes, n_combinations, _, _ = covs.shape
-            inv_covs = np.zeros_like(covs)
-            for class_idx in range(n_classes):
-                for comb_idx in range(n_combinations):
-                    inv_covs[class_idx, comb_idx] = np.linalg.inv(
-                        covs[class_idx, comb_idx] + np.eye(group_size) * 1e-6
-                    )
-            self.likelihood_params['inv_covs'] = inv_covs
-
-        # Initialize weights if not already loaded
-        if self.current_W is None:
-            n_classes = len(self.likelihood_params['classes'])
-            n_combinations = len(self.feature_pairs)
-            self.current_W = np.ones((n_classes, n_combinations)) / n_classes
-            self.best_W = self.current_W.copy()
-            self.initial_W = self.current_W.copy()  # Store initial weights for pruning
-
-            # Initialize pruning structures
-            self._initialize_pruning_structures(n_combinations)
-
-        print(f"Computed likelihood parameters for {len(self.feature_pairs)} feature combinations")
-
-
     def _prune_stagnant_connections(self, epoch: int):
         """Prune connections that haven't changed significantly from initial values"""
-        # Early return if pruning is disabled
-        if self.pruning_warmup_epochs == 0:
-            return
-
-        if (epoch <= self.pruning_warmup_epochs or
+        if (self.pruning_warmup_epochs == 0 or
+            self.model_type == 'histogram' or
+            epoch <= self.pruning_warmup_epochs or
             self.initial_W is None or
             self.current_W is None or
             self.initial_W.shape != self.current_W.shape):
@@ -1399,7 +2162,7 @@ class GPUDBNN:
         n_to_prune = int(n_stagnant * self.pruning_aggressiveness)
 
         # Ensure we don't prune all connections
-        min_connections = max(5, int(self.current_W.shape[1] * 0.1))  # Keep at least 10% or 5 connections
+        min_connections = max(5, int(self.current_W.shape[1] * 0.1))
         if (self.current_W.shape[1] - n_to_prune) < min_connections:
             n_to_prune = max(0, self.current_W.shape[1] - min_connections)
 
@@ -1432,7 +2195,27 @@ class GPUDBNN:
         # Prepare data
         X_train, X_test, y_train, y_test = self._prepare_data()
 
-        # Compute likelihood parameters
+        # Verify label encoder state
+        print(f"DEBUG: Before training - Label encoder classes: {self.label_encoder.classes_}")
+        print(f"DEBUG: Before training - y_train unique: {np.unique(y_train) if y_train is not None else 'None'}")
+        print(f"DEBUG: Before training - y_test unique: {np.unique(y_test) if y_test is not None else 'None'}")
+
+        # Set up visualization
+        if self.visualization_enabled and self.visualizer is not None:
+            # Get class names from label encoder
+            class_names = [str(cls) for cls in self.label_encoder.classes_]
+
+            # Set data context for meaningful visualizations
+            self.visualizer.set_data_context(
+                X_train=X_train,
+                y_train=y_train,
+                feature_names=[f'Feature_{i}' for i in range(X_train.shape[1])],
+                class_names=class_names
+            )
+
+            print("Visualization system configured with data context")
+
+        # Compute likelihood parameters based on selected model
         self._compute_likelihood_parameters(X_train, y_train)
 
         # Convert to appropriate format based on device
@@ -1454,10 +2237,15 @@ class GPUDBNN:
         if not nokbd:
             self._setup_keyboard_control()
 
+        # Use tqdm for progress bar
+        from tqdm import trange
+        progress_bar = trange(self.max_epochs, desc="Training")
+
         try:
-            for epoch in range(self.max_epochs):
-                # Prune stagnant connections
-                self._prune_stagnant_connections(epoch)
+            for epoch in progress_bar:
+                # Prune stagnant connections (only for Gaussian model)
+                if self.model_type == 'gaussian':
+                    self._prune_stagnant_connections(epoch)
 
                 # Compute posteriors for training set
                 train_posteriors = self._compute_batch_posterior(
@@ -1466,17 +2254,25 @@ class GPUDBNN:
 
                 # Compute training error and accuracy
                 train_predictions = np.argmax(train_posteriors, axis=1)
-                train_error = 1 - accuracy_score(
-                    self._ensure_numpy(y_train) if self.use_gpu else y_train,
-                    train_predictions
-                )
-                train_accuracy = accuracy_score(
-                    self._ensure_numpy(y_train) if self.use_gpu else y_train,
-                    train_predictions
-                )
+                y_train_numpy = self._ensure_numpy(y_train) if self.use_gpu else y_train
+
+                train_error = 1 - accuracy_score(y_train_numpy, train_predictions)
+                train_accuracy = accuracy_score(y_train_numpy, train_predictions)
 
                 training_errors.append(train_error)
                 training_accuracies.append(train_accuracy)
+
+                # Create visualizations
+                if (self.visualization_enabled and self.visualizer is not None
+                    and self.current_W is not None):
+
+                    # Create interactive prior distribution visualization
+                    if epoch % 10 == 0:
+                        self.visualizer.create_interactive_prior_distribution(epoch, self.current_W)
+
+                    # Create feature space visualization less frequently
+                    if epoch % 25 == 0:
+                        self.visualizer.create_interactive_feature_space_3d(epoch)
 
                 # Compute test error and accuracy if not train_only
                 if not self.train_only:
@@ -1484,20 +2280,17 @@ class GPUDBNN:
                         self._ensure_numpy(X_test) if self.use_gpu else X_test
                     )
                     test_predictions = np.argmax(test_posteriors, axis=1)
-                    test_error = 1 - accuracy_score(
-                        self._ensure_numpy(y_test) if self.use_gpu else y_test,
-                        test_predictions
-                    )
-                    test_accuracy = accuracy_score(
-                        self._ensure_numpy(y_test) if self.use_gpu else y_test,
-                        test_predictions
-                    )
+                    y_test_numpy = self._ensure_numpy(y_test) if self.use_gpu else y_test
+
+                    test_error = 1 - accuracy_score(y_test_numpy, test_predictions)
+                    test_accuracy = accuracy_score(y_test_numpy, test_predictions)
 
                     test_errors.append(test_error)
                     test_accuracies.append(test_accuracy)
 
                     # Check for improvement
                     if test_error < self.best_error:
+                        print(f"Test accuracy improved from {self.best_accuracy:.4f} to {test_accuracy:.4f}")
                         self.best_error = test_error
                         self.best_accuracy = test_accuracy
                         self.best_W = self.current_W.copy()
@@ -1512,14 +2305,21 @@ class GPUDBNN:
                         print(f"Early stopping at epoch {epoch}")
                         break
 
-                    # Print progress
-                    if epoch % 10 == 0:
-                        print(f"Epoch {epoch}: Train Error={train_error:.4f}, "
-                              f"Test Error={test_error:.4f}, Best Test Error={self.best_error:.4f}")
+                    # Update progress bar
+                    progress_bar.set_postfix({
+                        'Train Acc': f'{train_accuracy:.4f}',
+                        'Test Acc': f'{test_accuracy:.4f}',
+                        'Best Acc': f'{self.best_accuracy:.4f}',
+                        'No Improve': trials_without_improvement
+                    })
                 else:
+                    print()
+                    print('=='*60)
+                    print("In train only mode")
+                    print('=='*60)
                     # For train_only mode, just track training performance
-                    if train_error < self.best_error:
-                        self.best_error = train_error
+                    if self.best_accuracy < train_accuracy:
+                        self.best_error = 1 - train_error
                         self.best_accuracy = train_accuracy
                         self.best_W = self.current_W.copy()
                         best_epoch = epoch
@@ -1533,27 +2333,28 @@ class GPUDBNN:
                         print(f"Early stopping at epoch {epoch}")
                         break
 
-                    # Print progress
-                    if epoch % 10 == 0:
-                        print(f"Epoch {epoch}: Train Error={train_error:.4f}, "
-                              f"Best Train Error={self.best_error:.4f}")
+                    # Update progress bar
+                    progress_bar.set_postfix({
+                        'Train Acc': f'{train_accuracy:.4f}',
+                        'Best Acc': f'{self.best_accuracy:.4f}',
+                        'No Improve': trials_without_improvement
+                    })
 
                 # Identify misclassified samples
-                misclassified_indices = np.where(
-                    train_predictions != (self._ensure_numpy(y_train) if self.use_gpu else y_train)
-                )[0]
+                misclassified_indices = np.where(train_predictions != y_train_numpy)[0]
 
                 if len(misclassified_indices) > 0:
                     # Collect failed cases
                     failed_cases = []
-                    for idx in misclassified_indices[:100]:  # Limit to avoid memory issues
+                    batch_size = 1000 if self.histogram_method == 'vectorized' else 100
+                    for idx in misclassified_indices[:batch_size]:
                         features = (X_train[idx].cpu().numpy() if self.use_gpu else X_train[idx])
                         true_class = (y_train[idx].cpu().item() if self.use_gpu else y_train[idx])
                         posteriors = train_posteriors[idx]
                         failed_cases.append((features, true_class, posteriors))
 
                     # Update priors based on failed cases
-                    self._update_priors_parallel(failed_cases)
+                    self._update_priors_parallel(failed_cases, batch_size=100)
 
                 # Check for keyboard interrupt
                 if not nokbd and self.skip_training:
@@ -1566,13 +2367,20 @@ class GPUDBNN:
         finally:
             if not nokbd:
                 self._cleanup_keyboard_control()
+            progress_bar.close()
 
         # Restore best weights
         self.current_W = self.best_W.copy()
 
         print(f"Training completed. Best epoch: {best_epoch}")
-        print(f"Best training error: {self.best_error:.4f}")
-        print(f"Best training accuracy: {self.best_accuracy:.4f}")
+        print(f"Best Test error: {self.best_error:.4f}")
+        print(f"Best Test accuracy: {self.best_accuracy:.4f}")
+
+        # Finalize all visualizations after training
+        if self.visualization_enabled and self.visualizer is not None:
+            self.visualizer.finalize_visualizations(
+                self.current_W, training_errors, training_accuracies
+            )
 
         # Save categorical encoders
         self._save_categorical_encoders()
@@ -1589,7 +2397,7 @@ class GPUDBNN:
             try:
                 if key.char == 'q':
                     self.skip_training = True
-                    return False  # Stop listener
+                    return False
             except AttributeError:
                 pass
 
@@ -1637,49 +2445,164 @@ class GPUDBNN:
             print("Prediction is disabled in configuration")
             return None
 
+        # Ensure model is properly initialized for prediction
+        if (self.model_type == 'histogram' and self.histograms is None) or \
+           (self.model_type == 'gaussian' and self.likelihood_params is None):
+            print("Initializing model for prediction...")
+            self._load_best_weights()
+
         if X is None:
-            # Use test data for evaluation
+            # Use available data for evaluation
             X_train, X_test, y_train, y_test = self._prepare_data()
 
-            if self.use_gpu:
-                X_test_tensor = self._to_tensor(X_test)
-                test_posteriors = self._compute_batch_posterior(
-                    self._ensure_numpy(X_test_tensor) if self.use_gpu else X_test
-                )
-                test_predictions = np.argmax(test_posteriors, axis=1)
-                y_test_numpy = self._ensure_numpy(y_test) if self.use_gpu else y_test
+            # In predict-only mode, we use all available data for prediction
+            if not self.train_enabled and self.predict_enabled:
+                X_pred = X_train
+                y_true = y_train if y_train is not None else None
+                print(f"DEBUG: Predict mode - X_pred shape: {X_pred.shape}, y_true: {y_true is not None}")
             else:
-                test_posteriors = self._compute_batch_posterior(X_test)
-                test_predictions = np.argmax(test_posteriors, axis=1)
-                y_test_numpy = y_test
+                X_pred = X_test
+                y_true = y_test
 
-            # Calculate and print metrics
-            accuracy = accuracy_score(y_test_numpy, test_predictions)
-            print(f"Test Accuracy: {accuracy:.4f}")
+            # Make predictions
+            predictions_posteriors = self._compute_batch_posterior(X_pred)
+            predictions = np.argmax(predictions_posteriors, axis=1)
 
-            # Classification report - convert numeric class labels to strings
-            target_names = [str(cls) for cls in self.label_encoder.classes_]
-            print("\nClassification Report:")
-            print(classification_report(y_test_numpy, test_predictions,
-                                      target_names=target_names))
+            # DEBUG: Check prediction distribution
+            print(f"DEBUG: Prediction distribution (encoded):")
+            unique_preds, pred_counts = np.unique(predictions, return_counts=True)
+            for pred, count in zip(unique_preds, pred_counts):
+                try:
+                    class_name = self.label_encoder.inverse_transform([pred])[0]
+                    print(f"  Class {pred} ({class_name}): {count} predictions ({count/len(predictions)*100:.2f}%)")
+                except ValueError:
+                    print(f"  Class {pred} (unknown): {count} predictions ({count/len(predictions)*100:.2f}%)")
 
-            # Confusion matrix
-            cm = confusion_matrix(y_test_numpy, test_predictions)
-            plt.figure(figsize=(8, 6))
-            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                       xticklabels=target_names,
-                       yticklabels=target_names)
-            plt.title('Confusion Matrix')
-            plt.ylabel('True Label')
-            plt.xlabel('Predicted Label')
-            plt.tight_layout()
-            plt.savefig(f'{self.dataset_name}_confusion_matrix.png')
-            plt.close()
+            print(f"DEBUG: Posterior probabilities shape: {predictions_posteriors.shape}")
+            print(f"DEBUG: Posterior range: [{np.min(predictions_posteriors):.6f}, {np.max(predictions_posteriors):.6f}]")
 
-            return test_predictions
+            # Calculate and print metrics only if we have true labels
+            if y_true is not None:
+                # FIXED: y_true contains ENCODED values, predictions contain ENCODED values
+                # We can calculate accuracy directly using encoded values since they're in the same space
+                print(f"DEBUG: Unique true classes (encoded): {np.unique(y_true)}")
+                print(f"DEBUG: Label encoder classes (original): {self.label_encoder.classes_}")
+                print(f"DEBUG: Unique predictions (encoded): {np.unique(predictions)}")
+
+                # Calculate accuracy using encoded values (they're in the same space)
+                accuracy = accuracy_score(y_true, predictions)
+                print(f"\n{'='*60}")
+                print(f"PREDICTION RESULTS WITH GROUND TRUTH VALIDATION")
+                print(f"{'='*60}")
+                print(f"Dataset size: {len(predictions)} samples")
+                print(f"Overall Accuracy: {accuracy:.4f}")
+
+                # Calculate per-class metrics using encoded values
+                print(f"\nPer-class performance:")
+                unique_true_encoded = np.unique(y_true)
+                for class_encoded in unique_true_encoded:
+                    class_mask = (y_true == class_encoded)
+                    if np.sum(class_mask) > 0:
+                        class_accuracy = accuracy_score(y_true[class_mask], predictions[class_mask])
+                        try:
+                            # Convert encoded class back to original class name for display
+                            class_name = self.label_encoder.inverse_transform([class_encoded])[0]
+                        except ValueError:
+                            class_name = f"Class_{class_encoded}(unseen)"
+                        print(f"  {class_name}: {np.sum(class_mask)} samples, Accuracy: {class_accuracy:.4f}")
+
+                # Classification report - use encoded values with original class names
+                try:
+                    # Get all unique classes that appear in both true and predicted labels
+                    all_classes = np.union1d(np.unique(y_true), np.unique(predictions))
+                    target_names = []
+                    valid_classes = []
+
+                    for cls in all_classes:
+                        try:
+                            class_name = self.label_encoder.inverse_transform([cls])[0]
+                            target_names.append(str(class_name))
+                            valid_classes.append(cls)
+                        except ValueError:
+                            # Skip classes that can't be decoded (shouldn't happen in normal case)
+                            continue
+
+                    if len(valid_classes) > 0:
+                        print(f"\nDetailed Classification Report:")
+                        print(classification_report(y_true, predictions,
+                                                  labels=valid_classes,
+                                                  target_names=target_names, digits=4))
+
+                        # Confusion matrix
+                        cm = confusion_matrix(y_true, predictions, labels=valid_classes)
+                        plt.figure(figsize=(10, 8))
+                        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                                   xticklabels=target_names,
+                                   yticklabels=target_names)
+                        plt.title(f'Confusion Matrix - {self.dataset_name}')
+                        plt.ylabel('True Label')
+                        plt.xlabel('Predicted Label')
+                        plt.tight_layout()
+                        plt.savefig(f'{self.dataset_name}_confusion_matrix.png', dpi=300, bbox_inches='tight')
+                        plt.close()
+                        print(f"Confusion matrix saved to {self.dataset_name}_confusion_matrix.png")
+
+                except Exception as e:
+                    print(f"Warning: Could not generate classification report: {e}")
+
+                # Save detailed predictions with probabilities
+                try:
+                    # Convert encoded true labels back to original names
+                    decoded_true_labels = self.label_encoder.inverse_transform(y_true)
+                    decoded_predictions = self.label_encoder.inverse_transform(predictions)
+
+                    predictions_df = pd.DataFrame({
+                        'true_label': decoded_true_labels,
+                        'predicted_label': decoded_predictions,
+                        'correct': (y_true == predictions)  # Use encoded values for correctness
+                    })
+
+                    # Add probability columns for each class
+                    trained_class_names = self.label_encoder.classes_
+                    for i, class_name in enumerate(trained_class_names):
+                        if i < predictions_posteriors.shape[1]:
+                            predictions_df[f'prob_{class_name}'] = predictions_posteriors[:, i]
+
+                    predictions_df.to_csv(f'{self.dataset_name}_detailed_predictions.csv', index=False)
+                    print(f"Detailed predictions saved to {self.dataset_name}_detailed_predictions.csv")
+
+                except Exception as e:
+                    print(f"Warning: Could not save detailed predictions: {e}")
+                    # Fallback: save with encoded values
+                    predictions_df = pd.DataFrame({
+                        'true_label_encoded': y_true,
+                        'predicted_label_encoded': predictions,
+                        'correct': (y_true == predictions)
+                    })
+                    predictions_df.to_csv(f'{self.dataset_name}_detailed_predictions_encoded.csv', index=False)
+
+            else:
+                # No ground truth available - just save predictions
+                print(f"Made predictions on {len(predictions)} samples")
+
+                # Save predictions to file
+                decoded_predictions = self.label_encoder.inverse_transform(predictions)
+                predictions_df = pd.DataFrame({
+                    'predicted_label': decoded_predictions
+                })
+
+                # Add probability columns if available
+                if predictions_posteriors is not None:
+                    for i, class_name in enumerate(self.label_encoder.classes_):
+                        predictions_df[f'prob_{class_name}'] = predictions_posteriors[:, i]
+
+                predictions_df.to_csv(f'{self.dataset_name}_predictions.csv', index=False)
+                print(f"Predictions saved to {self.dataset_name}_predictions.csv")
+
+            return predictions
 
         else:
-            # Predict on new data
+            # Predict on new external data
             # Handle missing values
             X_clean = self._handle_missing_values(pd.DataFrame(X))
 
@@ -1688,7 +2611,7 @@ class GPUDBNN:
                 if column in self.categorical_encoders:
                     X_clean[column] = self.categorical_encoders[column].transform(X_clean[column])
 
-            # Scale features
+            # Scale features using the pre-trained scaler
             X_scaled = self.scaler.transform(X_clean.values)
 
             # Filter out samples with sentinel values
@@ -1701,7 +2624,20 @@ class GPUDBNN:
             # Decode predictions
             decoded_predictions = self.label_encoder.inverse_transform(predictions)
 
+            # Save external predictions with probabilities
+            predictions_df = pd.DataFrame({
+                'predicted_label': decoded_predictions
+            })
+
+            # Add probability columns
+            for i, class_name in enumerate(self.label_encoder.classes_):
+                predictions_df[f'prob_{class_name}'] = posteriors[:, i]
+
+            predictions_df.to_csv(f'{self.dataset_name}_external_predictions.csv', index=False)
+            print(f"External predictions saved to {self.dataset_name}_external_predictions.csv")
+
             return decoded_predictions
+
     def generate_samples(self, n_samples: int = 100, class_id: int = None):
         """Generate synthetic samples"""
         if not self.gen_samples_enabled:
@@ -1710,6 +2646,13 @@ class GPUDBNN:
 
         print(f"Generating {n_samples} synthetic samples...")
 
+        if self.model_type == 'histogram':
+            return self._generate_histogram_samples(n_samples, class_id)
+        else:
+            return self._generate_gaussian_samples(n_samples, class_id)
+
+    def _generate_gaussian_samples(self, n_samples: int = 100, class_id: int = None):
+        """Generate synthetic samples using Gaussian model"""
         # Get likelihood parameters
         means = self.likelihood_params['means']
         covs = self.likelihood_params['covs']
@@ -1756,6 +2699,44 @@ class GPUDBNN:
 
         return samples_original, class_ids
 
+    def _generate_histogram_samples(self, n_samples: int = 100, class_id: int = None):
+        """Generate synthetic samples using histogram model"""
+        n_features = self.histograms.shape[0]
+        n_classes = self.histograms.shape[2]
+
+        if class_id is None:
+            # Generate samples from all classes proportionally
+            class_probs = np.sum(self.current_W, axis=(1, 2))
+            class_probs = class_probs / np.sum(class_probs)
+            class_ids = np.random.choice(n_classes, size=n_samples, p=class_probs)
+        else:
+            # Generate samples from specific class
+            class_ids = np.full(n_samples, class_id)
+
+        samples = []
+        for class_id in class_ids:
+            sample = []
+            for feature_idx in range(n_features):
+                # Select bin based on histogram probabilities
+                bin_probs = self.histograms[feature_idx, :, class_id]
+                bin_idx = np.random.choice(self.histogram_bins, p=bin_probs)
+
+                # Generate value within the selected bin
+                bin_start = self.bin_edges[feature_idx, bin_idx]
+                bin_end = self.bin_edges[feature_idx, bin_idx + 1]
+                value = np.random.uniform(bin_start, bin_end)
+                sample.append(value)
+
+            samples.append(sample)
+
+        samples = np.array(samples)
+
+        # Inverse transform scaling
+        samples_original = self.scaler.inverse_transform(samples)
+
+        return samples_original, class_ids
+
+
 def main():
     """Main function to run the GPUDBNN model"""
     # Get available datasets
@@ -1784,6 +2765,9 @@ def main():
 
     # Create and run the model
     model = GPUDBNN(dataset_name)
+    print(f"Train only: {model.train_only}")
+    print(f"Train enabled: {model.train_enabled}")
+    print(f"Predict enabled: {model.predict_enabled}")
 
     # Train the model
     if model.train_enabled:
