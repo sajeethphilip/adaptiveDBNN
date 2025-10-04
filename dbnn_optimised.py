@@ -100,6 +100,27 @@ class DatasetConfig:
         }
 }
 
+    @staticmethod
+    def _extract_training_columns(df: pd.DataFrame, target_column: str) -> Dict:
+        """Extract training columns information from DataFrame"""
+        feature_columns = [col for col in df.columns if col != target_column]
+
+        # Generate dataset fingerprint
+        import hashlib
+        col_info = [(col, str(df[col].dtype)) for col in df.columns]
+        col_info.sort()
+        fingerprint_str = ''.join([f"{col}_{dtype}" for col, dtype in col_info])
+        dataset_fingerprint = hashlib.md5(fingerprint_str.encode()).hexdigest()
+
+        return {
+            "feature_columns": feature_columns,
+            "target_column": target_column,
+            "total_features": len(feature_columns),
+            "dataset_fingerprint": dataset_fingerprint,
+            "timestamp": datetime.now().isoformat(),
+            "auto_created": True,
+            "all_columns": df.columns.tolist()  # NEW: Save all column names
+        }
 
     @staticmethod
     def _extract_training_columns(df: pd.DataFrame, target_column: str) -> Dict:
@@ -630,6 +651,73 @@ class GPUDBNN:
         else:
             print("Visualization: DISABLED (default for performance)")
 #-------------------
+
+    def _prepare_prediction_data(self, df: pd.DataFrame) -> Tuple[np.ndarray, pd.DataFrame]:
+        """
+        Prepare data for prediction by selecting and ordering columns
+        according to training configuration
+        """
+        df_pred = df.copy()
+
+        # Get training column configuration
+        if 'training_columns' not in self.config:
+            raise ValueError("Training columns configuration not found")
+
+        training_cols = self.config['training_columns']
+        expected_features = training_cols.get('feature_columns', [])
+        target_column = training_cols.get('target_column')
+
+        print(f"Expected features from training: {expected_features}")
+        print(f"Target column from training: {target_column}")
+        print(f"Columns in prediction data: {df_pred.columns.tolist()}")
+
+        # Check for missing features
+        missing_features = set(expected_features) - set(df_pred.columns)
+        if missing_features:
+            print(f"❌ Missing features in prediction data: {missing_features}")
+            raise ValueError(f"Missing required features: {missing_features}")
+
+        # Select only the expected features in the correct order
+        selected_features = [col for col in expected_features if col in df_pred.columns]
+        df_features = df_pred[selected_features]
+
+        print(f"✅ Using {len(selected_features)} features for prediction: {selected_features}")
+
+        # Handle missing values
+        df_features = self._handle_missing_values(df_features)
+
+        # Encode categorical features if any
+        for column in df_features.columns:
+            if column in self.categorical_encoders:
+                try:
+                    # Handle unseen categories by mapping to a default value
+                    unseen_mask = ~df_features[column].isin(self.categorical_encoders[column].classes_)
+                    if unseen_mask.any():
+                        print(f"⚠️  Found {unseen_mask.sum()} unseen categories in '{column}', mapping to default")
+                        # For unseen categories, use the most frequent class or first class
+                        default_value = self.categorical_encoders[column].classes_[0]
+                        df_features.loc[unseen_mask, column] = default_value
+
+                    df_features[column] = self.categorical_encoders[column].transform(df_features[column])
+                except Exception as e:
+                    print(f"❌ Error encoding categorical feature '{column}': {e}")
+                    raise
+
+        # Convert to numpy for scaling
+        X_raw = df_features.values
+
+        # Scale features
+        X_scaled = self.scaler.transform(X_raw)
+
+        # Filter out samples with sentinel values
+        X_scaled, valid_mask = self._filter_sentinel_samples(X_scaled, None)
+
+        # Also filter the original dataframe to match valid samples
+        df_valid = df_pred[valid_mask] if valid_mask is not None else df_pred
+
+        print(f"✅ Prepared {len(X_scaled)} valid samples for prediction")
+
+        return X_scaled, df_valid
 
     def _get_model_filename(self) -> str:
         """Get model filename from config or use default"""
@@ -2459,8 +2547,46 @@ class GPUDBNN:
                     return False
         return True
 
-    def predict(self, X: np.ndarray = None) -> np.ndarray:
-        """Make predictions on new data"""
+    def _load_prediction_dataset(self) -> pd.DataFrame:
+        """Load dataset specifically for prediction (ignores target column requirements)"""
+        file_path = self.config['file_path']
+        separator = self.config['separator']
+        has_header = self.config['has_header']
+
+        print(f"Loading prediction dataset from: {file_path}")
+
+        try:
+            # Check if file exists locally
+            if os.path.exists(file_path):
+                if has_header:
+                    df = pd.read_csv(file_path, sep=separator)
+                else:
+                    df = pd.read_csv(file_path, sep=separator, header=None)
+            else:
+                # Try to load from URL
+                response = requests.get(file_path)
+                response.raise_for_status()
+
+                if has_header:
+                    df = pd.read_csv(StringIO(response.text), sep=separator)
+                else:
+                    df = pd.read_csv(StringIO(response.text), sep=separator, header=None)
+
+            # Filter features based on commented column names in config
+            df = _filter_features_from_config(df, self.config)
+
+            # Handle missing values
+            df = self._handle_missing_values(df)
+
+            print(f"Prediction dataset loaded with shape: {df.shape}")
+            return df
+
+        except Exception as e:
+            print(f"Error loading prediction dataset: {str(e)}")
+            raise
+
+    def predict(self, X: np.ndarray = None, output_file: str = None) -> np.ndarray:
+        """Make predictions on new data with enhanced prediction mode"""
         if not self.predict_enabled:
             print("Prediction is disabled in configuration")
             return None
@@ -2471,53 +2597,90 @@ class GPUDBNN:
             return None
 
         if X is None:
-            # Use test data for evaluation - FIX: Prepare data first
-            X_train, X_test, y_train, y_test = self._prepare_data()
+            # PREDICTION MODE: Load data from file and make predictions
+            try:
+                # Load the prediction dataset
+                df_pred = self._load_prediction_dataset()
 
-            # Ensure likelihood parameters are computed
-            if not self._ensure_likelihood_parameters(X_train, y_train):
-                print("❌ Failed to compute likelihood parameters for prediction")
+                # Prepare data for prediction (selects and orders columns)
+                X_scaled, df_valid = self._prepare_prediction_data(df_pred)
+
+                if len(X_scaled) == 0:
+                    print("❌ No valid samples after preprocessing")
+                    return None
+
+                # Compute posteriors
+                print("Computing predictions...")
+                posteriors = self._compute_batch_posterior(X_scaled)
+                predictions = np.argmax(posteriors, axis=1)
+
+                # Decode predictions to original class labels
+                decoded_predictions = self.label_encoder.inverse_transform(predictions)
+
+                # Add predictions to the original dataframe
+                df_result = df_valid.copy()
+                df_result['predicted_class'] = decoded_predictions
+                df_result['prediction_confidence'] = np.max(posteriors, axis=1)
+
+                # Add individual class probabilities
+                for i, class_name in enumerate(self.label_encoder.classes_):
+                    df_result[f'prob_{class_name}'] = posteriors[:, i]
+
+                # Save results if output file specified
+                if output_file is None:
+                    output_file = f'{self.dataset_name}_predictions.csv'
+
+                df_result.to_csv(output_file, index=False)
+                print(f"✅ Predictions saved to {output_file}")
+                print(f"   Total samples: {len(df_result)}")
+                print(f"   Columns in output: {df_result.columns.tolist()}")
+
+                # If target column exists in prediction data, evaluate performance
+                training_cols = self.config.get('training_columns', {})
+                target_column = training_cols.get('target_column')
+
+                if target_column and target_column in df_result.columns:
+                    print(f"\n📊 Evaluation (target column '{target_column}' found):")
+                    y_true = df_result[target_column].values
+                    y_pred = df_result['predicted_class'].values
+
+                    accuracy = accuracy_score(y_true, y_pred)
+                    print(f"   Accuracy: {accuracy:.4f}")
+
+                    # Classification report
+                    target_names = [str(cls) for cls in self.label_encoder.classes_]
+                    print("\nClassification Report:")
+                    print(classification_report(y_true, y_pred, target_names=target_names))
+
+                    # Confusion matrix
+                    cm = confusion_matrix(y_true, y_pred)
+                    plt.figure(figsize=(8, 6))
+                    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                               xticklabels=target_names, yticklabels=target_names)
+                    plt.title('Confusion Matrix')
+                    plt.ylabel('True Label')
+                    plt.xlabel('Predicted Label')
+                    plt.tight_layout()
+                    plt.savefig(f'{self.dataset_name}_confusion_matrix.png')
+                    plt.close()
+                    print(f"   Confusion matrix saved to {self.dataset_name}_confusion_matrix.png")
+                else:
+                    print(f"ℹ️  No target column found for evaluation. Showing prediction distribution:")
+                    pred_counts = df_result['predicted_class'].value_counts()
+                    for class_name, count in pred_counts.items():
+                        print(f"   {class_name}: {count} samples")
+
+                return decoded_predictions
+
+            except Exception as e:
+                print(f"❌ Error during prediction: {str(e)}")
+                import traceback
+                traceback.print_exc()
                 return None
 
-            if self.use_gpu:
-                X_test_tensor = self._to_tensor(X_test)
-                test_posteriors = self._compute_batch_posterior(
-                    self._ensure_numpy(X_test_tensor) if self.use_gpu else X_test
-                )
-                test_predictions = np.argmax(test_posteriors, axis=1)
-                y_test_numpy = self._ensure_numpy(y_test) if self.use_gpu else y_test
-            else:
-                test_posteriors = self._compute_batch_posterior(X_test)
-                test_predictions = np.argmax(test_posteriors, axis=1)
-                y_test_numpy = y_test
-
-            # Calculate and print metrics
-            accuracy = accuracy_score(y_test_numpy, test_predictions)
-            print(f"Test Accuracy: {accuracy:.4f}")
-
-            # Classification report - convert numeric class labels to strings
-            target_names = [str(cls) for cls in self.label_encoder.classes_]
-            print("\nClassification Report:")
-            print(classification_report(y_test_numpy, test_predictions,
-                                      target_names=target_names))
-
-            # Confusion matrix
-            cm = confusion_matrix(y_test_numpy, test_predictions)
-            plt.figure(figsize=(8, 6))
-            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                       xticklabels=target_names,
-                       yticklabels=target_names)
-            plt.title('Confusion Matrix')
-            plt.ylabel('True Label')
-            plt.xlabel('Predicted Label')
-            plt.tight_layout()
-            plt.savefig(f'{self.dataset_name}_confusion_matrix.png')
-            plt.close()
-
-            return test_predictions
-
         else:
-            # Predict on new data
+            # LEGACY MODE: Direct numpy array input (for backward compatibility)
+            print("⚠️  Using legacy prediction mode with numpy array input")
             # Handle missing values
             X_clean = self._handle_missing_values(pd.DataFrame(X))
 
@@ -2671,13 +2834,21 @@ def main():
     print(f"Train only: {model.train_only}")
     print(f"Train enabled: {model.train_enabled}")
     print(f"Predict enabled: {model.predict_enabled}")
+
     # Train the model
     if model.train_enabled:
         model.train()
 
-    # Make predictions
+    # Make predictions - UPDATED: Use new prediction mode
     if model.predict_enabled:
-        model.predict()
+        # Ask for output filename
+        output_file = input("Enter output filename for predictions (or press Enter for default): ").strip()
+        if not output_file:
+            output_file = f'{dataset_name}_predictions.csv'
+
+        predictions = model.predict(output_file=output_file)
+        if predictions is not None:
+            print(f"✅ Successfully generated {len(predictions)} predictions")
 
     # Generate samples if enabled
     if model.gen_samples_enabled:
