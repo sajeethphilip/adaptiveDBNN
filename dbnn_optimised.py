@@ -23,11 +23,8 @@ import torch
 import os
 import pickle
 from tqdm import tqdm, trange
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 import multiprocessing as mp
-from joblib import Parallel, delayed
-import threading
-from functools import partial
 
 # Assume no keyboard control by default. If you have X11 running and want to be interactive, set nokbd = False
 nokbd = True  # Disabled keyboard control for minimal systems
@@ -102,6 +99,46 @@ class DatasetConfig:
             "elevation_oscillation": True     # Add camera movement
         }
 }
+
+
+    @staticmethod
+    def _extract_training_columns(df: pd.DataFrame, target_column: str) -> Dict:
+        """Extract training columns information from DataFrame"""
+        feature_columns = [col for col in df.columns if col != target_column]
+
+        # Generate dataset fingerprint
+        import hashlib
+        col_info = [(col, str(df[col].dtype)) for col in df.columns]
+        col_info.sort()
+        fingerprint_str = ''.join([f"{col}_{dtype}" for col, dtype in col_info])
+        dataset_fingerprint = hashlib.md5(fingerprint_str.encode()).hexdigest()
+
+        return {
+            "feature_columns": feature_columns,
+            "target_column": target_column,
+            "total_features": len(feature_columns),
+            "dataset_fingerprint": dataset_fingerprint,
+            "timestamp": datetime.now().isoformat(),
+            "auto_created": True
+        }
+
+    @staticmethod
+    def _ensure_training_columns_config(config: Dict, df: pd.DataFrame) -> Dict:
+        """Ensure training_columns section exists in config"""
+        if 'training_columns' not in config:
+            target_col = config['target_column']
+            config['training_columns'] = DatasetConfig._extract_training_columns(df, target_col)
+
+        # Ensure model_config exists
+        if 'model_config' not in config:
+            config['model_config'] = {}
+
+        # Set default model_filename if not present
+        if 'model_filename' not in config['model_config']:
+            # Use config filename as default model name
+            config['model_config']['model_filename'] = f"Best_{os.path.splitext(os.path.basename(config.get('file_path', 'default')))[0]}"
+
+        return config
 
     @staticmethod
     def _get_user_input(prompt: str, default_value: Any = None, validation_fn: callable = None) -> Any:
@@ -460,13 +497,13 @@ def _filter_features_from_config(df: pd.DataFrame, config: Dict) -> pd.DataFrame
 #-----------------------------------------------------------------------------------------------------------
 
 class GPUDBNN:
-    """Memory-Optimized Deep Bayesian Neural Network with CPU-friendly operations and parallel computing"""
+    """Memory-Optimized Deep Bayesian Neural Network with CPU-friendly operations"""
 
     def __init__(
         self,
         dataset_name: str,
         device: str = None,
-        config: Dict = None  # NEW: Accept config parameter
+        config: Dict = None
     ):
         # Set device based on availability
         if device is None:
@@ -477,34 +514,21 @@ class GPUDBNN:
         print(f"Using device: {self.device}")
         self.use_gpu = self.device.type == 'cuda'
 
-        # Initialize parallel computing settings
-        self._init_parallel_computing()
-
         self.dataset_name = dataset_name.lower()
 
-        # NEW: Use provided config or load from file
+        # Load dataset configuration and data - MODIFIED SECTION
         if config is not None:
-            print("📋 Using provided configuration")
+            # Use the provided config directly
             self.config = config
+            print(f"✅ Using provided configuration for {self.dataset_name}")
         else:
-            # Load dataset configuration and data using original method
+            # Load config from file as before
             self.config = DatasetConfig.load_config(self.dataset_name)
 
-        # Get model filename from config
-        self.model_filename = None
-        if 'model_config' in self.config and 'model_filename' in self.config['model_config']:
-            self.model_filename = self.config['model_config']['model_filename']
-        elif 'training_columns' in self.config and 'model_filename' in self.config['training_columns']:
-            self.model_filename = self.config['training_columns']['model_filename']
-        else:
-            self.model_filename = f"Best_{self.dataset_name}"
-
-        print(f"Using model filename: {self.model_filename}")
 
         # Initialize pruning structures
         self.active_feature_mask = None
         self.original_feature_indices = None
-        self.pruning_enabled = True
 
         # Extract training configuration
         training_config = self.config.get('training_config', {})
@@ -540,8 +564,8 @@ class GPUDBNN:
         self.likelihood_params = None
         self.feature_pairs = None
         self.best_W = None
-        self.current_W = None
         self.best_error = float('inf')
+        self.current_W = None
         self.best_accuracy = 0.0
 
         # Histogram model components
@@ -556,22 +580,23 @@ class GPUDBNN:
         # Create Model directory
         os.makedirs('Model', exist_ok=True)
 
-        # NEW: Load data using config without interactive prompts
-        self.data = self._load_dataset_from_config()
+        # Load data
+        self.data = self._load_dataset()
 
         # Load saved weights and encoders
         self._load_best_weights()
         self._load_categorical_encoders()
 
         # Add tracking for initial weights and pruning
-        self.initial_W = None
-        self.pruning_warmup_epochs = 3
-        self.pruning_threshold = 1e-6
-        self.pruning_aggressiveness = 0.1
+        self.initial_W = None  # Store initial weights for reference
+        self.pruning_warmup_epochs = 3  # epochs before starting to prune
+        self.pruning_threshold = 1e-6   # minimum change from initial value to avoid pruning
+        self.pruning_aggressiveness = 0.1  # percentage of stagnant connections to prune per epoch
 
         # Extract visualization configuration
         visualization_config = self.config.get('visualization_config', {})
         self.visualization_enabled = visualization_config.get('enabled', False)
+        self.visualization_output_dir = visualization_config.get('output_dir', 'visualizations')
         self.visualization_output_dir = os.path.join(
             visualization_config.get('output_dir', 'visualizations'),
             self.dataset_name
@@ -597,34 +622,123 @@ class GPUDBNN:
             self.visualizer = None
             self.visualization_enabled = False
 
+        print(f"Using {self.model_type} model for likelihood estimation")
+        if self.model_type == 'histogram':
+            print(f"Histogram method: {self.histogram_method}")
         if self.visualization_enabled:
             print("Visualization: ENABLED")
         else:
             print("Visualization: DISABLED (default for performance)")
+#-------------------
 
-    def _init_parallel_computing(self):
-        """Initialize parallel computing settings"""
-        self.num_cpus = mp.cpu_count()
-        self.max_workers = min(self.num_cpus, 32)  # Limit to avoid over-subscription
-
-        # Configure parallel backend
-        self.parallel_backend = 'threading'  # Can be 'multiprocessing' for CPU-intensive tasks
-
-        print(f"🔄 Parallel computing initialized: {self.num_cpus} CPUs, {self.max_workers} workers")
-        print(f"🔧 Parallel backend: {self.parallel_backend}")
-
-    def _load_dataset_from_config(self) -> pd.DataFrame:
-        """Load dataset from config without interactive prompts - using existing _load_dataset method"""
-        # Simply call the original _load_dataset method which already handles everything
-        return self._load_dataset()
+    def _get_model_filename(self) -> str:
+        """Get model filename from config or use default"""
+        if ('model_config' in self.config and
+            'model_filename' in self.config['model_config']):
+            return self.config['model_config']['model_filename']
+        else:
+            # Fallback to original behavior
+            return f"Best_{self.dataset_name}"
 
     def _get_weights_filename(self):
-        """Get the filename for saving/loading weights"""
-        return os.path.join('Model', f'{self.model_filename}_weights.json')
+        """Get the filename for saving/loading weights using config model_filename"""
+        model_filename = self._get_model_filename()
+        return os.path.join('Model', f'{model_filename}_weights.json')
+
+    def _get_encoders_filename(self):
+        """Get encoders filename using config model_filename"""
+        model_filename = self._get_model_filename()
+        return os.path.join('Model', f'{model_filename}_encoders.pkl')
+
+    def _validate_feature_consistency(self, df: pd.DataFrame) -> bool:
+        """Validate that current data features match training columns from config"""
+        if 'training_columns' not in self.config:
+            return True  # No training columns info, skip validation
+
+        training_cols = self.config['training_columns']
+        current_features = [col for col in df.columns if col != self.target_column]
+        expected_features = training_cols.get('feature_columns', [])
+
+        if set(current_features) != set(expected_features):
+            print("❌ Feature mismatch detected!")
+            print(f"   Expected: {expected_features}")
+            print(f"   Current:  {current_features}")
+            return False
+
+        # Validate dataset fingerprint
+        current_fingerprint = self._get_dataset_fingerprint(df)
+        saved_fingerprint = training_cols.get('dataset_fingerprint')
+
+        if saved_fingerprint and current_fingerprint != saved_fingerprint:
+            print("❌ Dataset fingerprint mismatch!")
+            print(f"   This may indicate the dataset has changed since training")
+            return False
+
+        return True
+
+    def _load_dataset(self) -> pd.DataFrame:
+        """Load dataset from file or URL with enhanced configuration"""
+        file_path = self.config['file_path']
+        separator = self.config['separator']
+        has_header = self.config['has_header']
+
+        print(f"Loading dataset from: {file_path}")
+
+        try:
+            # Check if file exists locally
+            if os.path.exists(file_path):
+                if has_header:
+                    df = pd.read_csv(file_path, sep=separator)
+                else:
+                    df = pd.read_csv(file_path, sep=separator, header=None)
+            else:
+                # Try to load from URL
+                response = requests.get(file_path)
+                response.raise_for_status()
+
+                if has_header:
+                    df = pd.read_csv(StringIO(response.text), sep=separator)
+                else:
+                    df = pd.read_csv(StringIO(response.text), sep=separator, header=None)
+
+            # Filter features based on commented column names in config
+            df = _filter_features_from_config(df, self.config)
+
+            # Handle missing values
+            df = self._handle_missing_values(df)
+
+            # Remove high cardinality columns
+            df = self._remove_high_cardinality_columns(df, self._calculate_cardinality_threshold())
+
+            # NEW: Ensure training_columns config exists and validate consistency
+            self.config = DatasetConfig._ensure_training_columns_config(self.config, df)
+
+            # Validate feature consistency for prediction
+            if not self.train_enabled and self.predict_enabled:
+                if not self._validate_feature_consistency(df):
+                    print("⚠️  Feature inconsistency detected. Prediction may be unreliable.")
+                    # You might want to return here or ask for user confirmation
+
+            print(f"Dataset loaded with shape: {df.shape}")
+            print(f"Model filename: {self._get_model_filename()}")
+            return df
+
+        except Exception as e:
+            print(f"Error loading dataset: {str(e)}")
+            raise
+
+    # -----------Enable/Disable pruning-------------
+    def set_pruning_enabled(self, enabled: bool):
+        """Enable or disable pruning"""
+        if enabled:
+            self.pruning_warmup_epochs = 3  # Default value
+        else:
+            self.pruning_warmup_epochs = 0  # Disables pruning
 
     def _calculate_cardinality_threshold(self):
         """Calculate the cardinality threshold based on the number of distinct classes"""
         return self.cardinality_threshold
+
 
     def _get_dataset_fingerprint(self, df: pd.DataFrame) -> str:
         """Generate a fingerprint of the dataset to detect changes"""
@@ -689,49 +803,59 @@ class GPUDBNN:
             tensor = torch.tensor(data, dtype=dtype).to(self.device)
         return tensor
 
-    def set_pruning_enabled(self, enabled: bool):
-        """Enable or disable pruning during training"""
-        self.pruning_enabled = enabled
-        if enabled:
-            print("Pruning: ENABLED")
-        else:
-            print("Pruning: DISABLED")
-
     def _to_numpy(self, tensor):
         """Convert tensor to numpy array"""
         if isinstance(tensor, torch.Tensor):
             return tensor.cpu().numpy() if tensor.is_cuda else tensor.numpy()
         return tensor
 
-    def _remove_high_cardinality_columns(self, df: pd.DataFrame, threshold: float = 0.8) -> pd.DataFrame:
-        df=df.round(self.cardinality_tolerance)
+    def _remove_high_cardinality_columns(self, df: pd.DataFrame, threshold: float = None) -> pd.DataFrame:
         """
         Remove columns with unique values exceeding the threshold percentage
+        Uses configuration cardinality_threshold and cardinality_tolerance
 
         Args:
             df: Input DataFrame
-            threshold: Maximum allowed percentage of unique values (default: 0.8 or 80%)
+            threshold: Maximum allowed percentage of unique values (uses config if None)
 
         Returns:
             DataFrame with high cardinality columns removed
         """
+        # Use configured threshold if not provided
+        if threshold is None:
+            threshold = self.cardinality_threshold
+
         df_filtered = df.copy()
         columns_to_drop = []
 
-        for column in df.columns:
+        # First apply cardinality tolerance (rounding)
+        df_rounded = df_filtered.round(self.cardinality_tolerance)
+
+        print(f"🔍 Applying cardinality filtering: threshold={threshold}, tolerance={self.cardinality_tolerance}")
+
+        for column in df_rounded.columns:
             # Skip target column
             if column == self.target_column:
                 continue
 
-            # Calculate percentage of unique values
-            unique_ratio = len(df[column].unique()) / len(df)
+            # Calculate percentage of unique values after rounding
+            unique_ratio = len(df_rounded[column].unique()) / len(df_rounded)
+
+            # Debug information
+            n_unique = len(df_rounded[column].unique())
+            n_total = len(df_rounded)
 
             if unique_ratio > threshold:
                 columns_to_drop.append(column)
+                print(f"   🗑️  Dropping column '{column}': {n_unique}/{n_total} unique values ({unique_ratio:.3f} > {threshold})")
+            else:
+                print(f"   ✅ Keeping column '{column}': {n_unique}/{n_total} unique values ({unique_ratio:.3f} <= {threshold})")
 
         if columns_to_drop:
             df_filtered = df_filtered.drop(columns=columns_to_drop)
-            print(f"Dropped {len(columns_to_drop)} high cardinality columns: {columns_to_drop}")
+            print(f"🗑️  Dropped {len(columns_to_drop)} high cardinality columns: {columns_to_drop}")
+        else:
+            print("✅ No high cardinality columns found")
 
         return df_filtered
 
@@ -766,7 +890,7 @@ class GPUDBNN:
         return np.array(all_combinations)
 
     def _compute_pairwise_likelihood_parallel(self, dataset: np.ndarray, labels: np.ndarray, feature_dims: int):
-        """Compute likelihood parameters, filtering out sentinel values using parallel processing"""
+        """Compute likelihood parameters, filtering out sentinel values"""
         # Filter out samples with sentinel values
         SENTINEL_VALUE = -9999
         valid_mask = ~np.any(dataset == SENTINEL_VALUE, axis=1)
@@ -797,56 +921,35 @@ class GPUDBNN:
         means = np.zeros((n_classes, n_combinations, group_size))
         covs = np.zeros((n_classes, n_combinations, group_size, group_size))
 
-        # Use parallel processing for class-wise computation
-        def process_class(class_data):
-            class_idx, class_id, class_mask = class_data
-            class_data_subset = dataset[class_mask]
+        for class_idx, class_id in enumerate(unique_classes):
+            class_mask = (labels == class_id)
+            class_data = dataset[class_mask]
 
-            if len(class_data_subset) == 0:
+            if len(class_data) == 0:
                 print(f"Warning: No data for class {class_id}, skipping")
-                return class_idx, None, None
+                continue
 
             # Extract all feature groups
             group_data = np.stack([
-                class_data_subset[:, self.feature_pairs[i]] for i in range(n_combinations)
+                class_data[:, self.feature_pairs[i]] for i in range(n_combinations)
             ], axis=1)
 
             # Compute means for all groups
-            class_means = np.mean(group_data, axis=0)
+            means[class_idx] = np.mean(group_data, axis=0)
 
             # Compute covariances for all groups
-            centered_data = group_data - class_means[np.newaxis, :, :]
-            class_covs = np.zeros((n_combinations, group_size, group_size))
+            centered_data = group_data - means[class_idx][np.newaxis, :, :]
 
             for i in range(n_combinations):
                 # Use efficient matrix multiplication for covariance
                 batch_cov = np.dot(
                     centered_data[:, i].T,
                     centered_data[:, i]
-                ) / max(1, (len(class_data_subset) - 1))  # Avoid division by zero
-                class_covs[i] = batch_cov
+                ) / max(1, (len(class_data) - 1))  # Avoid division by zero
+                covs[class_idx, i] = batch_cov
 
             # Add small diagonal term for numerical stability
-            class_covs += np.eye(group_size) * 1e-6
-
-            return class_idx, class_means, class_covs
-
-        # Prepare class data for parallel processing
-        class_data_list = []
-        for class_idx, class_id in enumerate(unique_classes):
-            class_mask = (labels == class_id)
-            if np.sum(class_mask) > 0:  # Only process classes with data
-                class_data_list.append((class_idx, class_id, class_mask))
-
-        # Process classes in parallel
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            results = list(executor.map(process_class, class_data_list))
-
-        # Collect results
-        for class_idx, class_means, class_covs in results:
-            if class_means is not None and class_covs is not None:
-                means[class_idx] = class_means
-                covs[class_idx] = class_covs
+            covs[class_idx] += np.eye(group_size) * 1e-6
 
         # Convert to tensors if using GPU
         if self.use_gpu:
@@ -871,7 +974,7 @@ class GPUDBNN:
             self._compute_gaussian_likelihood(X_train, y_train)
 
     def _compute_gaussian_likelihood(self, X_train: np.ndarray, y_train: np.ndarray):
-        """Compute Gaussian likelihood parameters with parallel processing"""
+        """Compute Gaussian likelihood parameters"""
         print("Computing Gaussian likelihood parameters...")
 
         # Get likelihood configuration
@@ -885,12 +988,12 @@ class GPUDBNN:
             max_combinations
         )
 
-        # Compute likelihood parameters with parallel processing
+        # Compute likelihood parameters
         self.likelihood_params = self._compute_pairwise_likelihood_parallel(
             X_train, y_train, X_train.shape[1]
         )
 
-        # Precompute inverse covariance matrices for faster prediction with parallel processing
+        # Precompute inverse covariance matrices for faster prediction
         if self.use_gpu:
             covs = self.likelihood_params['covs']
             n_classes, n_combinations, _, _ = covs.shape
@@ -899,44 +1002,22 @@ class GPUDBNN:
             # Initialize inv_covs with proper shape
             inv_covs = torch.zeros_like(covs)
 
-            # Use parallel processing for inverse computation
-            def compute_inv_covs(class_idx):
-                class_inv_covs = torch.zeros(n_combinations, group_size, group_size, device=self.device)
+            for class_idx in range(n_classes):
                 for comb_idx in range(n_combinations):
-                    class_inv_covs[comb_idx] = torch.linalg.inv(
+                    inv_covs[class_idx, comb_idx] = torch.linalg.inv(
                         covs[class_idx, comb_idx] + eye * 1e-6
                     )
-                return class_idx, class_inv_covs
-
-            # Process classes in parallel
-            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                results = list(executor.map(compute_inv_covs, range(n_classes)))
-
-            # Collect results
-            for class_idx, class_inv_covs in results:
-                inv_covs[class_idx] = class_inv_covs
 
             self.likelihood_params['inv_covs'] = inv_covs
         else:
             covs = self.likelihood_params['covs']
             n_classes, n_combinations, _, _ = covs.shape
             inv_covs = np.zeros_like(covs)
-
-            # Use parallel processing for CPU inverse computation
-            def compute_inv_covs_cpu(class_idx):
-                class_inv_covs = np.zeros((n_combinations, group_size, group_size))
+            for class_idx in range(n_classes):
                 for comb_idx in range(n_combinations):
-                    class_inv_covs[comb_idx] = np.linalg.inv(
+                    inv_covs[class_idx, comb_idx] = np.linalg.inv(
                         covs[class_idx, comb_idx] + np.eye(group_size) * 1e-6
                     )
-                return class_idx, class_inv_covs
-
-            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                results = list(executor.map(compute_inv_covs_cpu, range(n_classes)))
-
-            for class_idx, class_inv_covs in results:
-                inv_covs[class_idx] = class_inv_covs
-
             self.likelihood_params['inv_covs'] = inv_covs
 
         # Initialize weights if not already loaded
@@ -953,7 +1034,7 @@ class GPUDBNN:
         print(f"Computed Gaussian parameters for {len(self.feature_pairs)} feature combinations")
 
     def _compute_histogram_likelihood_traditional(self, X_train: np.ndarray, y_train: np.ndarray):
-        """Traditional histogram computation (original method) with parallel processing"""
+        """Traditional histogram computation (original method)"""
         print(f"Computing histogram likelihood parameters with {self.histogram_bins} bins (traditional method)...")
 
         n_features = X_train.shape[1]
@@ -968,23 +1049,15 @@ class GPUDBNN:
         self.histograms = np.zeros((n_features, self.histogram_bins, n_classes))
         self.bin_edges = np.zeros((n_features, self.histogram_bins + 1))
 
-        # Compute bin edges for all features in parallel
-        def compute_bin_edges(feature_idx):
-            return np.linspace(
+        # Compute histograms for each feature and class (traditional loop-based)
+        for feature_idx in range(n_features):
+            # Compute bin edges for this feature
+            self.bin_edges[feature_idx] = np.linspace(
                 self.feature_min[feature_idx],
                 self.feature_max[feature_idx],
                 self.histogram_bins + 1
             )
 
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            bin_edges_results = list(executor.map(compute_bin_edges, range(n_features)))
-
-        for feature_idx, edges in enumerate(bin_edges_results):
-            self.bin_edges[feature_idx] = edges
-
-        # Compute histograms for each feature and class with parallel processing
-        def compute_feature_histogram(feature_idx):
-            feature_histograms = np.zeros((self.histogram_bins, n_classes))
             for class_idx, class_id in enumerate(unique_classes):
                 # Get data for this class and feature
                 class_mask = (y_train == class_id)
@@ -999,16 +1072,7 @@ class GPUDBNN:
                     total = np.sum(hist)
 
                     # Store normalized probabilities
-                    feature_histograms[:, class_idx] = hist / total
-            return feature_idx, feature_histograms
-
-        # Process features in parallel
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            results = list(executor.map(compute_feature_histogram, range(n_features)))
-
-        # Collect results
-        for feature_idx, feature_hist in results:
-            self.histograms[feature_idx] = feature_hist
+                    self.histograms[feature_idx, :, class_idx] = hist / total
 
         # Initialize weights
         if self.current_W is None:
@@ -1024,7 +1088,7 @@ class GPUDBNN:
         print(f"Computed histogram parameters for {n_features} features (traditional method)")
 
     def _compute_histogram_likelihood_vectorized(self, X_train: np.ndarray, y_train: np.ndarray):
-        """Vectorized histogram computation using advanced NumPy operations with parallel processing"""
+        """Vectorized histogram computation using advanced NumPy operations"""
         print(f"Computing histogram likelihood parameters with {self.histogram_bins} bins (vectorized method)...")
 
         n_samples, n_features = X_train.shape
@@ -1039,61 +1103,35 @@ class GPUDBNN:
         self.histograms = np.zeros((n_features, self.histogram_bins, n_classes))
         self.bin_edges = np.zeros((n_features, self.histogram_bins + 1))
 
-        # Precompute bin edges for all features at once in parallel
-        def compute_bin_edges(feature_idx):
-            return np.linspace(
+        # Precompute bin edges for all features at once
+        for feature_idx in range(n_features):
+            self.bin_edges[feature_idx] = np.linspace(
                 self.feature_min[feature_idx],
                 self.feature_max[feature_idx],
                 self.histogram_bins + 1
             )
 
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            bin_edges_results = list(executor.map(compute_bin_edges, range(n_features)))
-
-        for feature_idx, edges in enumerate(bin_edges_results):
-            self.bin_edges[feature_idx] = edges
-
-        # Vectorized histogram computation using digitize and bincount with parallel processing
-        def process_class(class_data):
-            class_idx, class_id, class_mask = class_data
-            class_data_subset = X_train[class_mask]
-
-            if len(class_data_subset) == 0:
-                return class_idx, np.zeros((n_features, self.histogram_bins))
-
-            # Vectorized bin assignment for all features
-            bin_indices = np.zeros((len(class_data_subset), n_features), dtype=int)
-
-            for feature_idx in range(n_features):
-                bin_indices[:, feature_idx] = np.digitize(
-                    class_data_subset[:, feature_idx],
-                    self.bin_edges[feature_idx]
-                ) - 1
-                bin_indices[:, feature_idx] = np.clip(bin_indices[:, feature_idx], 0, self.histogram_bins - 1)
-
-            # Compute histograms for this class
-            class_histograms = np.zeros((n_features, self.histogram_bins))
-            for feature_idx in range(n_features):
-                hist = np.bincount(bin_indices[:, feature_idx], minlength=self.histogram_bins)
-                hist = hist + self.laplace_smoothing  # Laplace smoothing
-                class_histograms[feature_idx] = hist / np.sum(hist)
-
-            return class_idx, class_histograms
-
-        # Prepare class data for parallel processing
-        class_data_list = []
+        # Vectorized histogram computation using digitize and bincount
         for class_idx, class_id in enumerate(unique_classes):
             class_mask = (y_train == class_id)
-            if np.sum(class_mask) > 0:
-                class_data_list.append((class_idx, class_id, class_mask))
+            class_data = X_train[class_mask]
 
-        # Process classes in parallel
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            results = list(executor.map(process_class, class_data_list))
+            if len(class_data) > 0:
+                # Vectorized bin assignment for all features
+                bin_indices = np.zeros((len(class_data), n_features), dtype=int)
 
-        # Collect results
-        for class_idx, class_histograms in results:
-            self.histograms[:, :, class_idx] = class_histograms
+                for feature_idx in range(n_features):
+                    bin_indices[:, feature_idx] = np.digitize(
+                        class_data[:, feature_idx],
+                        self.bin_edges[feature_idx]
+                    ) - 1
+                    bin_indices[:, feature_idx] = np.clip(bin_indices[:, feature_idx], 0, self.histogram_bins - 1)
+
+                # Vectorized histogram accumulation using bincount
+                for feature_idx in range(n_features):
+                    hist = np.bincount(bin_indices[:, feature_idx], minlength=self.histogram_bins)
+                    hist = hist + self.laplace_smoothing  # Laplace smoothing
+                    self.histograms[feature_idx, :, class_idx] = hist / np.sum(hist)
 
         # Initialize weights
         if self.current_W is None:
@@ -1119,7 +1157,7 @@ class GPUDBNN:
             return self._compute_gaussian_posterior(features, epsilon)
 
     def _compute_gaussian_posterior(self, features: np.ndarray, epsilon: float = 1e-10):
-        """Compute posterior probabilities for Gaussian model with parallel batch processing"""
+        """Compute posterior probabilities for Gaussian model"""
         SENTINEL_VALUE = -9999
 
         # Identify samples with sentinel values
@@ -1181,15 +1219,14 @@ class GPUDBNN:
             valid_posteriors = self._to_numpy(valid_posteriors).T
 
         else:
-            # CPU implementation with optimized parallel processing
+            # CPU implementation with optimized loops
             # Extract all feature groups at once - [batch_size, n_combinations, group_size]
             batch_groups = valid_features[:, self.feature_pairs]
 
             # Initialize log likelihoods
             log_likelihoods = np.zeros((batch_size, n_classes))
 
-            # Process classes in parallel
-            def process_class(class_idx):
+            for class_idx in range(n_classes):
                 # Get parameters for current class
                 class_means = self.likelihood_params['means'][class_idx]
                 class_inv_covs = self.likelihood_params['inv_covs'][class_idx]
@@ -1219,16 +1256,7 @@ class GPUDBNN:
                 weighted_likelihood = pair_log_likelihood + np.log(class_priors + epsilon)
 
                 # Sum over groups for each sample
-                class_log_likelihoods = np.sum(weighted_likelihood, axis=1)
-                return class_idx, class_log_likelihoods
-
-            # Process all classes in parallel
-            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                results = list(executor.map(process_class, range(n_classes)))
-
-            # Collect results
-            for class_idx, class_log_likelihoods in results:
-                log_likelihoods[:, class_idx] = class_log_likelihoods
+                log_likelihoods[:, class_idx] = np.sum(weighted_likelihood, axis=1)
 
             # Compute posteriors using log-sum-exp trick
             max_log_likelihood = np.max(log_likelihoods, axis=1, keepdims=True)
@@ -1255,7 +1283,7 @@ class GPUDBNN:
         return full_posteriors
 
     def _compute_histogram_posterior_traditional(self, features: np.ndarray, epsilon: float = 1e-10):
-        """Traditional histogram posterior computation (loop-based) with parallel processing"""
+        """Traditional histogram posterior computation (loop-based)"""
         SENTINEL_VALUE = -9999
 
         # Identify samples with sentinel values
@@ -1271,9 +1299,10 @@ class GPUDBNN:
         n_features = valid_features.shape[1]
         n_classes = self.histograms.shape[2]
 
-        # Initialize posteriors with parallel processing
-        def process_sample(sample_idx):
-            sample_posterior = np.ones(n_classes)
+        # Initialize posteriors (traditional loop-based approach)
+        posteriors = np.ones((n_samples, n_classes))
+
+        for sample_idx in range(n_samples):
             for feature_idx in range(n_features):
                 value = valid_features[sample_idx, feature_idx]
 
@@ -1286,15 +1315,7 @@ class GPUDBNN:
 
                 # Apply weights and multiply into posterior
                 weighted_probs = bin_probs * self.current_W[:, feature_idx, bin_idx]
-                sample_posterior *= weighted_probs
-
-            return sample_posterior
-
-        # Process samples in parallel
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            posteriors_list = list(executor.map(process_sample, range(n_samples)))
-
-        posteriors = np.array(posteriors_list)
+                posteriors[sample_idx] *= weighted_probs
 
         # Normalize posteriors
         posteriors = posteriors / (np.sum(posteriors, axis=1, keepdims=True) + epsilon)
@@ -1306,7 +1327,7 @@ class GPUDBNN:
         return full_posteriors
 
     def _compute_histogram_posterior_vectorized(self, features: np.ndarray, epsilon: float = 1e-10):
-        """Vectorized histogram posterior computation with parallel processing"""
+        """Vectorized histogram posterior computation"""
         SENTINEL_VALUE = -9999
 
         # Identify samples with sentinel values
@@ -1328,7 +1349,7 @@ class GPUDBNN:
             return self._compute_histogram_posterior_cpu_vectorized(valid_features, n_samples, n_features, n_classes, epsilon, sentinel_mask, features)
 
     def _compute_histogram_posterior_cpu_vectorized(self, valid_features, n_samples, n_features, n_classes, epsilon, sentinel_mask, original_features):
-        """CPU-optimized vectorized posterior computation with parallel processing"""
+        """CPU-optimized vectorized posterior computation"""
 
         # Vectorized bin assignment for all samples and features
         bin_indices = np.zeros((n_samples, n_features), dtype=int)
@@ -1340,24 +1361,19 @@ class GPUDBNN:
             ) - 1
             bin_indices[:, feature_idx] = np.clip(bin_indices[:, feature_idx], 0, self.histogram_bins - 1)
 
-        # Vectorized probability lookup using advanced indexing with parallel processing
-        def process_class(class_idx):
+        # Vectorized probability lookup using advanced indexing
+        posteriors = np.ones((n_samples, n_classes))
+
+        for class_idx in range(n_classes):
             class_posterior = np.ones(n_samples)
+
             for feature_idx in range(n_features):
                 # Get probabilities for all samples at once using advanced indexing
                 feature_probs = self.histograms[feature_idx, bin_indices[:, feature_idx], class_idx]
                 # Apply weights
                 weighted_probs = feature_probs * self.current_W[class_idx, feature_idx, bin_indices[:, feature_idx]]
                 class_posterior *= weighted_probs
-            return class_idx, class_posterior
 
-        # Process classes in parallel
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            results = list(executor.map(process_class, range(n_classes)))
-
-        # Collect results
-        posteriors = np.ones((n_samples, n_classes))
-        for class_idx, class_posterior in results:
             posteriors[:, class_idx] = class_posterior
 
         # Normalize posteriors
@@ -1393,10 +1409,9 @@ class GPUDBNN:
                 bin_idx = torch.argmax(in_bin.int(), dim=1)
                 bin_indices[:, feature_idx] = bin_idx
 
-            # GPU-accelerated probability computation with parallel class processing
+            # GPU-accelerated probability computation
             posteriors = torch.ones((n_samples, n_classes), device=self.device)
 
-            # Process classes in parallel on GPU
             for class_idx in range(n_classes):
                 class_posterior = torch.ones(n_samples, device=self.device)
 
@@ -1423,14 +1438,16 @@ class GPUDBNN:
             print(f"GPU computation failed, falling back to CPU: {e}")
             return self._compute_histogram_posterior_cpu_vectorized(valid_features, n_samples, n_features, n_classes, epsilon, sentinel_mask, original_features)
 
+    # ============Ensure all data is on the same device =============
     def _ensure_numpy(self, data):
         """Convert data to numpy array if it's a tensor"""
         if isinstance(data, torch.Tensor):
             return data.cpu().numpy()
         return data
+    # ============Ensure all data is on the same device =============
 
     def _update_priors_parallel(self, failed_cases: List[Tuple], batch_size: int = 32):
-        """Update priors based on selected model type with enhanced parallel processing"""
+        """Update priors based on selected model type"""
         if self.model_type == 'histogram':
             if self.histogram_method == 'vectorized':
                 self._update_histogram_priors_vectorized(failed_cases, batch_size)
@@ -1440,7 +1457,7 @@ class GPUDBNN:
             self._update_gaussian_priors(failed_cases, batch_size)
 
     def _update_gaussian_priors(self, failed_cases: List[Tuple], batch_size: int = 32):
-        """Update priors ONLY for hypercubes that contributed to failures with parallel processing"""
+        """Update priors ONLY for hypercubes that contributed to failures"""
         n_failed = len(failed_cases)
 
         # Get the update strategy from config
@@ -1455,11 +1472,22 @@ class GPUDBNN:
         else:
             classes_numpy = self.likelihood_params['classes']
 
-        # Process failed cases in parallel batches for efficiency
-        def process_failed_batch(batch_cases):
-            batch_updates = []
-            for features, true_class, posteriors in batch_cases:
-                predicted_class = np.argmax(posteriors)
+        # Process failed cases in batches for efficiency
+        for batch_start in range(0, n_failed, batch_size):
+            batch_end = min(batch_start + batch_size, n_failed)
+            batch_cases = failed_cases[batch_start:batch_end]
+
+            # Extract batch data
+            batch_features = np.array([case[0] for case in batch_cases])
+            batch_true_classes = np.array([case[1] for case in batch_cases])
+            batch_posteriors = np.array([case[2] for case in batch_cases])
+
+            # Get predicted classes
+            batch_predicted_classes = np.argmax(batch_posteriors, axis=1)
+
+            for i in range(len(batch_cases)):
+                features, true_class, posteriors = batch_cases[i]
+                predicted_class = batch_predicted_classes[i]
 
                 # Get the true class index
                 true_class_idx = np.where(classes_numpy == true_class)[0][0]
@@ -1479,53 +1507,37 @@ class GPUDBNN:
                 adjustment = self.learning_rate * (1 - true_prob / max_other_prob)
                 adjustment = np.clip(adjustment, -0.5, 0.5)
 
-                batch_updates.append((true_class_idx, predicted_class, feature_contributions, adjustment))
-            return batch_updates
+                # Apply the selected strategy to relevant hypercubes only
+                if update_strategy == 1:
+                    # Strategy 1: Batch average update - update ALL hypercubes for the class
+                    self.current_W[true_class_idx] *= (1 + adjustment)
+                    self.current_W[predicted_class] *= (1 - adjustment)
 
-        # Process batches in parallel
-        all_updates = []
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            batch_futures = []
-            for batch_start in range(0, n_failed, batch_size):
-                batch_end = min(batch_start + batch_size, n_failed)
-                batch_cases = failed_cases[batch_start:batch_end]
-                future = executor.submit(process_failed_batch, batch_cases)
-                batch_futures.append(future)
+                elif update_strategy == 2:
+                    # Strategy 2: Maximum error applied to failed class hypercubes
+                    self._update_strategy2(feature_contributions, true_class_idx, predicted_class, adjustment)
 
-            for future in batch_futures:
-                all_updates.extend(future.result())
+                elif update_strategy == 3:
+                    # Strategy 3: Add to correct class, subtract from wrong class for relevant hypercubes
+                    self._update_strategy3(feature_contributions, true_class_idx, predicted_class, adjustment)
 
-        # Apply updates
-        for true_class_idx, predicted_class, feature_contributions, adjustment in all_updates:
-            # Apply the selected strategy to relevant hypercubes only
-            if update_strategy == 1:
-                # Strategy 1: Batch average update - update ALL hypercubes for the class
-                self.current_W[true_class_idx] *= (1 + adjustment)
-                self.current_W[predicted_class] *= (1 - adjustment)
+                elif update_strategy == 4:
+                    # Strategy 4: Subtract only from wrong class hypercubes
+                    self._update_strategy4(feature_contributions, true_class_idx, predicted_class, adjustment)
 
-            elif update_strategy == 2:
-                # Strategy 2: Maximum error applied to failed class hypercubes
-                self._update_strategy2(feature_contributions, true_class_idx, predicted_class, adjustment)
-
-            elif update_strategy == 3:
-                # Strategy 3: Add to correct class, subtract from wrong class for relevant hypercubes
-                self._update_strategy3(feature_contributions, true_class_idx, predicted_class, adjustment)
-
-            elif update_strategy == 4:
-                # Strategy 4: Subtract only from wrong class hypercubes
-                self._update_strategy4(feature_contributions, true_class_idx, predicted_class, adjustment)
-
-        # Clip weights for stability after processing all batches
-        self.current_W = np.clip(self.current_W, 1e-10, 10.0)
+            # Clip weights for stability after each batch
+            self.current_W = np.clip(self.current_W, 1e-10, 10.0)
 
     def _update_histogram_priors_traditional(self, failed_cases: List[Tuple], batch_size: int = 32):
-        """Traditional weight updates for histogram model with parallel processing"""
+        """Traditional weight updates for histogram model"""
         n_failed = len(failed_cases)
         update_strategy = self.config.get('likelihood_config', {}).get('update_strategy', 3)
 
-        # Process failed cases in parallel batches
-        def process_batch(batch_cases):
-            batch_updates = []
+        # Process failed cases in batches
+        for batch_start in range(0, n_failed, batch_size):
+            batch_end = min(batch_start + batch_size, n_failed)
+            batch_cases = failed_cases[batch_start:batch_end]
+
             for features, true_class, posteriors in batch_cases:
                 predicted_class = np.argmax(posteriors)
 
@@ -1538,7 +1550,7 @@ class GPUDBNN:
                 adjustment = self.learning_rate * (1 - true_prob / (predicted_prob + 1e-10))
                 adjustment = np.clip(adjustment, -0.5, 0.5)
 
-                # Collect updates for each feature
+                # Update weights for each feature (traditional loop)
                 for feature_idx in range(len(features)):
                     value = features[feature_idx]
 
@@ -1546,32 +1558,33 @@ class GPUDBNN:
                     bin_idx = np.digitize(value, self.bin_edges[feature_idx]) - 1
                     bin_idx = np.clip(bin_idx, 0, self.histogram_bins - 1)
 
-                    batch_updates.append((true_class, predicted_class, feature_idx, bin_idx, adjustment, update_strategy))
-            return batch_updates
+                    # Apply update strategy
+                    if update_strategy == 1:
+                        # Update all bins
+                        self.current_W[true_class, feature_idx, :] *= (1 + adjustment)
+                        self.current_W[predicted_class, feature_idx, :] *= (1 - adjustment)
+                    elif update_strategy == 2:
+                        # Update only the specific bin
+                        self.current_W[true_class, feature_idx, bin_idx] *= (1 + adjustment)
+                        self.current_W[predicted_class, feature_idx, bin_idx] *= (1 - adjustment)
+                    elif update_strategy == 3:
+                        # Update specific bin with different rates
+                        self.current_W[true_class, feature_idx, bin_idx] *= (1 + adjustment)
+                        self.current_W[predicted_class, feature_idx, bin_idx] *= (1 - adjustment * 0.5)
+                    elif update_strategy == 4:
+                        # Only decrease wrong class
+                        self.current_W[predicted_class, feature_idx, bin_idx] *= (1 - adjustment)
 
-        # Process all batches in parallel
-        all_updates = []
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            batch_futures = []
-            for batch_start in range(0, n_failed, batch_size):
-                batch_end = min(batch_start + batch_size, n_failed)
-                batch_cases = failed_cases[batch_start:batch_end]
-                future = executor.submit(process_batch, batch_cases)
-                batch_futures.append(future)
-
-            for future in batch_futures:
-                all_updates.extend(future.result())
-
-        # Apply all updates
-        self._apply_batch_weight_updates_vectorized(all_updates)
+                # Clip weights for stability
+                self.current_W = np.clip(self.current_W, 1e-10, 10.0)
 
     def _update_histogram_priors_vectorized(self, failed_cases: List[Tuple], batch_size: int = 32):
-        """Vectorized weight updates for histogram model with enhanced parallel processing"""
+        """Vectorized weight updates for histogram model"""
         n_failed = len(failed_cases)
         update_strategy = self.config.get('likelihood_config', {}).get('update_strategy', 3)
 
-        # Use ProcessPoolExecutor for CPU-intensive weight updates
-        with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+        # Use ThreadPoolExecutor for parallel processing
+        with ThreadPoolExecutor(max_workers=min(mp.cpu_count(), 32)) as executor:
             # Process batches in parallel
             futures = []
             for batch_start in range(0, n_failed, batch_size):
@@ -1614,7 +1627,7 @@ class GPUDBNN:
             self._apply_batch_weight_updates_vectorized(batch_updates)
 
     def _apply_batch_weight_updates_vectorized(self, batch_updates):
-        """Apply weight updates in a vectorized manner with parallel processing"""
+        """Apply weight updates in a vectorized manner"""
         # Group updates by type for vectorized operations
         true_class_indices = []
         pred_class_indices = []
@@ -1631,7 +1644,7 @@ class GPUDBNN:
                 pred_class_indices.append((predicted_class, feature_idx, bin_idx))
                 pred_adjustments.append(-decay_adjustment)
 
-        # Vectorized weight updates with parallel processing for large batches
+        # Vectorized weight updates
         if true_class_indices:
             classes, features, bins = zip(*true_class_indices)
             indices = (np.array(classes), np.array(features), np.array(bins))
@@ -1677,7 +1690,7 @@ class GPUDBNN:
         return log_likelihood
 
     def _calculate_feature_contributions(self, features, true_class_idx, predicted_class_idx):
-        """Calculate how much each feature pair contributed to the misclassification with parallel processing"""
+        """Calculate how much each feature pair contributed to the misclassification"""
         n_pairs = len(self.feature_pairs)
         contributions = np.zeros(n_pairs)
 
@@ -1701,8 +1714,8 @@ class GPUDBNN:
             contributions = self._to_numpy(pred_log_likelihoods - true_log_likelihoods)
 
         else:
-            # CPU-optimized batch calculation with parallel processing
-            def process_pair(pair_idx):
+            # CPU-optimized batch calculation
+            for pair_idx in range(n_pairs):
                 # Get log-likelihood for true class for this pair
                 true_log_likelihood = self._compute_pair_log_likelihood(
                     feature_groups[pair_idx], true_class_idx, pair_idx
@@ -1714,13 +1727,7 @@ class GPUDBNN:
                 )
 
                 # Contribution is the difference (how much this pair favored wrong class)
-                return pred_log_likelihood - true_log_likelihood
-
-            # Process pairs in parallel
-            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                contributions = list(executor.map(process_pair, range(n_pairs)))
-
-            contributions = np.array(contributions)
+                contributions[pair_idx] = pred_log_likelihood - true_log_likelihood
 
         return contributions
 
@@ -1789,54 +1796,6 @@ class GPUDBNN:
         # Clip weights for stability
         self.current_W = np.clip(self.current_W, 1e-10, 10.0)
 
-    def _load_dataset(self) -> pd.DataFrame:
-        """Load dataset from file or URL with parallel processing for large files"""
-        file_path = self.config['file_path']
-        separator = self.config['separator']
-        has_header = self.config['has_header']
-
-        print(f"Loading dataset from: {file_path}")
-
-        try:
-            # Check if file exists locally
-            if os.path.exists(file_path):
-                # For large files, use parallel reading
-                file_size = os.path.getsize(file_path)
-                if file_size > 100 * 1024 * 1024:  # 100 MB
-                    print("Large file detected, using optimized reading...")
-                    # Use pandas with optimized settings for large files
-                    df = pd.read_csv(file_path, sep=separator, header=0 if has_header else None,
-                                   low_memory=False, engine='c')
-                else:
-                    if has_header:
-                        df = pd.read_csv(file_path, sep=separator)
-                    else:
-                        df = pd.read_csv(file_path, sep=separator, header=None)
-            else:
-                # Try to load from URL
-                response = requests.get(file_path)
-                response.raise_for_status()
-
-                if has_header:
-                    df = pd.read_csv(StringIO(response.text), sep=separator)
-                else:
-                    df = pd.read_csv(StringIO(response.text), sep=separator, header=None)
-
-            # Filter features based on commented column names in config
-            df = _filter_features_from_config(df, self.config)
-
-            # Handle missing values
-            df = self._handle_missing_values(df)
-
-            # Remove high cardinality columns
-            df = self._remove_high_cardinality_columns(df, self._calculate_cardinality_threshold())
-
-            print(f"Dataset loaded with shape: {df.shape}")
-            return df
-
-        except Exception as e:
-            print(f"Error loading dataset: {str(e)}")
-            raise
 
     def _prune_feature_hypercubes(self, min_contribution_threshold: float = 0.01):
         """Prune feature hypercubes that don't contribute significantly to predictions"""
@@ -1913,22 +1872,16 @@ class GPUDBNN:
         self._save_best_weights()
 
     def _load_best_weights(self):
-        """Load the best weights from file including pruning information and likelihood parameters"""
+        """Load the best weights from file including ALL histogram parameters"""
         weights_file = self._get_weights_filename()
-
-        print(f"Looking for weights file: {weights_file}")
 
         if os.path.exists(weights_file):
             with open(weights_file, 'r') as f:
                 weights_dict = json.load(f)
 
-            print(f"DEBUG: Loaded weights dict keys: {weights_dict.keys()}")
-
             # Check if dataset has changed (compare fingerprints)
             current_fingerprint = self._get_dataset_fingerprint(self.data)
             saved_fingerprint = weights_dict.get('dataset_fingerprint')
-            print(f"DEBUG: Current fingerprint: {current_fingerprint}")
-            print(f"DEBUG: Saved fingerprint: {saved_fingerprint}")
 
             if saved_fingerprint and saved_fingerprint != current_fingerprint:
                 print(f"Dataset has changed since last training. Reinitializing weights.")
@@ -1937,57 +1890,29 @@ class GPUDBNN:
 
             try:
                 version = weights_dict.get('version', 1)
-                print(f"DEBUG: Model version: {version}")
 
                 if version >= 5:
-                    # New format with likelihood parameters support
+                    # New comprehensive format
                     weights_array = np.array(weights_dict['weights'])
                     self.best_W = weights_array.astype(np.float32)
                     self.current_W = self.best_W.copy()
-
-                    print(f"DEBUG: Loaded weights shape: {self.best_W.shape}")
-                    print(f"DEBUG: Weights min/max: {np.min(self.best_W):.6f}, {np.max(self.best_W):.6f}")
 
                     # Load model type information
                     self.model_type = weights_dict.get('model_type', 'histogram')
                     self.histogram_bins = weights_dict.get('histogram_bins', 64)
                     self.histogram_method = weights_dict.get('histogram_method', 'vectorized')
-                    print(f"DEBUG: Model type: {self.model_type}, bins: {self.histogram_bins}")
 
-                    # Load likelihood parameters
-                    likelihood_params = weights_dict.get('likelihood_params', {})
-                    print(f"DEBUG: Likelihood params keys: {likelihood_params.keys()}")
-
+                    # NEW: Load histogram parameters if available
                     if self.model_type == 'histogram':
-                        if 'histograms' in likelihood_params:
-                            self.histograms = np.array(likelihood_params['histograms'])
-                            print(f"DEBUG: Loaded histograms shape: {self.histograms.shape}")
-                        if 'bin_edges' in likelihood_params:
-                            self.bin_edges = np.array(likelihood_params['bin_edges'])
-                            print(f"DEBUG: Loaded bin_edges shape: {self.bin_edges.shape}")
-                        if 'feature_min' in likelihood_params:
-                            self.feature_min = np.array(likelihood_params['feature_min'])
-                        if 'feature_max' in likelihood_params:
-                            self.feature_max = np.array(likelihood_params['feature_max'])
-
-                    # Load scaler
-                    if 'scaler_mean' in weights_dict and weights_dict['scaler_mean'] is not None:
-                        self.scaler.mean_ = np.array(weights_dict['scaler_mean'])
-                        print(f"DEBUG: Loaded scaler mean shape: {self.scaler.mean_.shape}")
-                    if 'scaler_scale' in weights_dict and weights_dict['scaler_scale'] is not None:
-                        self.scaler.scale_ = np.array(weights_dict['scaler_scale'])
-                        print(f"DEBUG: Loaded scaler scale shape: {self.scaler.scale_.shape}")
-
-                    # Load label encoder - FIXED: Use the original class labels
-                    if 'label_encoder_classes' in weights_dict and weights_dict['label_encoder_classes'] is not None:
-                        original_classes = np.array(weights_dict['label_encoder_classes'])
-                        print(f"DEBUG: Loaded original label classes: {original_classes}")
-
-                        # Fit the label encoder with the original classes
-                        self.label_encoder.fit(original_classes)
-                        print(f"DEBUG: Label encoder classes after fitting: {self.label_encoder.classes_}")
-                    else:
-                        print("DEBUG: WARNING - No label encoder classes found in saved model!")
+                        if 'histogram_params' in weights_dict:
+                            hist_params = weights_dict['histogram_params']
+                            self.histograms = np.array(hist_params['histograms'])
+                            self.bin_edges = np.array(hist_params['bin_edges'])
+                            self.feature_min = np.array(hist_params['feature_min'])
+                            self.feature_max = np.array(hist_params['feature_max'])
+                            print(f"✅ Loaded histogram parameters: {self.histograms.shape}")
+                        else:
+                            print("⚠️ No histogram parameters found in weights file")
 
                     # Load pruning information
                     pruning_info = weights_dict.get('pruning_info', {})
@@ -1998,71 +1923,34 @@ class GPUDBNN:
                     if weights_dict.get('feature_pairs'):
                         self.feature_pairs = np.array(weights_dict['feature_pairs'])
 
-                    print(f"Loaded {self.model_type} model with complete state from {weights_file}")
+                    # Load critical parameters for prediction
+                    if 'label_encoder_classes' in weights_dict and weights_dict['label_encoder_classes']:
+                        self.label_encoder.classes_ = np.array(weights_dict['label_encoder_classes'])
+                        print(f"✅ Loaded label encoder with {len(self.label_encoder.classes_)} classes")
 
-                elif version >= 4:
-                    # Old format without likelihood parameters - need to compute them
+                    if 'scaler_mean' in weights_dict and weights_dict['scaler_mean']:
+                        self.scaler.mean_ = np.array(weights_dict['scaler_mean'])
+                        self.scaler.scale_ = np.array(weights_dict['scaler_scale'])
+                        # Set other required attributes for sklearn scaler
+                        self.scaler.var_ = self.scaler.scale_ ** 2
+                        self.scaler.n_features_in_ = len(self.scaler.mean_)
+                        self.scaler.n_samples_seen_ = len(self.data) if hasattr(self, 'data') else 1
+                        print("✅ Loaded scaler parameters")
+
+                    print(f"✅ Loaded {self.model_type} model with all parameters from {weights_file}")
+
+                elif version == 4:
+                    # Old format - try to load but warn about missing parameters
                     weights_array = np.array(weights_dict['weights'])
                     self.best_W = weights_array.astype(np.float32)
                     self.current_W = self.best_W.copy()
-
-                    # Load model type information
-                    self.model_type = weights_dict.get('model_type', 'histogram')
-                    self.histogram_bins = weights_dict.get('histogram_bins', 64)
-                    self.histogram_method = weights_dict.get('histogram_method', 'vectorized')
-
-                    print(f"Loaded {self.model_type} model weights from {weights_file} (version 4 - no likelihood params)")
-                    print("Note: This model file is missing likelihood parameters. Consider retraining to save complete model state.")
-
-                    # Load label encoder for version 4
-                    if 'label_encoder_classes' in weights_dict and weights_dict['label_encoder_classes'] is not None:
-                        original_classes = np.array(weights_dict['label_encoder_classes'])
-                        print(f"DEBUG: Loaded original label classes: {original_classes}")
-                        self.label_encoder.fit(original_classes)
-                        print(f"DEBUG: Label encoder classes after fitting: {self.label_encoder.classes_}")
-
-                elif version == 3:
-                    # Old format without model type info
-                    weights_array = np.array(weights_dict['weights'])
-                    self.best_W = weights_array.astype(np.float32)
-                    self.current_W = self.best_W.copy()
-
-                    # Initialize pruning structures for compatibility
-                    n_classes, n_pairs = self.best_W.shape
-                    self._initialize_pruning_structures(n_pairs)
-
-                    print(f"Loaded best weights from {weights_file} (no model type info)")
-
-                    # For version 3, we need to infer label encoder from the data
-                    print("Version 3 model - label encoder will be inferred from current data")
+                    print(f"⚠️ Loaded weights from version 4 - histogram parameters may be missing")
 
                 else:
-                    # Very old format conversion
-                    class_ids = sorted([int(k) for k in weights_dict.keys() if k != 'version'])
-                    max_class_id = max(class_ids)
-
-                    # Get number of feature pairs from first class
-                    first_class = weights_dict[str(class_ids[0])]
-                    n_pairs = len(first_class)
-
-                    # Initialize array
-                    weights_array = np.zeros((max_class_id + 1, n_pairs))
-
-                    # Fill in weights from old format
-                    for class_id in class_ids:
-                        class_weights = weights_dict[str(class_id)]
-                        for pair_idx, (pair, weight) in enumerate(class_weights.items()):
-                            weights_array[class_id, pair_idx] = float(weight)
-
-                    self.best_W = weights_array.astype(np.float32)
-                    self.current_W = self.best_W.copy()
-
-                    # Initialize pruning structures for compatibility
-                    n_classes, n_pairs = self.best_W.shape
-                    self._initialize_pruning_structures(n_pairs)
-
-                    print(f"Loaded best weights from {weights_file} (converted from old format)")
-                    print("Old format model - label encoder will be inferred from current data")
+                    # Very old format - reinitialize
+                    print(f"⚠️ Old weights format detected - reinitializing model")
+                    self.best_W = None
+                    return
 
                 # For loaded weights, we can't track initial values, so disable pruning
                 self.initial_W = None
@@ -2070,18 +1958,12 @@ class GPUDBNN:
 
             except Exception as e:
                 print(f"Warning: Could not load weights from {weights_file}: {str(e)}")
-                import traceback
-                traceback.print_exc()
                 print("Reinitializing weights...")
                 self.best_W = None
                 self.current_W = None
-        else:
-            print(f"Weights file {weights_file} not found. Model needs to be trained first.")
-            self.best_W = None
-            self.current_W = None
 
     def _save_best_weights(self):
-        """Save the best weights to file with pruning information and likelihood parameters"""
+        """Save the best weights to file with ALL required parameters including histogram data"""
         if self.best_W is not None:
             # Handle None values for pruning structures
             active_mask = None
@@ -2097,43 +1979,32 @@ class GPUDBNN:
             if hasattr(self, 'feature_pairs') and self.feature_pairs is not None:
                 feature_pairs_list = self.feature_pairs.tolist()
 
-            # Prepare likelihood parameters for saving
-            likelihood_params = {}
+            # NEW: Prepare histogram parameters for saving
+            histogram_params = {}
             if self.model_type == 'histogram':
-                if self.histograms is not None:
-                    likelihood_params['histograms'] = self.histograms.tolist()
-                if self.bin_edges is not None:
-                    likelihood_params['bin_edges'] = self.bin_edges.tolist()
-                if self.feature_min is not None:
-                    likelihood_params['feature_min'] = self.feature_min.tolist()
-                if self.feature_max is not None:
-                    likelihood_params['feature_max'] = self.feature_max.tolist()
-            else:  # gaussian
-                if self.likelihood_params is not None:
-                    # Convert tensors to numpy for saving
-                    likelihood_params = {
-                        'means': self._to_numpy(self.likelihood_params['means']).tolist() if self.use_gpu else self.likelihood_params['means'].tolist(),
-                        'covs': self._to_numpy(self.likelihood_params['covs']).tolist() if self.use_gpu else self.likelihood_params['covs'].tolist(),
-                        'classes': self._to_numpy(self.likelihood_params['classes']).tolist() if self.use_gpu else self.likelihood_params['classes'].tolist(),
-                        'inv_covs': self._to_numpy(self.likelihood_params['inv_covs']).tolist() if self.use_gpu else self.likelihood_params['inv_covs'].tolist()
+                if (hasattr(self, 'histograms') and self.histograms is not None and
+                    hasattr(self, 'bin_edges') and self.bin_edges is not None and
+                    hasattr(self, 'feature_min') and self.feature_min is not None and
+                    hasattr(self, 'feature_max') and self.feature_max is not None):
+
+                    histogram_params = {
+                        'histograms': self.histograms.tolist(),
+                        'bin_edges': self.bin_edges.tolist(),
+                        'feature_min': self.feature_min.tolist(),
+                        'feature_max': self.feature_max.tolist()
                     }
 
-            # Save the ORIGINAL label classes, not the encoded ones
-            original_classes = None
-            if hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
-                original_classes = self.label_encoder.classes_.tolist()
-                print(f"DEBUG: Saving original label classes: {original_classes}")
-
+            # Save ALL critical parameters
             weights_dict = {
-                'version': 5,
+                'version': 6,  # Incremented version for histogram support
                 'weights': self.best_W.tolist(),
                 'shape': list(self.best_W.shape),
                 'dataset_fingerprint': self._get_dataset_fingerprint(self.data),
                 'model_type': self.model_type,
                 'histogram_bins': self.histogram_bins if self.model_type == 'histogram' else None,
                 'histogram_method': self.histogram_method if self.model_type == 'histogram' else None,
+                'histogram_params': histogram_params,  # NEW
                 'feature_pairs': feature_pairs_list,
-                'likelihood_params': likelihood_params,
                 'pruning_info': {
                     'active_feature_mask': active_mask,
                     'original_feature_indices': original_indices,
@@ -2141,15 +2012,19 @@ class GPUDBNN:
                     'pruning_threshold': self.pruning_threshold,
                     'pruning_aggressiveness': self.pruning_aggressiveness
                 },
-                'scaler_mean': self.scaler.mean_.tolist() if hasattr(self.scaler, 'mean_') and self.scaler.mean_ is not None else None,
-                'scaler_scale': self.scaler.scale_.tolist() if hasattr(self.scaler, 'scale_') and self.scaler.scale_ is not None else None,
-                'label_encoder_classes': original_classes  # Save the original class labels
+                # Critical parameters for prediction
+                'label_encoder_classes': self.label_encoder.classes_.tolist() if hasattr(self.label_encoder, 'classes_') else [],
+                'scaler_mean': self.scaler.mean_.tolist() if hasattr(self.scaler, 'mean_') else [],
+                'scaler_scale': self.scaler.scale_.tolist() if hasattr(self.scaler, 'scale_') else [],
+                'feature_names': list(self.data.columns[:-1]) if hasattr(self, 'data') and self.data is not None else [],
+                'target_column': self.target_column,
+                'target_column_name': self.data.columns[self.target_column] if isinstance(self.target_column, int) and hasattr(self, 'data') and self.data is not None else str(self.target_column),
+                'n_features': self.data.shape[1] - 1 if hasattr(self, 'data') and self.data is not None else None,
+                'n_classes': len(self.label_encoder.classes_) if hasattr(self.label_encoder, 'classes_') else None
             }
 
             with open(self._get_weights_filename(), 'w') as f:
                 json.dump(weights_dict, f, indent=4)
-
-            print(f"Saved complete model state to {self._get_weights_filename()}")
 
     def _load_categorical_encoders(self):
         """Load categorical encoders if available"""
@@ -2177,17 +2052,17 @@ class GPUDBNN:
 
     def _initialize_weights(self):
         """Initialize weights based on number of classes and feature combinations"""
+        # This will be properly initialized after computing likelihood parameters
         self.current_W = None
         self.best_W = None
 
     def _encode_categorical_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Encode categorical features using LabelEncoder with parallel processing"""
+        """Encode categorical features using LabelEncoder"""
         df_encoded = df.copy()
 
-        # Process columns in parallel
-        def process_column(column):
+        for column in df_encoded.columns:
             if column == self.target_column:
-                return column, None
+                continue
 
             # Check if column is categorical (object type or low cardinality)
             if (df_encoded[column].dtype == 'object' or
@@ -2197,150 +2072,45 @@ class GPUDBNN:
                     self.categorical_encoders[column] = LabelEncoder()
                     self.categorical_encoders[column].fit(df_encoded[column])
 
-                encoded_values = self.categorical_encoders[column].transform(df_encoded[column])
-                return column, encoded_values
-            return column, None
-
-        # Process all columns in parallel
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            results = list(executor.map(process_column, df_encoded.columns))
-
-        # Apply encoded values
-        for column, encoded_values in results:
-            if encoded_values is not None:
-                df_encoded[column] = encoded_values
+                df_encoded[column] = self.categorical_encoders[column].transform(df_encoded[column])
 
         return df_encoded
 
     def _prepare_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Prepare training and test data with proper label encoding handling"""
+        """Prepare training and test data"""
         # Encode categorical features
         df_encoded = self._encode_categorical_features(self.data)
-        print(f"DEBUG: Data shape after encoding: {df_encoded.shape}")
-
-        # Check if target column exists in the data
-        target_exists = False
-        if isinstance(self.target_column, int):
-            target_exists = self.target_column < len(df_encoded.columns)
-        else:
-            target_exists = self.target_column in df_encoded.columns
-
-        print(f"DEBUG: Target column '{self.target_column}' exists: {target_exists}")
 
         # Separate features and target
-        if target_exists:
-            if isinstance(self.target_column, int):
-                X = df_encoded.drop(df_encoded.columns[self.target_column], axis=1).values
-                y = df_encoded.iloc[:, self.target_column].values
-            else:
-                X = df_encoded.drop(self.target_column, axis=1).values
-                y = df_encoded[self.target_column].values
-            print(f"DEBUG: X shape: {X.shape}, y shape: {y.shape}")
-            print(f"DEBUG: Unique y values (raw): {np.unique(y)}")
+        if isinstance(self.target_column, int):
+            X = df_encoded.drop(df_encoded.columns[self.target_column], axis=1).values
+            y = df_encoded.iloc[:, self.target_column].values
         else:
-            # Target column doesn't exist - use all columns as features
-            X = df_encoded.values
-            y = None
-            print(f"DEBUG: Using all columns as features, X shape: {X.shape}")
+            X = df_encoded.drop(self.target_column, axis=1).values
+            y = df_encoded[self.target_column].values
 
         # Filter out samples with sentinel values
-        if y is not None:
-            X, y = self._filter_sentinel_samples(X, y)
-        else:
-            X, _ = self._filter_sentinel_samples(X, None)
+        X, y = self._filter_sentinel_samples(X, y)
 
-        # FIX: Don't reset scaler and label encoder if we have loaded weights
-        weights_loaded = (self.best_W is not None and
-                         hasattr(self, 'scaler') and
-                         hasattr(self.scaler, 'mean_') and
-                         self.scaler.mean_ is not None)
+        # Encode target labels
+        y_encoded = self.label_encoder.fit_transform(y)
 
-        if weights_loaded and not self.train_enabled:
-            # Use pre-loaded scaler and label encoder for prediction
-            print("DEBUG: Using pre-loaded scaler and label encoder for prediction")
-            X_scaled = self.scaler.transform(X)
-
-            # FIX: Handle label encoding properly for prediction
-            if y is not None:
-                # Get the original classes the model was trained on
-                trained_classes = set(self.label_encoder.classes_)
-                current_classes = set(np.unique(y))
-
-                print(f"DEBUG: Model trained on classes: {trained_classes}")
-                print(f"DEBUG: Current data classes: {current_classes}")
-
-                # Find classes that are in current data but not in trained model
-                unseen_classes = current_classes - trained_classes
-                if unseen_classes:
-                    print(f"DEBUG: WARNING - Unseen classes in prediction data: {unseen_classes}")
-                    # For unseen classes, we'll map them to -1 and handle separately
-                    y_encoded = np.full_like(y, -1, dtype=int)
-
-                    # Only encode classes that exist in the pre-trained encoder
-                    valid_mask = np.isin(y, list(trained_classes))
-                    if np.any(valid_mask):
-                        y_encoded[valid_mask] = self.label_encoder.transform(y[valid_mask])
-                    print(f"DEBUG: Encoded y with unseen classes handled")
-                else:
-                    # All classes are known
-                    y_encoded = self.label_encoder.transform(y)
-                    print(f"DEBUG: Encoded y using pre-trained label encoder")
-            else:
-                y_encoded = None
-
-            # In predict-only mode, return all data
-            if not self.train_enabled and self.predict_enabled:
-                return X_scaled, None, y_encoded, y
-
-            # For training with loaded weights, still need train/test split
-            X_train, X_test, y_train, y_test = train_test_split(
-                X_scaled, y_encoded, test_size=self.test_size, random_state=self.random_state
-            )
-            return X_train, X_test, y_train, y_test
-
-        # Original training logic (only used when no weights are loaded or fresh training)
-        print("DEBUG: Training mode - creating fresh scaler and label encoder")
-        self.scaler = StandardScaler()
-
-        if y is not None:
-            # FIX: Always create fresh label encoder in training mode
-            self.label_encoder = LabelEncoder()
-            y_encoded = self.label_encoder.fit_transform(y)
-            print(f"DEBUG: Label encoder classes after fitting: {self.label_encoder.classes_}")
-            print(f"DEBUG: Original classes: {np.unique(y)}")
-            print(f"DEBUG: Encoded classes: {np.unique(y_encoded)}")
-            print(f"DEBUG: Mapping: {dict(zip(self.label_encoder.classes_, range(len(self.label_encoder.classes_))))}")
-        else:
-            y_encoded = None
-
-        # Split data only if we have target values
-        if y_encoded is not None:
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y_encoded, test_size=self.test_size, random_state=self.random_state
-            )
-            print(f"DEBUG: Train/test split - X_train: {X_train.shape}, X_test: {X_test.shape}")
-            print(f"DEBUG: y_train unique: {np.unique(y_train)}, y_test unique: {np.unique(y_test)}")
-        else:
-            X_train, X_test, y_train, y_test = X, X, None, None
-            print("DEBUG: No target values - using all data for both train and test")
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y_encoded, test_size=self.test_size, random_state=self.random_state
+        )
 
         # Scale features
         X_train_scaled = self.scaler.fit_transform(X_train)
-        print(f"DEBUG: Fitted scaler on training data, mean shape: {self.scaler.mean_.shape}")
-
-        if X_test is not None:
-            X_test_scaled = self.scaler.transform(X_test)
-        else:
-            X_test_scaled = None
+        X_test_scaled = self.scaler.transform(X_test)
 
         return X_train_scaled, X_test_scaled, y_train, y_test
 
     def _prune_stagnant_connections(self, epoch: int):
         """Prune connections that haven't changed significantly from initial values"""
-        if not self.pruning_enabled:
-            return
+        # Early return if pruning is disabled or for histogram model
         if (self.pruning_warmup_epochs == 0 or
-            self.model_type == 'histogram' or
+            self.model_type == 'histogram' or  # Skip pruning for histogram model
             epoch <= self.pruning_warmup_epochs or
             self.initial_W is None or
             self.current_W is None or
@@ -2361,7 +2131,7 @@ class GPUDBNN:
         n_to_prune = int(n_stagnant * self.pruning_aggressiveness)
 
         # Ensure we don't prune all connections
-        min_connections = max(5, int(self.current_W.shape[1] * 0.1))
+        min_connections = max(5, int(self.current_W.shape[1] * 0.1))  # Keep at least 10% or 5 connections
         if (self.current_W.shape[1] - n_to_prune) < min_connections:
             n_to_prune = max(0, self.current_W.shape[1] - min_connections)
 
@@ -2384,7 +2154,7 @@ class GPUDBNN:
             print(f"Pruned {len(unique_cols_to_prune)} stagnant feature pairs")
 
     def train(self):
-        """Train the model with enhanced parallel processing"""
+        """Train the model"""
         if not self.train_enabled:
             print("Training is disabled in configuration")
             return
@@ -2393,11 +2163,6 @@ class GPUDBNN:
 
         # Prepare data
         X_train, X_test, y_train, y_test = self._prepare_data()
-
-        # Verify label encoder state
-        print(f"DEBUG: Before training - Label encoder classes: {self.label_encoder.classes_}")
-        print(f"DEBUG: Before training - y_train unique: {np.unique(y_train) if y_train is not None else 'None'}")
-        print(f"DEBUG: Before training - y_test unique: {np.unique(y_test) if y_test is not None else 'None'}")
 
         # Set up visualization
         if self.visualization_enabled and self.visualizer is not None:
@@ -2446,7 +2211,7 @@ class GPUDBNN:
                 if self.model_type == 'gaussian':
                     self._prune_stagnant_connections(epoch)
 
-                # Compute posteriors for training set with parallel processing
+                # Compute posteriors for training set
                 train_posteriors = self._compute_batch_posterior(
                     self._ensure_numpy(X_train) if self.use_gpu else X_train
                 )
@@ -2461,20 +2226,21 @@ class GPUDBNN:
                 training_errors.append(train_error)
                 training_accuracies.append(train_accuracy)
 
-                # Create visualizations
+                # Create visualizations - UPDATED METHOD CALLS
                 if (self.visualization_enabled and self.visualizer is not None
                     and self.current_W is not None):
 
                     # Create interactive prior distribution visualization
-                    if epoch % 10 == 0:
+                    if epoch % 10 == 0:  # Every 10 epochs for priors
                         self.visualizer.create_interactive_prior_distribution(epoch, self.current_W)
 
                     # Create feature space visualization less frequently
-                    if epoch % 25 == 0:
+                    if epoch % 25 == 0:  # Every 25 epochs for feature space
                         self.visualizer.create_interactive_feature_space_3d(epoch)
 
                 # Compute test error and accuracy if not train_only
-                if not self.train_only:
+
+                if not self.train_only=='yes':
                     test_posteriors = self._compute_batch_posterior(
                         self._ensure_numpy(X_test) if self.use_gpu else X_test
                     )
@@ -2489,7 +2255,7 @@ class GPUDBNN:
 
                     # Check for improvement
                     if test_error < self.best_error:
-                        print(f"Test accuracy improved from {self.best_accuracy:.4f} to {test_accuracy:.4f}")
+                        print(f"Test accuracy improved from {self.best_accuracy} to {test_accuracy}")
                         self.best_error = test_error
                         self.best_accuracy = test_accuracy
                         self.best_W = self.current_W.copy()
@@ -2517,9 +2283,9 @@ class GPUDBNN:
                     print("In train only mode")
                     print('=='*60)
                     # For train_only mode, just track training performance
-                    if self.best_accuracy < train_accuracy:
-                        self.best_error = 1 - train_error
-                        self.best_accuracy = train_accuracy
+                    if self.best_accuracy  < 1- train_accuracy:
+                        self.best_error = 1- train_error
+                        self.best_accuracy = 1- train_accuracy #Always use Test accuracy as guide to avoid over fitting
                         self.best_W = self.current_W.copy()
                         best_epoch = epoch
                         trials_without_improvement = 0
@@ -2552,7 +2318,7 @@ class GPUDBNN:
                         posteriors = train_posteriors[idx]
                         failed_cases.append((features, true_class, posteriors))
 
-                    # Update priors based on failed cases with parallel processing
+                    # Update priors based on failed cases
                     self._update_priors_parallel(failed_cases, batch_size=100)
 
                 # Check for keyboard interrupt
@@ -2573,9 +2339,9 @@ class GPUDBNN:
 
         print(f"Training completed. Best epoch: {best_epoch}")
         print(f"Best Test error: {self.best_error:.4f}")
-        print(f"Best Test accuracy: {self.best_accuracy:.4f}")
+        print(f"Best  Test accuracy: {self.best_accuracy:.4f}")
 
-        # Finalize all visualizations after training
+        # Finalize all visualizations after training - UPDATED METHOD CALL
         if self.visualization_enabled and self.visualizer is not None:
             self.visualizer.finalize_visualizations(
                 self.current_W, training_errors, training_accuracies
@@ -2588,6 +2354,7 @@ class GPUDBNN:
         if not self.train_only:
             self._plot_training_history(training_errors, test_errors, training_accuracies, test_accuracies)
 
+
     def _setup_keyboard_control(self):
         """Setup keyboard listener for training control"""
         self.skip_training = False
@@ -2596,7 +2363,7 @@ class GPUDBNN:
             try:
                 if key.char == 'q':
                     self.skip_training = True
-                    return False
+                    return False  # Stop listener
             except AttributeError:
                 pass
 
@@ -2638,188 +2405,119 @@ class GPUDBNN:
         plt.savefig(f'{self.dataset_name}_training_history.png')
         plt.close()
 
+    def _validate_prediction_ready(self) -> bool:
+        """Validate that all required components for prediction are available"""
+        checks = []
+
+        # Check weights
+        if self.best_W is None and self.current_W is None:
+            checks.append("❌ No weights available")
+
+        # Check label encoder
+        if not hasattr(self.label_encoder, 'classes_') or len(self.label_encoder.classes_) == 0:
+            checks.append("❌ Label encoder not fitted")
+
+        # Check scaler
+        if not hasattr(self.scaler, 'mean_') or self.scaler.mean_ is None:
+            checks.append("❌ Scaler not fitted")
+
+        # Check likelihood parameters based on model type
+        if self.model_type == 'histogram':
+            if self.histograms is None:
+                checks.append("❌ Histogram parameters not computed")
+        else:  # gaussian
+            if self.likelihood_params is None:
+                checks.append("❌ Gaussian likelihood parameters not computed")
+
+        if checks:
+            print("Prediction readiness check failed:")
+            for check in checks:
+                print(f"  {check}")
+            return False
+
+        return True
+
+    def _ensure_likelihood_parameters(self, X_train: np.ndarray, y_train: np.ndarray) -> bool:
+        """Ensure likelihood parameters are computed if missing"""
+        if self.model_type == 'histogram':
+            if self.histograms is None:
+                print("Computing histogram parameters for prediction...")
+                try:
+                    self._compute_likelihood_parameters(X_train, y_train)
+                    return True
+                except Exception as e:
+                    print(f"❌ Failed to compute histogram parameters: {e}")
+                    return False
+        else:  # gaussian
+            if self.likelihood_params is None:
+                print("Computing Gaussian likelihood parameters for prediction...")
+                try:
+                    self._compute_likelihood_parameters(X_train, y_train)
+                    return True
+                except Exception as e:
+                    print(f"❌ Failed to compute Gaussian parameters: {e}")
+                    return False
+        return True
+
     def predict(self, X: np.ndarray = None) -> np.ndarray:
-        """Make predictions on new data with proper label encoding handling"""
+        """Make predictions on new data"""
         if not self.predict_enabled:
             print("Prediction is disabled in configuration")
             return None
 
-        # Ensure model is properly initialized for prediction
-        if (self.model_type == 'histogram' and self.histograms is None) or \
-           (self.model_type == 'gaussian' and self.likelihood_params is None):
-            print("Initializing model for prediction...")
-            self._load_best_weights()
+        # Validate that we have all required components
+        if not self._validate_prediction_ready():
+            print("❌ Model not ready for prediction. Required components missing.")
+            return None
 
         if X is None:
-            # Use available data for evaluation
+            # Use test data for evaluation - FIX: Prepare data first
             X_train, X_test, y_train, y_test = self._prepare_data()
 
-            # In predict-only mode, we use all available data for prediction
-            if not self.train_enabled and self.predict_enabled:
-                X_pred = X_train
-                y_true_encoded = y_train if y_train is not None else None
-                # Get original y values for comparison
-                if hasattr(self, 'data') and self.target_column in self.data.columns:
-                    y_true_original = self.data[self.target_column].values
-                else:
-                    y_true_original = None
-                print(f"DEBUG: Predict mode - X_pred shape: {X_pred.shape}, y_true: {y_true_encoded is not None}")
+            # Ensure likelihood parameters are computed
+            if not self._ensure_likelihood_parameters(X_train, y_train):
+                print("❌ Failed to compute likelihood parameters for prediction")
+                return None
+
+            if self.use_gpu:
+                X_test_tensor = self._to_tensor(X_test)
+                test_posteriors = self._compute_batch_posterior(
+                    self._ensure_numpy(X_test_tensor) if self.use_gpu else X_test
+                )
+                test_predictions = np.argmax(test_posteriors, axis=1)
+                y_test_numpy = self._ensure_numpy(y_test) if self.use_gpu else y_test
             else:
-                X_pred = X_test
-                y_true_encoded = y_test
-                y_true_original = None
+                test_posteriors = self._compute_batch_posterior(X_test)
+                test_predictions = np.argmax(test_posteriors, axis=1)
+                y_test_numpy = y_test
 
-            # Make predictions
-            predictions_posteriors = self._compute_batch_posterior(X_pred)
-            predictions_encoded = np.argmax(predictions_posteriors, axis=1)
+            # Calculate and print metrics
+            accuracy = accuracy_score(y_test_numpy, test_predictions)
+            print(f"Test Accuracy: {accuracy:.4f}")
 
-            # FIX: Convert encoded predictions back to original labels
-            try:
-                predictions_original = self.label_encoder.inverse_transform(predictions_encoded)
-                print(f"DEBUG: Successfully decoded predictions to original labels")
-            except ValueError as e:
-                print(f"DEBUG: Error decoding predictions: {e}")
-                print(f"DEBUG: Label encoder classes: {self.label_encoder.classes_}")
-                print(f"DEBUG: Unique predictions (encoded): {np.unique(predictions_encoded)}")
-                # Fallback: use encoded values as original (not ideal but works)
-                predictions_original = predictions_encoded
+            # Classification report - convert numeric class labels to strings
+            target_names = [str(cls) for cls in self.label_encoder.classes_]
+            print("\nClassification Report:")
+            print(classification_report(y_test_numpy, test_predictions,
+                                      target_names=target_names))
 
-            # DEBUG: Check prediction distribution
-            print(f"DEBUG: Prediction distribution (original):")
-            unique_preds, pred_counts = np.unique(predictions_original, return_counts=True)
-            for pred, count in zip(unique_preds, pred_counts):
-                print(f"  Class {pred}: {count} predictions ({count/len(predictions_original)*100:.2f}%)")
+            # Confusion matrix
+            cm = confusion_matrix(y_test_numpy, test_predictions)
+            plt.figure(figsize=(8, 6))
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                       xticklabels=target_names,
+                       yticklabels=target_names)
+            plt.title('Confusion Matrix')
+            plt.ylabel('True Label')
+            plt.xlabel('Predicted Label')
+            plt.tight_layout()
+            plt.savefig(f'{self.dataset_name}_confusion_matrix.png')
+            plt.close()
 
-            print(f"DEBUG: Posterior probabilities shape: {predictions_posteriors.shape}")
-            print(f"DEBUG: Posterior range: [{np.min(predictions_posteriors):.6f}, {np.max(predictions_posteriors):.6f}]")
-
-            # Calculate and print metrics only if we have true labels
-            if y_true_encoded is not None:
-                # FIX: Use encoded values for accuracy calculation since they're consistent
-                accuracy = accuracy_score(y_true_encoded, predictions_encoded)
-                print(f"\n{'='*60}")
-                print(f"PREDICTION RESULTS WITH GROUND TRUTH VALIDATION")
-                print(f"{'='*60}")
-                print(f"Dataset size: {len(predictions_encoded)} samples")
-                print(f"Overall Accuracy: {accuracy:.4f}")
-
-                # Calculate per-class metrics using encoded values but show original class names
-                unique_true_encoded = np.unique(y_true_encoded)
-                print(f"\nPer-class performance:")
-                for class_encoded in unique_true_encoded:
-                    if class_encoded == -1:  # Skip unseen classes
-                        continue
-
-                    class_mask = (y_true_encoded == class_encoded)
-                    if np.sum(class_mask) > 0:
-                        class_accuracy = accuracy_score(y_true_encoded[class_mask], predictions_encoded[class_mask])
-                        try:
-                            # Convert encoded class back to original class name for display
-                            class_name = self.label_encoder.inverse_transform([class_encoded])[0]
-                        except ValueError:
-                            class_name = f"Class_{class_encoded}(unseen)"
-                        print(f"  {class_name}: {np.sum(class_mask)} samples, Accuracy: {class_accuracy:.4f}")
-
-                # Classification report - use encoded values with original class names
-                try:
-                    # Get all unique classes that appear in both true and predicted labels
-                    all_classes = np.union1d(np.unique(y_true_encoded), np.unique(predictions_encoded))
-                    target_names = []
-                    valid_classes = []
-
-                    for cls in all_classes:
-                        if cls == -1:  # Skip unseen classes
-                            continue
-                        try:
-                            class_name = self.label_encoder.inverse_transform([cls])[0]
-                            target_names.append(str(class_name))
-                            valid_classes.append(cls)
-                        except ValueError:
-                            # Skip classes that can't be decoded
-                            continue
-
-                    if len(valid_classes) > 0:
-                        print(f"\nDetailed Classification Report:")
-                        print(classification_report(y_true_encoded, predictions_encoded,
-                                                  labels=valid_classes,
-                                                  target_names=target_names, digits=4))
-
-                        # Confusion matrix
-                        cm = confusion_matrix(y_true_encoded, predictions_encoded, labels=valid_classes)
-                        plt.figure(figsize=(10, 8))
-                        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                                   xticklabels=target_names,
-                                   yticklabels=target_names)
-                        plt.title(f'Confusion Matrix - {self.dataset_name}')
-                        plt.ylabel('True Label')
-                        plt.xlabel('Predicted Label')
-                        plt.tight_layout()
-                        plt.savefig(f'{self.dataset_name}_confusion_matrix.png', dpi=300, bbox_inches='tight')
-                        plt.close()
-                        print(f"Confusion matrix saved to {self.dataset_name}_confusion_matrix.png")
-
-                except Exception as e:
-                    print(f"Warning: Could not generate classification report: {e}")
-
-                # Save detailed predictions with probabilities
-                try:
-                    # Convert encoded true labels back to original names
-                    decoded_true_labels = []
-                    for encoded_val in y_true_encoded:
-                        if encoded_val == -1:
-                            decoded_true_labels.append("UNSEEN_CLASS")
-                        else:
-                            try:
-                                decoded_true_labels.append(self.label_encoder.inverse_transform([encoded_val])[0])
-                            except ValueError:
-                                decoded_true_labels.append(f"Class_{encoded_val}")
-
-                    decoded_predictions = []
-                    for encoded_val in predictions_encoded:
-                        try:
-                            decoded_predictions.append(self.label_encoder.inverse_transform([encoded_val])[0])
-                        except ValueError:
-                            decoded_predictions.append(f"Class_{encoded_val}")
-
-                    predictions_df = pd.DataFrame({
-                        'true_label': decoded_true_labels,
-                        'predicted_label': decoded_predictions,
-                        'correct': (y_true_encoded == predictions_encoded)
-                    })
-
-                    # Add probability columns for each class
-                    trained_class_names = self.label_encoder.classes_
-                    for i, class_name in enumerate(trained_class_names):
-                        if i < predictions_posteriors.shape[1]:
-                            predictions_df[f'prob_{class_name}'] = predictions_posteriors[:, i]
-
-                    predictions_df.to_csv(f'{self.dataset_name}_detailed_predictions.csv', index=False)
-                    print(f"Detailed predictions saved to {self.dataset_name}_detailed_predictions.csv")
-
-                except Exception as e:
-                    print(f"Warning: Could not save detailed predictions: {e}")
-
-            else:
-                # No ground truth available - just save predictions
-                print(f"Made predictions on {len(predictions_original)} samples")
-
-                # Save predictions to file
-                predictions_df = pd.DataFrame({
-                    'predicted_label': predictions_original
-                })
-
-                # Add probability columns if available
-                if predictions_posteriors is not None:
-                    for i, class_name in enumerate(self.label_encoder.classes_):
-                        predictions_df[f'prob_{class_name}'] = predictions_posteriors[:, i]
-
-                predictions_df.to_csv(f'{self.dataset_name}_predictions.csv', index=False)
-                print(f"Predictions saved to {self.dataset_name}_predictions.csv")
-
-            return predictions_original
+            return test_predictions
 
         else:
-            # Predict on new external data
+            # Predict on new data
             # Handle missing values
             X_clean = self._handle_missing_values(pd.DataFrame(X))
 
@@ -2828,7 +2526,7 @@ class GPUDBNN:
                 if column in self.categorical_encoders:
                     X_clean[column] = self.categorical_encoders[column].transform(X_clean[column])
 
-            # Scale features using the pre-trained scaler
+            # Scale features
             X_scaled = self.scaler.transform(X_clean.values)
 
             # Filter out samples with sentinel values
@@ -2836,32 +2534,15 @@ class GPUDBNN:
 
             # Compute posteriors
             posteriors = self._compute_batch_posterior(X_scaled)
-            predictions_encoded = np.argmax(posteriors, axis=1)
+            predictions = np.argmax(posteriors, axis=1)
 
             # Decode predictions
-            try:
-                decoded_predictions = self.label_encoder.inverse_transform(predictions_encoded)
-            except ValueError as e:
-                print(f"Warning: Could not decode predictions: {e}")
-                # Fallback: use encoded values
-                decoded_predictions = predictions_encoded
-
-            # Save external predictions with probabilities
-            predictions_df = pd.DataFrame({
-                'predicted_label': decoded_predictions
-            })
-
-            # Add probability columns
-            for i, class_name in enumerate(self.label_encoder.classes_):
-                predictions_df[f'prob_{class_name}'] = posteriors[:, i]
-
-            predictions_df.to_csv(f'{self.dataset_name}_external_predictions.csv', index=False)
-            print(f"External predictions saved to {self.dataset_name}_external_predictions.csv")
+            decoded_predictions = self.label_encoder.inverse_transform(predictions)
 
             return decoded_predictions
 
     def generate_samples(self, n_samples: int = 100, class_id: int = None):
-        """Generate synthetic samples with parallel processing"""
+        """Generate synthetic samples"""
         if not self.gen_samples_enabled:
             print("Sample generation is disabled in configuration")
             return None
@@ -2874,7 +2555,7 @@ class GPUDBNN:
             return self._generate_gaussian_samples(n_samples, class_id)
 
     def _generate_gaussian_samples(self, n_samples: int = 100, class_id: int = None):
-        """Generate synthetic samples using Gaussian model with parallel processing"""
+        """Generate synthetic samples using Gaussian model"""
         # Get likelihood parameters
         means = self.likelihood_params['means']
         covs = self.likelihood_params['covs']
@@ -2895,10 +2576,11 @@ class GPUDBNN:
             covs = self._to_numpy(covs)
             classes = self._to_numpy(classes)
 
-        # Generate samples with parallel processing
-        def generate_single_sample(sample_data):
-            class_id, pair_probs = sample_data
+        # Generate samples
+        samples = []
+        for class_id in class_ids:
             # Randomly select a feature pair based on weights
+            pair_probs = self.current_W[class_id] / np.sum(self.current_W[class_id])
             pair_idx = np.random.choice(len(self.feature_pairs), p=pair_probs)
 
             # Generate sample from multivariate normal distribution
@@ -2911,17 +2593,7 @@ class GPUDBNN:
                 # Handle singular covariance matrices
                 sample = mean + np.random.normal(0, 0.1, size=len(mean))
 
-            return sample
-
-        # Prepare data for parallel processing
-        sample_data_list = []
-        for class_id in class_ids:
-            pair_probs = self.current_W[class_id] / np.sum(self.current_W[class_id])
-            sample_data_list.append((class_id, pair_probs))
-
-        # Generate samples in parallel
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            samples = list(executor.map(generate_single_sample, sample_data_list))
+            samples.append(sample)
 
         samples = np.array(samples)
 
@@ -2931,7 +2603,7 @@ class GPUDBNN:
         return samples_original, class_ids
 
     def _generate_histogram_samples(self, n_samples: int = 100, class_id: int = None):
-        """Generate synthetic samples using histogram model with parallel processing"""
+        """Generate synthetic samples using histogram model"""
         n_features = self.histograms.shape[0]
         n_classes = self.histograms.shape[2]
 
@@ -2944,9 +2616,8 @@ class GPUDBNN:
             # Generate samples from specific class
             class_ids = np.full(n_samples, class_id)
 
-        # Generate samples with parallel processing
-        def generate_single_sample(sample_data):
-            class_id = sample_data
+        samples = []
+        for class_id in class_ids:
             sample = []
             for feature_idx in range(n_features):
                 # Select bin based on histogram probabilities
@@ -2959,11 +2630,7 @@ class GPUDBNN:
                 value = np.random.uniform(bin_start, bin_end)
                 sample.append(value)
 
-            return sample
-
-        # Generate samples in parallel
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            samples = list(executor.map(generate_single_sample, class_ids))
+            samples.append(sample)
 
         samples = np.array(samples)
 
@@ -3004,7 +2671,6 @@ def main():
     print(f"Train only: {model.train_only}")
     print(f"Train enabled: {model.train_enabled}")
     print(f"Predict enabled: {model.predict_enabled}")
-
     # Train the model
     if model.train_enabled:
         model.train()
