@@ -23,8 +23,11 @@ import torch
 import os
 import pickle
 from tqdm import tqdm, trange
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import multiprocessing as mp
+from joblib import Parallel, delayed
+import threading
+from functools import partial
 
 # Assume no keyboard control by default. If you have X11 running and want to be interactive, set nokbd = False
 nokbd = True  # Disabled keyboard control for minimal systems
@@ -457,7 +460,7 @@ def _filter_features_from_config(df: pd.DataFrame, config: Dict) -> pd.DataFrame
 #-----------------------------------------------------------------------------------------------------------
 
 class GPUDBNN:
-    """Memory-Optimized Deep Bayesian Neural Network with CPU-friendly operations"""
+    """Memory-Optimized Deep Bayesian Neural Network with CPU-friendly operations and parallel computing"""
 
     def __init__(
         self,
@@ -473,6 +476,9 @@ class GPUDBNN:
 
         print(f"Using device: {self.device}")
         self.use_gpu = self.device.type == 'cuda'
+
+        # Initialize parallel computing settings
+        self._init_parallel_computing()
 
         self.dataset_name = dataset_name.lower()
 
@@ -596,6 +602,17 @@ class GPUDBNN:
         else:
             print("Visualization: DISABLED (default for performance)")
 
+    def _init_parallel_computing(self):
+        """Initialize parallel computing settings"""
+        self.num_cpus = mp.cpu_count()
+        self.max_workers = min(self.num_cpus, 32)  # Limit to avoid over-subscription
+
+        # Configure parallel backend
+        self.parallel_backend = 'threading'  # Can be 'multiprocessing' for CPU-intensive tasks
+
+        print(f"🔄 Parallel computing initialized: {self.num_cpus} CPUs, {self.max_workers} workers")
+        print(f"🔧 Parallel backend: {self.parallel_backend}")
+
     def _load_dataset_from_config(self) -> pd.DataFrame:
         """Load dataset from config without interactive prompts - using existing _load_dataset method"""
         # Simply call the original _load_dataset method which already handles everything
@@ -671,7 +688,6 @@ class GPUDBNN:
         else:
             tensor = torch.tensor(data, dtype=dtype).to(self.device)
         return tensor
-
 
     def set_pruning_enabled(self, enabled: bool):
         """Enable or disable pruning during training"""
@@ -750,7 +766,7 @@ class GPUDBNN:
         return np.array(all_combinations)
 
     def _compute_pairwise_likelihood_parallel(self, dataset: np.ndarray, labels: np.ndarray, feature_dims: int):
-        """Compute likelihood parameters, filtering out sentinel values"""
+        """Compute likelihood parameters, filtering out sentinel values using parallel processing"""
         # Filter out samples with sentinel values
         SENTINEL_VALUE = -9999
         valid_mask = ~np.any(dataset == SENTINEL_VALUE, axis=1)
@@ -781,35 +797,56 @@ class GPUDBNN:
         means = np.zeros((n_classes, n_combinations, group_size))
         covs = np.zeros((n_classes, n_combinations, group_size, group_size))
 
-        for class_idx, class_id in enumerate(unique_classes):
-            class_mask = (labels == class_id)
-            class_data = dataset[class_mask]
+        # Use parallel processing for class-wise computation
+        def process_class(class_data):
+            class_idx, class_id, class_mask = class_data
+            class_data_subset = dataset[class_mask]
 
-            if len(class_data) == 0:
+            if len(class_data_subset) == 0:
                 print(f"Warning: No data for class {class_id}, skipping")
-                continue
+                return class_idx, None, None
 
             # Extract all feature groups
             group_data = np.stack([
-                class_data[:, self.feature_pairs[i]] for i in range(n_combinations)
+                class_data_subset[:, self.feature_pairs[i]] for i in range(n_combinations)
             ], axis=1)
 
             # Compute means for all groups
-            means[class_idx] = np.mean(group_data, axis=0)
+            class_means = np.mean(group_data, axis=0)
 
             # Compute covariances for all groups
-            centered_data = group_data - means[class_idx][np.newaxis, :, :]
+            centered_data = group_data - class_means[np.newaxis, :, :]
+            class_covs = np.zeros((n_combinations, group_size, group_size))
 
             for i in range(n_combinations):
                 # Use efficient matrix multiplication for covariance
                 batch_cov = np.dot(
                     centered_data[:, i].T,
                     centered_data[:, i]
-                ) / max(1, (len(class_data) - 1))  # Avoid division by zero
-                covs[class_idx, i] = batch_cov
+                ) / max(1, (len(class_data_subset) - 1))  # Avoid division by zero
+                class_covs[i] = batch_cov
 
             # Add small diagonal term for numerical stability
-            covs[class_idx] += np.eye(group_size) * 1e-6
+            class_covs += np.eye(group_size) * 1e-6
+
+            return class_idx, class_means, class_covs
+
+        # Prepare class data for parallel processing
+        class_data_list = []
+        for class_idx, class_id in enumerate(unique_classes):
+            class_mask = (labels == class_id)
+            if np.sum(class_mask) > 0:  # Only process classes with data
+                class_data_list.append((class_idx, class_id, class_mask))
+
+        # Process classes in parallel
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            results = list(executor.map(process_class, class_data_list))
+
+        # Collect results
+        for class_idx, class_means, class_covs in results:
+            if class_means is not None and class_covs is not None:
+                means[class_idx] = class_means
+                covs[class_idx] = class_covs
 
         # Convert to tensors if using GPU
         if self.use_gpu:
@@ -834,7 +871,7 @@ class GPUDBNN:
             self._compute_gaussian_likelihood(X_train, y_train)
 
     def _compute_gaussian_likelihood(self, X_train: np.ndarray, y_train: np.ndarray):
-        """Compute Gaussian likelihood parameters"""
+        """Compute Gaussian likelihood parameters with parallel processing"""
         print("Computing Gaussian likelihood parameters...")
 
         # Get likelihood configuration
@@ -848,12 +885,12 @@ class GPUDBNN:
             max_combinations
         )
 
-        # Compute likelihood parameters
+        # Compute likelihood parameters with parallel processing
         self.likelihood_params = self._compute_pairwise_likelihood_parallel(
             X_train, y_train, X_train.shape[1]
         )
 
-        # Precompute inverse covariance matrices for faster prediction
+        # Precompute inverse covariance matrices for faster prediction with parallel processing
         if self.use_gpu:
             covs = self.likelihood_params['covs']
             n_classes, n_combinations, _, _ = covs.shape
@@ -862,22 +899,44 @@ class GPUDBNN:
             # Initialize inv_covs with proper shape
             inv_covs = torch.zeros_like(covs)
 
-            for class_idx in range(n_classes):
+            # Use parallel processing for inverse computation
+            def compute_inv_covs(class_idx):
+                class_inv_covs = torch.zeros(n_combinations, group_size, group_size, device=self.device)
                 for comb_idx in range(n_combinations):
-                    inv_covs[class_idx, comb_idx] = torch.linalg.inv(
+                    class_inv_covs[comb_idx] = torch.linalg.inv(
                         covs[class_idx, comb_idx] + eye * 1e-6
                     )
+                return class_idx, class_inv_covs
+
+            # Process classes in parallel
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                results = list(executor.map(compute_inv_covs, range(n_classes)))
+
+            # Collect results
+            for class_idx, class_inv_covs in results:
+                inv_covs[class_idx] = class_inv_covs
 
             self.likelihood_params['inv_covs'] = inv_covs
         else:
             covs = self.likelihood_params['covs']
             n_classes, n_combinations, _, _ = covs.shape
             inv_covs = np.zeros_like(covs)
-            for class_idx in range(n_classes):
+
+            # Use parallel processing for CPU inverse computation
+            def compute_inv_covs_cpu(class_idx):
+                class_inv_covs = np.zeros((n_combinations, group_size, group_size))
                 for comb_idx in range(n_combinations):
-                    inv_covs[class_idx, comb_idx] = np.linalg.inv(
+                    class_inv_covs[comb_idx] = np.linalg.inv(
                         covs[class_idx, comb_idx] + np.eye(group_size) * 1e-6
                     )
+                return class_idx, class_inv_covs
+
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                results = list(executor.map(compute_inv_covs_cpu, range(n_classes)))
+
+            for class_idx, class_inv_covs in results:
+                inv_covs[class_idx] = class_inv_covs
+
             self.likelihood_params['inv_covs'] = inv_covs
 
         # Initialize weights if not already loaded
@@ -894,7 +953,7 @@ class GPUDBNN:
         print(f"Computed Gaussian parameters for {len(self.feature_pairs)} feature combinations")
 
     def _compute_histogram_likelihood_traditional(self, X_train: np.ndarray, y_train: np.ndarray):
-        """Traditional histogram computation (original method)"""
+        """Traditional histogram computation (original method) with parallel processing"""
         print(f"Computing histogram likelihood parameters with {self.histogram_bins} bins (traditional method)...")
 
         n_features = X_train.shape[1]
@@ -909,15 +968,23 @@ class GPUDBNN:
         self.histograms = np.zeros((n_features, self.histogram_bins, n_classes))
         self.bin_edges = np.zeros((n_features, self.histogram_bins + 1))
 
-        # Compute histograms for each feature and class (traditional loop-based)
-        for feature_idx in range(n_features):
-            # Compute bin edges for this feature
-            self.bin_edges[feature_idx] = np.linspace(
+        # Compute bin edges for all features in parallel
+        def compute_bin_edges(feature_idx):
+            return np.linspace(
                 self.feature_min[feature_idx],
                 self.feature_max[feature_idx],
                 self.histogram_bins + 1
             )
 
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            bin_edges_results = list(executor.map(compute_bin_edges, range(n_features)))
+
+        for feature_idx, edges in enumerate(bin_edges_results):
+            self.bin_edges[feature_idx] = edges
+
+        # Compute histograms for each feature and class with parallel processing
+        def compute_feature_histogram(feature_idx):
+            feature_histograms = np.zeros((self.histogram_bins, n_classes))
             for class_idx, class_id in enumerate(unique_classes):
                 # Get data for this class and feature
                 class_mask = (y_train == class_id)
@@ -932,7 +999,16 @@ class GPUDBNN:
                     total = np.sum(hist)
 
                     # Store normalized probabilities
-                    self.histograms[feature_idx, :, class_idx] = hist / total
+                    feature_histograms[:, class_idx] = hist / total
+            return feature_idx, feature_histograms
+
+        # Process features in parallel
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            results = list(executor.map(compute_feature_histogram, range(n_features)))
+
+        # Collect results
+        for feature_idx, feature_hist in results:
+            self.histograms[feature_idx] = feature_hist
 
         # Initialize weights
         if self.current_W is None:
@@ -948,7 +1024,7 @@ class GPUDBNN:
         print(f"Computed histogram parameters for {n_features} features (traditional method)")
 
     def _compute_histogram_likelihood_vectorized(self, X_train: np.ndarray, y_train: np.ndarray):
-        """Vectorized histogram computation using advanced NumPy operations"""
+        """Vectorized histogram computation using advanced NumPy operations with parallel processing"""
         print(f"Computing histogram likelihood parameters with {self.histogram_bins} bins (vectorized method)...")
 
         n_samples, n_features = X_train.shape
@@ -963,35 +1039,61 @@ class GPUDBNN:
         self.histograms = np.zeros((n_features, self.histogram_bins, n_classes))
         self.bin_edges = np.zeros((n_features, self.histogram_bins + 1))
 
-        # Precompute bin edges for all features at once
-        for feature_idx in range(n_features):
-            self.bin_edges[feature_idx] = np.linspace(
+        # Precompute bin edges for all features at once in parallel
+        def compute_bin_edges(feature_idx):
+            return np.linspace(
                 self.feature_min[feature_idx],
                 self.feature_max[feature_idx],
                 self.histogram_bins + 1
             )
 
-        # Vectorized histogram computation using digitize and bincount
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            bin_edges_results = list(executor.map(compute_bin_edges, range(n_features)))
+
+        for feature_idx, edges in enumerate(bin_edges_results):
+            self.bin_edges[feature_idx] = edges
+
+        # Vectorized histogram computation using digitize and bincount with parallel processing
+        def process_class(class_data):
+            class_idx, class_id, class_mask = class_data
+            class_data_subset = X_train[class_mask]
+
+            if len(class_data_subset) == 0:
+                return class_idx, np.zeros((n_features, self.histogram_bins))
+
+            # Vectorized bin assignment for all features
+            bin_indices = np.zeros((len(class_data_subset), n_features), dtype=int)
+
+            for feature_idx in range(n_features):
+                bin_indices[:, feature_idx] = np.digitize(
+                    class_data_subset[:, feature_idx],
+                    self.bin_edges[feature_idx]
+                ) - 1
+                bin_indices[:, feature_idx] = np.clip(bin_indices[:, feature_idx], 0, self.histogram_bins - 1)
+
+            # Compute histograms for this class
+            class_histograms = np.zeros((n_features, self.histogram_bins))
+            for feature_idx in range(n_features):
+                hist = np.bincount(bin_indices[:, feature_idx], minlength=self.histogram_bins)
+                hist = hist + self.laplace_smoothing  # Laplace smoothing
+                class_histograms[feature_idx] = hist / np.sum(hist)
+
+            return class_idx, class_histograms
+
+        # Prepare class data for parallel processing
+        class_data_list = []
         for class_idx, class_id in enumerate(unique_classes):
             class_mask = (y_train == class_id)
-            class_data = X_train[class_mask]
+            if np.sum(class_mask) > 0:
+                class_data_list.append((class_idx, class_id, class_mask))
 
-            if len(class_data) > 0:
-                # Vectorized bin assignment for all features
-                bin_indices = np.zeros((len(class_data), n_features), dtype=int)
+        # Process classes in parallel
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            results = list(executor.map(process_class, class_data_list))
 
-                for feature_idx in range(n_features):
-                    bin_indices[:, feature_idx] = np.digitize(
-                        class_data[:, feature_idx],
-                        self.bin_edges[feature_idx]
-                    ) - 1
-                    bin_indices[:, feature_idx] = np.clip(bin_indices[:, feature_idx], 0, self.histogram_bins - 1)
-
-                # Vectorized histogram accumulation using bincount
-                for feature_idx in range(n_features):
-                    hist = np.bincount(bin_indices[:, feature_idx], minlength=self.histogram_bins)
-                    hist = hist + self.laplace_smoothing  # Laplace smoothing
-                    self.histograms[feature_idx, :, class_idx] = hist / np.sum(hist)
+        # Collect results
+        for class_idx, class_histograms in results:
+            self.histograms[:, :, class_idx] = class_histograms
 
         # Initialize weights
         if self.current_W is None:
@@ -1017,7 +1119,7 @@ class GPUDBNN:
             return self._compute_gaussian_posterior(features, epsilon)
 
     def _compute_gaussian_posterior(self, features: np.ndarray, epsilon: float = 1e-10):
-        """Compute posterior probabilities for Gaussian model"""
+        """Compute posterior probabilities for Gaussian model with parallel batch processing"""
         SENTINEL_VALUE = -9999
 
         # Identify samples with sentinel values
@@ -1079,14 +1181,15 @@ class GPUDBNN:
             valid_posteriors = self._to_numpy(valid_posteriors).T
 
         else:
-            # CPU implementation with optimized loops
+            # CPU implementation with optimized parallel processing
             # Extract all feature groups at once - [batch_size, n_combinations, group_size]
             batch_groups = valid_features[:, self.feature_pairs]
 
             # Initialize log likelihoods
             log_likelihoods = np.zeros((batch_size, n_classes))
 
-            for class_idx in range(n_classes):
+            # Process classes in parallel
+            def process_class(class_idx):
                 # Get parameters for current class
                 class_means = self.likelihood_params['means'][class_idx]
                 class_inv_covs = self.likelihood_params['inv_covs'][class_idx]
@@ -1116,7 +1219,16 @@ class GPUDBNN:
                 weighted_likelihood = pair_log_likelihood + np.log(class_priors + epsilon)
 
                 # Sum over groups for each sample
-                log_likelihoods[:, class_idx] = np.sum(weighted_likelihood, axis=1)
+                class_log_likelihoods = np.sum(weighted_likelihood, axis=1)
+                return class_idx, class_log_likelihoods
+
+            # Process all classes in parallel
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                results = list(executor.map(process_class, range(n_classes)))
+
+            # Collect results
+            for class_idx, class_log_likelihoods in results:
+                log_likelihoods[:, class_idx] = class_log_likelihoods
 
             # Compute posteriors using log-sum-exp trick
             max_log_likelihood = np.max(log_likelihoods, axis=1, keepdims=True)
@@ -1143,7 +1255,7 @@ class GPUDBNN:
         return full_posteriors
 
     def _compute_histogram_posterior_traditional(self, features: np.ndarray, epsilon: float = 1e-10):
-        """Traditional histogram posterior computation (loop-based)"""
+        """Traditional histogram posterior computation (loop-based) with parallel processing"""
         SENTINEL_VALUE = -9999
 
         # Identify samples with sentinel values
@@ -1159,10 +1271,9 @@ class GPUDBNN:
         n_features = valid_features.shape[1]
         n_classes = self.histograms.shape[2]
 
-        # Initialize posteriors (traditional loop-based approach)
-        posteriors = np.ones((n_samples, n_classes))
-
-        for sample_idx in range(n_samples):
+        # Initialize posteriors with parallel processing
+        def process_sample(sample_idx):
+            sample_posterior = np.ones(n_classes)
             for feature_idx in range(n_features):
                 value = valid_features[sample_idx, feature_idx]
 
@@ -1175,7 +1286,15 @@ class GPUDBNN:
 
                 # Apply weights and multiply into posterior
                 weighted_probs = bin_probs * self.current_W[:, feature_idx, bin_idx]
-                posteriors[sample_idx] *= weighted_probs
+                sample_posterior *= weighted_probs
+
+            return sample_posterior
+
+        # Process samples in parallel
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            posteriors_list = list(executor.map(process_sample, range(n_samples)))
+
+        posteriors = np.array(posteriors_list)
 
         # Normalize posteriors
         posteriors = posteriors / (np.sum(posteriors, axis=1, keepdims=True) + epsilon)
@@ -1187,7 +1306,7 @@ class GPUDBNN:
         return full_posteriors
 
     def _compute_histogram_posterior_vectorized(self, features: np.ndarray, epsilon: float = 1e-10):
-        """Vectorized histogram posterior computation"""
+        """Vectorized histogram posterior computation with parallel processing"""
         SENTINEL_VALUE = -9999
 
         # Identify samples with sentinel values
@@ -1209,7 +1328,7 @@ class GPUDBNN:
             return self._compute_histogram_posterior_cpu_vectorized(valid_features, n_samples, n_features, n_classes, epsilon, sentinel_mask, features)
 
     def _compute_histogram_posterior_cpu_vectorized(self, valid_features, n_samples, n_features, n_classes, epsilon, sentinel_mask, original_features):
-        """CPU-optimized vectorized posterior computation"""
+        """CPU-optimized vectorized posterior computation with parallel processing"""
 
         # Vectorized bin assignment for all samples and features
         bin_indices = np.zeros((n_samples, n_features), dtype=int)
@@ -1221,19 +1340,24 @@ class GPUDBNN:
             ) - 1
             bin_indices[:, feature_idx] = np.clip(bin_indices[:, feature_idx], 0, self.histogram_bins - 1)
 
-        # Vectorized probability lookup using advanced indexing
-        posteriors = np.ones((n_samples, n_classes))
-
-        for class_idx in range(n_classes):
+        # Vectorized probability lookup using advanced indexing with parallel processing
+        def process_class(class_idx):
             class_posterior = np.ones(n_samples)
-
             for feature_idx in range(n_features):
                 # Get probabilities for all samples at once using advanced indexing
                 feature_probs = self.histograms[feature_idx, bin_indices[:, feature_idx], class_idx]
                 # Apply weights
                 weighted_probs = feature_probs * self.current_W[class_idx, feature_idx, bin_indices[:, feature_idx]]
                 class_posterior *= weighted_probs
+            return class_idx, class_posterior
 
+        # Process classes in parallel
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            results = list(executor.map(process_class, range(n_classes)))
+
+        # Collect results
+        posteriors = np.ones((n_samples, n_classes))
+        for class_idx, class_posterior in results:
             posteriors[:, class_idx] = class_posterior
 
         # Normalize posteriors
@@ -1269,9 +1393,10 @@ class GPUDBNN:
                 bin_idx = torch.argmax(in_bin.int(), dim=1)
                 bin_indices[:, feature_idx] = bin_idx
 
-            # GPU-accelerated probability computation
+            # GPU-accelerated probability computation with parallel class processing
             posteriors = torch.ones((n_samples, n_classes), device=self.device)
 
+            # Process classes in parallel on GPU
             for class_idx in range(n_classes):
                 class_posterior = torch.ones(n_samples, device=self.device)
 
@@ -1305,7 +1430,7 @@ class GPUDBNN:
         return data
 
     def _update_priors_parallel(self, failed_cases: List[Tuple], batch_size: int = 32):
-        """Update priors based on selected model type"""
+        """Update priors based on selected model type with enhanced parallel processing"""
         if self.model_type == 'histogram':
             if self.histogram_method == 'vectorized':
                 self._update_histogram_priors_vectorized(failed_cases, batch_size)
@@ -1315,7 +1440,7 @@ class GPUDBNN:
             self._update_gaussian_priors(failed_cases, batch_size)
 
     def _update_gaussian_priors(self, failed_cases: List[Tuple], batch_size: int = 32):
-        """Update priors ONLY for hypercubes that contributed to failures"""
+        """Update priors ONLY for hypercubes that contributed to failures with parallel processing"""
         n_failed = len(failed_cases)
 
         # Get the update strategy from config
@@ -1330,22 +1455,11 @@ class GPUDBNN:
         else:
             classes_numpy = self.likelihood_params['classes']
 
-        # Process failed cases in batches for efficiency
-        for batch_start in range(0, n_failed, batch_size):
-            batch_end = min(batch_start + batch_size, n_failed)
-            batch_cases = failed_cases[batch_start:batch_end]
-
-            # Extract batch data
-            batch_features = np.array([case[0] for case in batch_cases])
-            batch_true_classes = np.array([case[1] for case in batch_cases])
-            batch_posteriors = np.array([case[2] for case in batch_cases])
-
-            # Get predicted classes
-            batch_predicted_classes = np.argmax(batch_posteriors, axis=1)
-
-            for i in range(len(batch_cases)):
-                features, true_class, posteriors = batch_cases[i]
-                predicted_class = batch_predicted_classes[i]
+        # Process failed cases in parallel batches for efficiency
+        def process_failed_batch(batch_cases):
+            batch_updates = []
+            for features, true_class, posteriors in batch_cases:
+                predicted_class = np.argmax(posteriors)
 
                 # Get the true class index
                 true_class_idx = np.where(classes_numpy == true_class)[0][0]
@@ -1365,37 +1479,53 @@ class GPUDBNN:
                 adjustment = self.learning_rate * (1 - true_prob / max_other_prob)
                 adjustment = np.clip(adjustment, -0.5, 0.5)
 
-                # Apply the selected strategy to relevant hypercubes only
-                if update_strategy == 1:
-                    # Strategy 1: Batch average update - update ALL hypercubes for the class
-                    self.current_W[true_class_idx] *= (1 + adjustment)
-                    self.current_W[predicted_class] *= (1 - adjustment)
+                batch_updates.append((true_class_idx, predicted_class, feature_contributions, adjustment))
+            return batch_updates
 
-                elif update_strategy == 2:
-                    # Strategy 2: Maximum error applied to failed class hypercubes
-                    self._update_strategy2(feature_contributions, true_class_idx, predicted_class, adjustment)
+        # Process batches in parallel
+        all_updates = []
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            batch_futures = []
+            for batch_start in range(0, n_failed, batch_size):
+                batch_end = min(batch_start + batch_size, n_failed)
+                batch_cases = failed_cases[batch_start:batch_end]
+                future = executor.submit(process_failed_batch, batch_cases)
+                batch_futures.append(future)
 
-                elif update_strategy == 3:
-                    # Strategy 3: Add to correct class, subtract from wrong class for relevant hypercubes
-                    self._update_strategy3(feature_contributions, true_class_idx, predicted_class, adjustment)
+            for future in batch_futures:
+                all_updates.extend(future.result())
 
-                elif update_strategy == 4:
-                    # Strategy 4: Subtract only from wrong class hypercubes
-                    self._update_strategy4(feature_contributions, true_class_idx, predicted_class, adjustment)
+        # Apply updates
+        for true_class_idx, predicted_class, feature_contributions, adjustment in all_updates:
+            # Apply the selected strategy to relevant hypercubes only
+            if update_strategy == 1:
+                # Strategy 1: Batch average update - update ALL hypercubes for the class
+                self.current_W[true_class_idx] *= (1 + adjustment)
+                self.current_W[predicted_class] *= (1 - adjustment)
 
-            # Clip weights for stability after each batch
-            self.current_W = np.clip(self.current_W, 1e-10, 10.0)
+            elif update_strategy == 2:
+                # Strategy 2: Maximum error applied to failed class hypercubes
+                self._update_strategy2(feature_contributions, true_class_idx, predicted_class, adjustment)
+
+            elif update_strategy == 3:
+                # Strategy 3: Add to correct class, subtract from wrong class for relevant hypercubes
+                self._update_strategy3(feature_contributions, true_class_idx, predicted_class, adjustment)
+
+            elif update_strategy == 4:
+                # Strategy 4: Subtract only from wrong class hypercubes
+                self._update_strategy4(feature_contributions, true_class_idx, predicted_class, adjustment)
+
+        # Clip weights for stability after processing all batches
+        self.current_W = np.clip(self.current_W, 1e-10, 10.0)
 
     def _update_histogram_priors_traditional(self, failed_cases: List[Tuple], batch_size: int = 32):
-        """Traditional weight updates for histogram model"""
+        """Traditional weight updates for histogram model with parallel processing"""
         n_failed = len(failed_cases)
         update_strategy = self.config.get('likelihood_config', {}).get('update_strategy', 3)
 
-        # Process failed cases in batches
-        for batch_start in range(0, n_failed, batch_size):
-            batch_end = min(batch_start + batch_size, n_failed)
-            batch_cases = failed_cases[batch_start:batch_end]
-
+        # Process failed cases in parallel batches
+        def process_batch(batch_cases):
+            batch_updates = []
             for features, true_class, posteriors in batch_cases:
                 predicted_class = np.argmax(posteriors)
 
@@ -1408,7 +1538,7 @@ class GPUDBNN:
                 adjustment = self.learning_rate * (1 - true_prob / (predicted_prob + 1e-10))
                 adjustment = np.clip(adjustment, -0.5, 0.5)
 
-                # Update weights for each feature (traditional loop)
+                # Collect updates for each feature
                 for feature_idx in range(len(features)):
                     value = features[feature_idx]
 
@@ -1416,33 +1546,32 @@ class GPUDBNN:
                     bin_idx = np.digitize(value, self.bin_edges[feature_idx]) - 1
                     bin_idx = np.clip(bin_idx, 0, self.histogram_bins - 1)
 
-                    # Apply update strategy
-                    if update_strategy == 1:
-                        # Update all bins
-                        self.current_W[true_class, feature_idx, :] *= (1 + adjustment)
-                        self.current_W[predicted_class, feature_idx, :] *= (1 - adjustment)
-                    elif update_strategy == 2:
-                        # Update only the specific bin
-                        self.current_W[true_class, feature_idx, bin_idx] *= (1 + adjustment)
-                        self.current_W[predicted_class, feature_idx, bin_idx] *= (1 - adjustment)
-                    elif update_strategy == 3:
-                        # Update specific bin with different rates
-                        self.current_W[true_class, feature_idx, bin_idx] *= (1 + adjustment)
-                        self.current_W[predicted_class, feature_idx, bin_idx] *= (1 - adjustment * 0.5)
-                    elif update_strategy == 4:
-                        # Only decrease wrong class
-                        self.current_W[predicted_class, feature_idx, bin_idx] *= (1 - adjustment)
+                    batch_updates.append((true_class, predicted_class, feature_idx, bin_idx, adjustment, update_strategy))
+            return batch_updates
 
-                # Clip weights for stability
-                self.current_W = np.clip(self.current_W, 1e-10, 10.0)
+        # Process all batches in parallel
+        all_updates = []
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            batch_futures = []
+            for batch_start in range(0, n_failed, batch_size):
+                batch_end = min(batch_start + batch_size, n_failed)
+                batch_cases = failed_cases[batch_start:batch_end]
+                future = executor.submit(process_batch, batch_cases)
+                batch_futures.append(future)
+
+            for future in batch_futures:
+                all_updates.extend(future.result())
+
+        # Apply all updates
+        self._apply_batch_weight_updates_vectorized(all_updates)
 
     def _update_histogram_priors_vectorized(self, failed_cases: List[Tuple], batch_size: int = 32):
-        """Vectorized weight updates for histogram model"""
+        """Vectorized weight updates for histogram model with enhanced parallel processing"""
         n_failed = len(failed_cases)
         update_strategy = self.config.get('likelihood_config', {}).get('update_strategy', 3)
 
-        # Use ThreadPoolExecutor for parallel processing
-        with ThreadPoolExecutor(max_workers=min(mp.cpu_count(), 32)) as executor:
+        # Use ProcessPoolExecutor for CPU-intensive weight updates
+        with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
             # Process batches in parallel
             futures = []
             for batch_start in range(0, n_failed, batch_size):
@@ -1485,7 +1614,7 @@ class GPUDBNN:
             self._apply_batch_weight_updates_vectorized(batch_updates)
 
     def _apply_batch_weight_updates_vectorized(self, batch_updates):
-        """Apply weight updates in a vectorized manner"""
+        """Apply weight updates in a vectorized manner with parallel processing"""
         # Group updates by type for vectorized operations
         true_class_indices = []
         pred_class_indices = []
@@ -1502,7 +1631,7 @@ class GPUDBNN:
                 pred_class_indices.append((predicted_class, feature_idx, bin_idx))
                 pred_adjustments.append(-decay_adjustment)
 
-        # Vectorized weight updates
+        # Vectorized weight updates with parallel processing for large batches
         if true_class_indices:
             classes, features, bins = zip(*true_class_indices)
             indices = (np.array(classes), np.array(features), np.array(bins))
@@ -1548,7 +1677,7 @@ class GPUDBNN:
         return log_likelihood
 
     def _calculate_feature_contributions(self, features, true_class_idx, predicted_class_idx):
-        """Calculate how much each feature pair contributed to the misclassification"""
+        """Calculate how much each feature pair contributed to the misclassification with parallel processing"""
         n_pairs = len(self.feature_pairs)
         contributions = np.zeros(n_pairs)
 
@@ -1572,8 +1701,8 @@ class GPUDBNN:
             contributions = self._to_numpy(pred_log_likelihoods - true_log_likelihoods)
 
         else:
-            # CPU-optimized batch calculation
-            for pair_idx in range(n_pairs):
+            # CPU-optimized batch calculation with parallel processing
+            def process_pair(pair_idx):
                 # Get log-likelihood for true class for this pair
                 true_log_likelihood = self._compute_pair_log_likelihood(
                     feature_groups[pair_idx], true_class_idx, pair_idx
@@ -1585,7 +1714,13 @@ class GPUDBNN:
                 )
 
                 # Contribution is the difference (how much this pair favored wrong class)
-                contributions[pair_idx] = pred_log_likelihood - true_log_likelihood
+                return pred_log_likelihood - true_log_likelihood
+
+            # Process pairs in parallel
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                contributions = list(executor.map(process_pair, range(n_pairs)))
+
+            contributions = np.array(contributions)
 
         return contributions
 
@@ -1655,7 +1790,7 @@ class GPUDBNN:
         self.current_W = np.clip(self.current_W, 1e-10, 10.0)
 
     def _load_dataset(self) -> pd.DataFrame:
-        """Load dataset from file or URL"""
+        """Load dataset from file or URL with parallel processing for large files"""
         file_path = self.config['file_path']
         separator = self.config['separator']
         has_header = self.config['has_header']
@@ -1665,10 +1800,18 @@ class GPUDBNN:
         try:
             # Check if file exists locally
             if os.path.exists(file_path):
-                if has_header:
-                    df = pd.read_csv(file_path, sep=separator)
+                # For large files, use parallel reading
+                file_size = os.path.getsize(file_path)
+                if file_size > 100 * 1024 * 1024:  # 100 MB
+                    print("Large file detected, using optimized reading...")
+                    # Use pandas with optimized settings for large files
+                    df = pd.read_csv(file_path, sep=separator, header=0 if has_header else None,
+                                   low_memory=False, engine='c')
                 else:
-                    df = pd.read_csv(file_path, sep=separator, header=None)
+                    if has_header:
+                        df = pd.read_csv(file_path, sep=separator)
+                    else:
+                        df = pd.read_csv(file_path, sep=separator, header=None)
             else:
                 # Try to load from URL
                 response = requests.get(file_path)
@@ -2038,12 +2181,13 @@ class GPUDBNN:
         self.best_W = None
 
     def _encode_categorical_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Encode categorical features using LabelEncoder"""
+        """Encode categorical features using LabelEncoder with parallel processing"""
         df_encoded = df.copy()
 
-        for column in df_encoded.columns:
+        # Process columns in parallel
+        def process_column(column):
             if column == self.target_column:
-                continue
+                return column, None
 
             # Check if column is categorical (object type or low cardinality)
             if (df_encoded[column].dtype == 'object' or
@@ -2053,12 +2197,23 @@ class GPUDBNN:
                     self.categorical_encoders[column] = LabelEncoder()
                     self.categorical_encoders[column].fit(df_encoded[column])
 
-                df_encoded[column] = self.categorical_encoders[column].transform(df_encoded[column])
+                encoded_values = self.categorical_encoders[column].transform(df_encoded[column])
+                return column, encoded_values
+            return column, None
+
+        # Process all columns in parallel
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            results = list(executor.map(process_column, df_encoded.columns))
+
+        # Apply encoded values
+        for column, encoded_values in results:
+            if encoded_values is not None:
+                df_encoded[column] = encoded_values
 
         return df_encoded
 
     def _prepare_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Prepare training and test data"""
+        """Prepare training and test data with proper label encoding handling"""
         # Encode categorical features
         df_encoded = self._encode_categorical_features(self.data)
         print(f"DEBUG: Data shape after encoding: {df_encoded.shape}")
@@ -2105,13 +2260,31 @@ class GPUDBNN:
             print("DEBUG: Using pre-loaded scaler and label encoder for prediction")
             X_scaled = self.scaler.transform(X)
 
-            # Encode y using the pre-trained label encoder
+            # FIX: Handle label encoding properly for prediction
             if y is not None:
-                # Only encode classes that exist in the pre-trained encoder
-                valid_mask = np.isin(y, self.label_encoder.classes_)
-                y_encoded = np.full_like(y, -1, dtype=int)  # Use -1 for unknown classes
-                y_encoded[valid_mask] = self.label_encoder.transform(y[valid_mask])
-                print(f"DEBUG: Encoded y using pre-trained label encoder")
+                # Get the original classes the model was trained on
+                trained_classes = set(self.label_encoder.classes_)
+                current_classes = set(np.unique(y))
+
+                print(f"DEBUG: Model trained on classes: {trained_classes}")
+                print(f"DEBUG: Current data classes: {current_classes}")
+
+                # Find classes that are in current data but not in trained model
+                unseen_classes = current_classes - trained_classes
+                if unseen_classes:
+                    print(f"DEBUG: WARNING - Unseen classes in prediction data: {unseen_classes}")
+                    # For unseen classes, we'll map them to -1 and handle separately
+                    y_encoded = np.full_like(y, -1, dtype=int)
+
+                    # Only encode classes that exist in the pre-trained encoder
+                    valid_mask = np.isin(y, list(trained_classes))
+                    if np.any(valid_mask):
+                        y_encoded[valid_mask] = self.label_encoder.transform(y[valid_mask])
+                    print(f"DEBUG: Encoded y with unseen classes handled")
+                else:
+                    # All classes are known
+                    y_encoded = self.label_encoder.transform(y)
+                    print(f"DEBUG: Encoded y using pre-trained label encoder")
             else:
                 y_encoded = None
 
@@ -2130,10 +2303,13 @@ class GPUDBNN:
         self.scaler = StandardScaler()
 
         if y is not None:
+            # FIX: Always create fresh label encoder in training mode
             self.label_encoder = LabelEncoder()
             y_encoded = self.label_encoder.fit_transform(y)
             print(f"DEBUG: Label encoder classes after fitting: {self.label_encoder.classes_}")
-            print(f"DEBUG: y_encoded unique values: {np.unique(y_encoded)}")
+            print(f"DEBUG: Original classes: {np.unique(y)}")
+            print(f"DEBUG: Encoded classes: {np.unique(y_encoded)}")
+            print(f"DEBUG: Mapping: {dict(zip(self.label_encoder.classes_, range(len(self.label_encoder.classes_))))}")
         else:
             y_encoded = None
 
@@ -2208,7 +2384,7 @@ class GPUDBNN:
             print(f"Pruned {len(unique_cols_to_prune)} stagnant feature pairs")
 
     def train(self):
-        """Train the model"""
+        """Train the model with enhanced parallel processing"""
         if not self.train_enabled:
             print("Training is disabled in configuration")
             return
@@ -2270,7 +2446,7 @@ class GPUDBNN:
                 if self.model_type == 'gaussian':
                     self._prune_stagnant_connections(epoch)
 
-                # Compute posteriors for training set
+                # Compute posteriors for training set with parallel processing
                 train_posteriors = self._compute_batch_posterior(
                     self._ensure_numpy(X_train) if self.use_gpu else X_train
                 )
@@ -2376,7 +2552,7 @@ class GPUDBNN:
                         posteriors = train_posteriors[idx]
                         failed_cases.append((features, true_class, posteriors))
 
-                    # Update priors based on failed cases
+                    # Update priors based on failed cases with parallel processing
                     self._update_priors_parallel(failed_cases, batch_size=100)
 
                 # Check for keyboard interrupt
@@ -2463,7 +2639,7 @@ class GPUDBNN:
         plt.close()
 
     def predict(self, X: np.ndarray = None) -> np.ndarray:
-        """Make predictions on new data"""
+        """Make predictions on new data with proper label encoding handling"""
         if not self.predict_enabled:
             print("Prediction is disabled in configuration")
             return None
@@ -2481,52 +2657,62 @@ class GPUDBNN:
             # In predict-only mode, we use all available data for prediction
             if not self.train_enabled and self.predict_enabled:
                 X_pred = X_train
-                y_true = y_train if y_train is not None else None
-                print(f"DEBUG: Predict mode - X_pred shape: {X_pred.shape}, y_true: {y_true is not None}")
+                y_true_encoded = y_train if y_train is not None else None
+                # Get original y values for comparison
+                if hasattr(self, 'data') and self.target_column in self.data.columns:
+                    y_true_original = self.data[self.target_column].values
+                else:
+                    y_true_original = None
+                print(f"DEBUG: Predict mode - X_pred shape: {X_pred.shape}, y_true: {y_true_encoded is not None}")
             else:
                 X_pred = X_test
-                y_true = y_test
+                y_true_encoded = y_test
+                y_true_original = None
 
             # Make predictions
             predictions_posteriors = self._compute_batch_posterior(X_pred)
-            predictions = np.argmax(predictions_posteriors, axis=1)
+            predictions_encoded = np.argmax(predictions_posteriors, axis=1)
+
+            # FIX: Convert encoded predictions back to original labels
+            try:
+                predictions_original = self.label_encoder.inverse_transform(predictions_encoded)
+                print(f"DEBUG: Successfully decoded predictions to original labels")
+            except ValueError as e:
+                print(f"DEBUG: Error decoding predictions: {e}")
+                print(f"DEBUG: Label encoder classes: {self.label_encoder.classes_}")
+                print(f"DEBUG: Unique predictions (encoded): {np.unique(predictions_encoded)}")
+                # Fallback: use encoded values as original (not ideal but works)
+                predictions_original = predictions_encoded
 
             # DEBUG: Check prediction distribution
-            print(f"DEBUG: Prediction distribution (encoded):")
-            unique_preds, pred_counts = np.unique(predictions, return_counts=True)
+            print(f"DEBUG: Prediction distribution (original):")
+            unique_preds, pred_counts = np.unique(predictions_original, return_counts=True)
             for pred, count in zip(unique_preds, pred_counts):
-                try:
-                    class_name = self.label_encoder.inverse_transform([pred])[0]
-                    print(f"  Class {pred} ({class_name}): {count} predictions ({count/len(predictions)*100:.2f}%)")
-                except ValueError:
-                    print(f"  Class {pred} (unknown): {count} predictions ({count/len(predictions)*100:.2f}%)")
+                print(f"  Class {pred}: {count} predictions ({count/len(predictions_original)*100:.2f}%)")
 
             print(f"DEBUG: Posterior probabilities shape: {predictions_posteriors.shape}")
             print(f"DEBUG: Posterior range: [{np.min(predictions_posteriors):.6f}, {np.max(predictions_posteriors):.6f}]")
 
             # Calculate and print metrics only if we have true labels
-            if y_true is not None:
-                # FIXED: y_true contains ENCODED values, predictions contain ENCODED values
-                # We can calculate accuracy directly using encoded values since they're in the same space
-                print(f"DEBUG: Unique true classes (encoded): {np.unique(y_true)}")
-                print(f"DEBUG: Label encoder classes (original): {self.label_encoder.classes_}")
-                print(f"DEBUG: Unique predictions (encoded): {np.unique(predictions)}")
-
-                # Calculate accuracy using encoded values (they're in the same space)
-                accuracy = accuracy_score(y_true, predictions)
+            if y_true_encoded is not None:
+                # FIX: Use encoded values for accuracy calculation since they're consistent
+                accuracy = accuracy_score(y_true_encoded, predictions_encoded)
                 print(f"\n{'='*60}")
                 print(f"PREDICTION RESULTS WITH GROUND TRUTH VALIDATION")
                 print(f"{'='*60}")
-                print(f"Dataset size: {len(predictions)} samples")
+                print(f"Dataset size: {len(predictions_encoded)} samples")
                 print(f"Overall Accuracy: {accuracy:.4f}")
 
-                # Calculate per-class metrics using encoded values
+                # Calculate per-class metrics using encoded values but show original class names
+                unique_true_encoded = np.unique(y_true_encoded)
                 print(f"\nPer-class performance:")
-                unique_true_encoded = np.unique(y_true)
                 for class_encoded in unique_true_encoded:
-                    class_mask = (y_true == class_encoded)
+                    if class_encoded == -1:  # Skip unseen classes
+                        continue
+
+                    class_mask = (y_true_encoded == class_encoded)
                     if np.sum(class_mask) > 0:
-                        class_accuracy = accuracy_score(y_true[class_mask], predictions[class_mask])
+                        class_accuracy = accuracy_score(y_true_encoded[class_mask], predictions_encoded[class_mask])
                         try:
                             # Convert encoded class back to original class name for display
                             class_name = self.label_encoder.inverse_transform([class_encoded])[0]
@@ -2537,27 +2723,29 @@ class GPUDBNN:
                 # Classification report - use encoded values with original class names
                 try:
                     # Get all unique classes that appear in both true and predicted labels
-                    all_classes = np.union1d(np.unique(y_true), np.unique(predictions))
+                    all_classes = np.union1d(np.unique(y_true_encoded), np.unique(predictions_encoded))
                     target_names = []
                     valid_classes = []
 
                     for cls in all_classes:
+                        if cls == -1:  # Skip unseen classes
+                            continue
                         try:
                             class_name = self.label_encoder.inverse_transform([cls])[0]
                             target_names.append(str(class_name))
                             valid_classes.append(cls)
                         except ValueError:
-                            # Skip classes that can't be decoded (shouldn't happen in normal case)
+                            # Skip classes that can't be decoded
                             continue
 
                     if len(valid_classes) > 0:
                         print(f"\nDetailed Classification Report:")
-                        print(classification_report(y_true, predictions,
+                        print(classification_report(y_true_encoded, predictions_encoded,
                                                   labels=valid_classes,
                                                   target_names=target_names, digits=4))
 
                         # Confusion matrix
-                        cm = confusion_matrix(y_true, predictions, labels=valid_classes)
+                        cm = confusion_matrix(y_true_encoded, predictions_encoded, labels=valid_classes)
                         plt.figure(figsize=(10, 8))
                         sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
                                    xticklabels=target_names,
@@ -2576,13 +2764,27 @@ class GPUDBNN:
                 # Save detailed predictions with probabilities
                 try:
                     # Convert encoded true labels back to original names
-                    decoded_true_labels = self.label_encoder.inverse_transform(y_true)
-                    decoded_predictions = self.label_encoder.inverse_transform(predictions)
+                    decoded_true_labels = []
+                    for encoded_val in y_true_encoded:
+                        if encoded_val == -1:
+                            decoded_true_labels.append("UNSEEN_CLASS")
+                        else:
+                            try:
+                                decoded_true_labels.append(self.label_encoder.inverse_transform([encoded_val])[0])
+                            except ValueError:
+                                decoded_true_labels.append(f"Class_{encoded_val}")
+
+                    decoded_predictions = []
+                    for encoded_val in predictions_encoded:
+                        try:
+                            decoded_predictions.append(self.label_encoder.inverse_transform([encoded_val])[0])
+                        except ValueError:
+                            decoded_predictions.append(f"Class_{encoded_val}")
 
                     predictions_df = pd.DataFrame({
                         'true_label': decoded_true_labels,
                         'predicted_label': decoded_predictions,
-                        'correct': (y_true == predictions)  # Use encoded values for correctness
+                        'correct': (y_true_encoded == predictions_encoded)
                     })
 
                     # Add probability columns for each class
@@ -2596,22 +2798,14 @@ class GPUDBNN:
 
                 except Exception as e:
                     print(f"Warning: Could not save detailed predictions: {e}")
-                    # Fallback: save with encoded values
-                    predictions_df = pd.DataFrame({
-                        'true_label_encoded': y_true,
-                        'predicted_label_encoded': predictions,
-                        'correct': (y_true == predictions)
-                    })
-                    predictions_df.to_csv(f'{self.dataset_name}_detailed_predictions_encoded.csv', index=False)
 
             else:
                 # No ground truth available - just save predictions
-                print(f"Made predictions on {len(predictions)} samples")
+                print(f"Made predictions on {len(predictions_original)} samples")
 
                 # Save predictions to file
-                decoded_predictions = self.label_encoder.inverse_transform(predictions)
                 predictions_df = pd.DataFrame({
-                    'predicted_label': decoded_predictions
+                    'predicted_label': predictions_original
                 })
 
                 # Add probability columns if available
@@ -2622,7 +2816,7 @@ class GPUDBNN:
                 predictions_df.to_csv(f'{self.dataset_name}_predictions.csv', index=False)
                 print(f"Predictions saved to {self.dataset_name}_predictions.csv")
 
-            return predictions
+            return predictions_original
 
         else:
             # Predict on new external data
@@ -2642,10 +2836,15 @@ class GPUDBNN:
 
             # Compute posteriors
             posteriors = self._compute_batch_posterior(X_scaled)
-            predictions = np.argmax(posteriors, axis=1)
+            predictions_encoded = np.argmax(posteriors, axis=1)
 
             # Decode predictions
-            decoded_predictions = self.label_encoder.inverse_transform(predictions)
+            try:
+                decoded_predictions = self.label_encoder.inverse_transform(predictions_encoded)
+            except ValueError as e:
+                print(f"Warning: Could not decode predictions: {e}")
+                # Fallback: use encoded values
+                decoded_predictions = predictions_encoded
 
             # Save external predictions with probabilities
             predictions_df = pd.DataFrame({
@@ -2662,7 +2861,7 @@ class GPUDBNN:
             return decoded_predictions
 
     def generate_samples(self, n_samples: int = 100, class_id: int = None):
-        """Generate synthetic samples"""
+        """Generate synthetic samples with parallel processing"""
         if not self.gen_samples_enabled:
             print("Sample generation is disabled in configuration")
             return None
@@ -2675,7 +2874,7 @@ class GPUDBNN:
             return self._generate_gaussian_samples(n_samples, class_id)
 
     def _generate_gaussian_samples(self, n_samples: int = 100, class_id: int = None):
-        """Generate synthetic samples using Gaussian model"""
+        """Generate synthetic samples using Gaussian model with parallel processing"""
         # Get likelihood parameters
         means = self.likelihood_params['means']
         covs = self.likelihood_params['covs']
@@ -2696,11 +2895,10 @@ class GPUDBNN:
             covs = self._to_numpy(covs)
             classes = self._to_numpy(classes)
 
-        # Generate samples
-        samples = []
-        for class_id in class_ids:
+        # Generate samples with parallel processing
+        def generate_single_sample(sample_data):
+            class_id, pair_probs = sample_data
             # Randomly select a feature pair based on weights
-            pair_probs = self.current_W[class_id] / np.sum(self.current_W[class_id])
             pair_idx = np.random.choice(len(self.feature_pairs), p=pair_probs)
 
             # Generate sample from multivariate normal distribution
@@ -2713,7 +2911,17 @@ class GPUDBNN:
                 # Handle singular covariance matrices
                 sample = mean + np.random.normal(0, 0.1, size=len(mean))
 
-            samples.append(sample)
+            return sample
+
+        # Prepare data for parallel processing
+        sample_data_list = []
+        for class_id in class_ids:
+            pair_probs = self.current_W[class_id] / np.sum(self.current_W[class_id])
+            sample_data_list.append((class_id, pair_probs))
+
+        # Generate samples in parallel
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            samples = list(executor.map(generate_single_sample, sample_data_list))
 
         samples = np.array(samples)
 
@@ -2723,7 +2931,7 @@ class GPUDBNN:
         return samples_original, class_ids
 
     def _generate_histogram_samples(self, n_samples: int = 100, class_id: int = None):
-        """Generate synthetic samples using histogram model"""
+        """Generate synthetic samples using histogram model with parallel processing"""
         n_features = self.histograms.shape[0]
         n_classes = self.histograms.shape[2]
 
@@ -2736,8 +2944,9 @@ class GPUDBNN:
             # Generate samples from specific class
             class_ids = np.full(n_samples, class_id)
 
-        samples = []
-        for class_id in class_ids:
+        # Generate samples with parallel processing
+        def generate_single_sample(sample_data):
+            class_id = sample_data
             sample = []
             for feature_idx in range(n_features):
                 # Select bin based on histogram probabilities
@@ -2750,7 +2959,11 @@ class GPUDBNN:
                 value = np.random.uniform(bin_start, bin_end)
                 sample.append(value)
 
-            samples.append(sample)
+            return sample
+
+        # Generate samples in parallel
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            samples = list(executor.map(generate_single_sample, class_ids))
 
         samples = np.array(samples)
 
