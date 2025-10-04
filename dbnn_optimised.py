@@ -462,7 +462,8 @@ class GPUDBNN:
     def __init__(
         self,
         dataset_name: str,
-        device: str = None
+        device: str = None,
+        config: Dict = None  # NEW: Accept config parameter
     ):
         # Set device based on availability
         if device is None:
@@ -475,8 +476,13 @@ class GPUDBNN:
 
         self.dataset_name = dataset_name.lower()
 
-        # Load dataset configuration and data
-        self.config = DatasetConfig.load_config(self.dataset_name)
+        # NEW: Use provided config or load from file
+        if config is not None:
+            print("📋 Using provided configuration")
+            self.config = config
+        else:
+            # Load dataset configuration and data using original method
+            self.config = DatasetConfig.load_config(self.dataset_name)
 
         # Get model filename from config
         self.model_filename = None
@@ -544,8 +550,8 @@ class GPUDBNN:
         # Create Model directory
         os.makedirs('Model', exist_ok=True)
 
-        # Load data
-        self.data = self._load_dataset()
+        # NEW: Load data using config without interactive prompts
+        self.data = self._load_dataset_from_config()
 
         # Load saved weights and encoders
         self._load_best_weights()
@@ -589,6 +595,11 @@ class GPUDBNN:
             print("Visualization: ENABLED")
         else:
             print("Visualization: DISABLED (default for performance)")
+
+    def _load_dataset_from_config(self) -> pd.DataFrame:
+        """Load dataset from config without interactive prompts - using existing _load_dataset method"""
+        # Simply call the original _load_dataset method which already handles everything
+        return self._load_dataset()
 
     def _get_weights_filename(self):
         """Get the filename for saving/loading weights"""
