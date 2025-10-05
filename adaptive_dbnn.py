@@ -109,7 +109,7 @@ class AdaptiveDBNN:
             "max_divergence_samples_per_class": 5,
             "exhaust_all_failed": True,
             "min_failed_threshold": 10,
-            "enable_kl_divergence": False,
+            "enable_kl_divergence": True,     # Switch this False to disable multiple sample selection for train as in original DBNN
             "max_samples_per_class_fallback": 2,
             "enable_3d_visualization": True,
             "3d_snapshot_interval": 10,
@@ -117,6 +117,10 @@ class AdaptiveDBNN:
             "enable_acid_test": True,
             "min_training_percentage_for_stopping": 10.0,
             "max_training_percentage": 90.0,
+            "margin_tolerance": 0.15,  # Percentage tolerance for margin range
+            "kl_divergence_threshold": 0.1,  # Minimum KL divergence to consider
+            "max_kl_samples_per_class": 5,  # Maximum KL-based samples per class per round
+
         }
         for key, default_value in default_config.items():
             if key not in self.adaptive_config:
@@ -573,18 +577,16 @@ class AdaptiveDBNN:
         os.makedirs(self.viz_config.get('output_dir', 'adaptive_visualizations'), exist_ok=True)
 
     def show_adaptive_settings(self):
-        """Display the current adaptive learning settings"""
+        """Display the current adaptive learning settings including KL divergence"""
         print("\n🔧 Advanced Adaptive Learning Settings:")
         print("=" * 60)
         for key, value in self.adaptive_config.items():
-            print(f"  {key:40}: {value}")
+            if key in ['margin_tolerance', 'kl_divergence_threshold', 'max_kl_samples_per_class']:
+                print(f"  {key:40}: {value} (KL Divergence)")
+            else:
+                print(f"  {key:40}: {value}")
         print(f"\n💻 Device: {self.device_type}")
-
-        # Show protection status
-        min_percent = self.adaptive_config.get('min_training_percentage_for_stopping', 10.0)
-        max_percent = self.adaptive_config.get('max_training_percentage', 90.0)
-        print(f"🛡️  Early stopping protection: <{min_percent}% training data")
-        print(f"📊 Max training data allowed: {max_percent}%")
+        print(f"🎯 Selection Mode: {'KL Divergence' if self.adaptive_config.get('enable_kl_divergence', False) else 'Margin-Based'}")
         print()
 
     def configure_adaptive_learning(self):
@@ -618,6 +620,36 @@ class AdaptiveDBNN:
             max_training_percentage = float(input(
                 f"Max training data % allowed [{self.adaptive_config.get('max_training_percentage', 90.0)}]: "
             ) or self.adaptive_config.get('max_training_percentage', 90.0))
+
+            enable_kl = input(f"Enable KL divergence selection? (y/N) [{'y' if self.adaptive_config.get('enable_kl_divergence', True) else 'n'}]: ").strip().lower()
+            enable_kl_divergence = enable_kl == 'y' if enable_kl else self.adaptive_config.get('enable_kl_divergence', True)
+
+            if enable_kl_divergence:
+                print("\n🔧 KL Divergence Configuration:")
+                margin_tol = float(input(f"Margin tolerance (0.1-0.5) [{self.adaptive_config.get('margin_tolerance', 0.15)}]: ")
+                                or self.adaptive_config.get('margin_tolerance', 0.15))
+                kl_threshold = float(input(f"KL divergence threshold (0.05-0.3) [{self.adaptive_config.get('kl_divergence_threshold', 0.1)}]: ")
+                                   or self.adaptive_config.get('kl_divergence_threshold', 0.1))
+                max_kl_samples = int(input(f"Max KL samples per class (2-10) [{self.adaptive_config.get('max_kl_samples_per_class', 5)}]: ")
+                                   or self.adaptive_config.get('max_kl_samples_per_class', 5))
+
+                # Validate ranges
+                margin_tol = max(0.05, min(0.5, margin_tol))
+                kl_threshold = max(0.01, min(0.5, kl_threshold))
+                max_kl_samples = max(1, min(20, max_kl_samples))
+
+                self.adaptive_config.update({
+                    'margin_tolerance': margin_tol,
+                    'kl_divergence_threshold': kl_threshold,
+                    'max_kl_samples_per_class': max_kl_samples,
+                    'enable_kl_divergence': enable_kl_divergence
+                })
+
+                print(f"✅ KL divergence configured:")
+                print(f"   - Margin tolerance: {margin_tol}")
+                print(f"   - KL threshold: {kl_threshold}")
+                print(f"   - Max samples per class: {max_kl_samples}")
+
 
             # Validate percentages
             min_stopping_percentage = max(5.0, min(50.0, min_stopping_percentage))  # Limit to 5-50%
@@ -1918,9 +1950,198 @@ class AdaptiveDBNN:
     # Placeholder for methods that were not fully implemented in the original
     def _select_kl_divergence_samples(self, X: np.ndarray, y: np.ndarray,
                                     predictions: np.ndarray, posteriors: np.ndarray) -> List[int]:
-        """Select samples based on KL divergence (placeholder)"""
-        print("🔍 KL divergence selection not yet implemented, using margin-based selection")
-        return self._select_simple_margin_samples(X, y, predictions, posteriors)
+        """
+        Hybrid selection: First find failed examples within margin tolerance,
+        then rank by KL divergence to select most informative samples
+        """
+        print("🔍 Using HYBRID margin-tolerance + KL divergence selection...")
+
+        samples_to_add = []
+        unique_classes = np.unique(y)
+
+        # Get configuration parameters
+        margin_tolerance = self.adaptive_config.get('margin_tolerance', 0.15)
+        kl_threshold = self.adaptive_config.get('kl_divergence_threshold', 0.1)
+        max_kl_samples = self.adaptive_config.get('max_kl_samples_per_class', 5)
+
+        print(f"   Margin tolerance: {margin_tolerance}, KL threshold: {kl_threshold}")
+        print(f"   Max samples per class: {max_kl_samples}")
+
+        # Get test set predictions and true labels
+        y_test = y[self.test_indices]
+
+        # Find all misclassified samples
+        misclassified_mask = predictions != y_test
+        misclassified_indices = np.where(misclassified_mask)[0]
+
+        if len(misclassified_indices) == 0:
+            print("✅ No misclassified samples found")
+            return samples_to_add
+
+        print(f"📊 Found {len(misclassified_indices)} misclassified samples")
+
+        # Group misclassified samples by true class and calculate margins
+        class_samples = defaultdict(list)
+
+        for i, idx_in_test in enumerate(misclassified_indices):
+            original_idx = self.test_indices[idx_in_test]
+            true_class = y_test[idx_in_test]
+            pred_class = predictions[idx_in_test]
+
+            # Skip if indices are out of bounds
+            if (true_class >= posteriors.shape[1] or pred_class >= posteriors.shape[1] or
+                true_class < 0 or pred_class < 0):
+                continue
+
+            # Calculate margin
+            true_posterior = posteriors[idx_in_test, true_class]
+            pred_posterior = posteriors[idx_in_test, pred_class]
+            margin = pred_posterior - true_posterior
+
+            class_samples[true_class].append({
+                'index': original_idx,
+                'margin': margin,
+                'true_posterior': true_posterior,
+                'pred_posterior': pred_posterior,
+                'true_class': true_class,
+                'pred_class': pred_class,
+                'posteriors': posteriors[idx_in_test]  # Store full posterior for KL calculation
+            })
+
+        # For each class, apply the hybrid selection strategy
+        for class_id in unique_classes:
+            if class_id not in class_samples or not class_samples[class_id]:
+                print(f"   ⚠️ Class {class_id}: No valid failed samples available")
+                continue
+
+            class_data = class_samples[class_id]
+            print(f"   Class {class_id}: {len(class_data)} failed samples")
+
+            # STEP 1: Find margin range for this class
+            margins = [sample['margin'] for sample in class_data]
+            min_margin = min(margins)
+            max_margin = max(margins)
+            margin_range = max_margin - min_margin
+
+            # Calculate tolerance threshold
+            tolerance_threshold = min_margin + (margin_range * margin_tolerance)
+
+            print(f"     Margin range: [{min_margin:.4f}, {max_margin:.4f}]")
+            print(f"     Tolerance threshold: {tolerance_threshold:.4f}")
+
+            # STEP 2: Filter samples within margin tolerance (most ambiguous/misclassified)
+            tolerance_samples = [sample for sample in class_data if sample['margin'] <= tolerance_threshold]
+
+            if not tolerance_samples:
+                print(f"     ⚠️ No samples within margin tolerance, using all samples")
+                tolerance_samples = class_data
+
+            print(f"     Samples within margin tolerance: {len(tolerance_samples)}")
+
+            # STEP 3: Calculate KL divergence for filtered samples
+            kl_samples = []
+            for sample in tolerance_samples:
+                try:
+                    # Create target distribution (one-hot for true class)
+                    target_distribution = np.zeros_like(sample['posteriors'])
+                    target_distribution[sample['true_class']] = 1.0
+
+                    # Calculate KL divergence: KL(target || predicted)
+                    eps = 1e-10
+                    p_safe = target_distribution + eps
+                    q_safe = sample['posteriors'] + eps
+
+                    # Normalize
+                    p_safe = p_safe / np.sum(p_safe)
+                    q_safe = q_safe / np.sum(q_safe)
+
+                    kl_divergence = np.sum(p_safe * np.log(p_safe / q_safe))
+
+                    # Also calculate entropy of predicted distribution for additional insight
+                    entropy_pred = entropy(q_safe)
+
+                    kl_samples.append({
+                        **sample,  # Include all original sample data
+                        'kl_divergence': kl_divergence,
+                        'entropy': entropy_pred,
+                        'combined_score': kl_divergence * (1 + entropy_pred)  # Combine KL and entropy
+                    })
+
+                except Exception as e:
+                    continue
+
+            if not kl_samples:
+                print(f"     ❌ No valid KL divergence calculations")
+                continue
+
+            # STEP 4: Filter by KL divergence threshold and sort
+            high_kl_samples = [sample for sample in kl_samples if sample['kl_divergence'] >= kl_threshold]
+
+            if not high_kl_samples:
+                print(f"     ⚠️ No samples meet KL threshold, using top KL samples")
+                # If no samples meet threshold, use top samples by KL divergence
+                high_kl_samples = sorted(kl_samples, key=lambda x: x['kl_divergence'], reverse=True)[:max_kl_samples]
+            else:
+                # Sort high KL samples by combined score (KL divergence × entropy)
+                high_kl_samples = sorted(high_kl_samples, key=lambda x: x['combined_score'], reverse=True)
+
+            print(f"     High KL samples (≥{kl_threshold}): {len(high_kl_samples)}")
+
+            # STEP 5: Select top samples
+            selected_for_class = []
+            for sample_info in high_kl_samples[:max_kl_samples]:
+                if (sample_info['index'] not in self.training_indices and
+                    sample_info['index'] not in samples_to_add):
+
+                    selected_for_class.append(sample_info)
+                    samples_to_add.append(sample_info['index'])
+
+                    # Track selection with detailed information
+                    self.all_selected_samples[self._get_original_class_label(class_id)].append({
+                        'index': sample_info['index'],
+                        'margin': sample_info['margin'],
+                        'kl_divergence': sample_info['kl_divergence'],
+                        'entropy': sample_info['entropy'],
+                        'combined_score': sample_info['combined_score'],
+                        'true_posterior': sample_info['true_posterior'],
+                        'selection_type': 'hybrid_kl_divergence',
+                        'round': self.adaptive_round,
+                        'within_margin_tolerance': sample_info['margin'] <= tolerance_threshold
+                    })
+
+            if selected_for_class:
+                avg_margin = np.mean([s['margin'] for s in selected_for_class])
+                avg_kl = np.mean([s['kl_divergence'] for s in selected_for_class])
+                print(f"     ✅ Selected {len(selected_for_class)} samples "
+                      f"(avg margin: {avg_margin:.4f}, avg KL: {avg_kl:.4f})")
+
+                # Show selection details
+                if len(selected_for_class) > 0:
+                    best_sample = selected_for_class[0]
+                    print(f"       Best: KL={best_sample['kl_divergence']:.4f}, "
+                          f"margin={best_sample['margin']:.4f}, "
+                          f"entropy={best_sample['entropy']:.4f}")
+            else:
+                print(f"     ❌ No new samples selected for class {class_id}")
+
+        print(f"🎯 Selected {len(samples_to_add)} total samples using hybrid KL divergence strategy")
+
+        # Show overall statistics
+        if samples_to_add:
+            all_kl_values = []
+            all_margins = []
+            for class_id in unique_classes:
+                if class_id in class_samples:
+                    for sample in self.all_selected_samples.get(self._get_original_class_label(class_id), []):
+                        if sample['round'] == self.adaptive_round and sample['selection_type'] == 'hybrid_kl_divergence':
+                            all_kl_values.append(sample['kl_divergence'])
+                            all_margins.append(sample['margin'])
+
+            if all_kl_values:
+                print(f"📈 Selection stats: KL[{min(all_kl_values):.4f}, {max(all_kl_values):.4f}], "
+                      f"Margin[{min(all_margins):.4f}, {max(all_margins):.4f}]")
+
+        return samples_to_add
 
     def _create_interactive_html_dashboard(self, X_train: np.ndarray, y_train: np.ndarray,
                                         X_test: np.ndarray, y_test: np.ndarray):
