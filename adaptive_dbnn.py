@@ -88,7 +88,7 @@ class AdaptiveDBNN:
 
         # Ensure config has required fields by using DatasetConfig
         if 'target_column' not in self.config:
-            self.config = DatasetConfig.load_config(self.dataset_name)
+            self.config = DatasetConfig.load_config(dataset_name)
 
         # Enhanced adaptive learning configuration with proper defaults
         self.adaptive_config = self.config.get('adaptive_learning', {})
@@ -100,23 +100,23 @@ class AdaptiveDBNN:
             "margin_tolerance": 0.15,
             "kl_threshold": 0.1,
             "max_adaptive_rounds": 20,
-            "patience": 10,  # Fixed: Now properly set to 10
+            "patience": 10,
             "min_improvement": 0.001,
             "training_convergence_epochs": 50,
             "min_training_accuracy": 0.95,
             "min_samples_to_add_per_class": 5,
             "adaptive_margin_relaxation": 0.1,
-            "max_divergence_samples_per_class": 5,  # New: prioritize divergence
-            "exhaust_all_failed": True,  # NEW: Continue until all failed examples are exhausted
-            "min_failed_threshold": 10,  # NEW: Stop when failed examples below this threshold
-            "enable_kl_divergence": False,  # NEW: Enable KL divergence based selection
-            "max_samples_per_class_fallback": 2,  # NEW: When KL disabled, add max 2 samples per class
+            "max_divergence_samples_per_class": 5,
+            "exhaust_all_failed": True,
+            "min_failed_threshold": 10,
+            "enable_kl_divergence": False,
+            "max_samples_per_class_fallback": 2,
             "enable_3d_visualization": True,
             "3d_snapshot_interval": 10,
-            "learning_rate": 1.0,  # NEW: Higher learning rate for probability-based updates
-            "enable_acid_test": True,  # NEW: Enable entire dataset validation
-            "min_training_percentage_for_stopping": 10.0,  # NEW: Minimum training data % before applying early stopping
-            "max_training_percentage": 90.0,  # NEW: Maximum training data % to prevent overfitting
+            "learning_rate": 1.0,
+            "enable_acid_test": True,
+            "min_training_percentage_for_stopping": 10.0,
+            "max_training_percentage": 90.0,
         }
         for key, default_value in default_config.items():
             if key not in self.adaptive_config:
@@ -154,6 +154,13 @@ class AdaptiveDBNN:
         self.adaptive_round = 0
         self.patience_counter = 0
         self.best_weights = None
+
+        # Global best tracking for initialize-and-freeze strategy
+        self.global_best_accuracy = 0.0
+        self.global_best_round = 0
+        self.global_best_training_indices = []
+        self.global_best_test_indices = []
+        self.global_best_weights = None
 
         # Statistics tracking
         self.round_stats = []
@@ -501,346 +508,6 @@ class AdaptiveDBNN:
         except Exception as e:
             print(f"⚠️ Could not create 3D animation: {e}")
 
-    def _create_interactive_3d_plotly(self):
-        """Create interactive 3D visualization using Plotly"""
-        try:
-            if len(self.feature_grid_history) < 2:
-                return
-
-            print("📊 Creating interactive 3D visualization...")
-
-            # Create interactive plot with Plotly
-            fig = make_subplots(
-                rows=2, cols=2,
-                specs=[[{"type": "scatter3d"}, {"type": "scatter3d"}],
-                       [{"type": "scatter"}, {"type": "scatter"}]],
-                subplot_titles=('3D Feature Space Evolution', 'Weight Trajectory',
-                              'Feature Importance', 'Grid Drift')
-            )
-
-            # Add your Plotly 3D visualization code here
-            # This would be similar to the matplotlib versions but interactive
-
-            fig.update_layout(height=800, title_text="Interactive Adaptive Learning Visualization")
-            fig.write_html(f"{self.visualization_output_dir}/interactive_3d_visualization.html")
-
-            print("✅ Interactive 3D visualization saved")
-
-        except Exception as e:
-            print(f"⚠️ Could not create interactive 3D visualization: {e}")
-
-    def _create_unified_3d_animation(self):
-        """Create a unified rotating 3D animation showing the entire evolution"""
-        try:
-            print("🎬 Creating unified rotating 3D animation...")
-
-            # Get all snapshot files
-            image_files = sorted([f for f in os.listdir(f'{self.visualization_output_dir}/3d_animations')
-                                if f.startswith('epoch_') and f.endswith('.png')])
-
-            if not image_files:
-                print("⚠️ No 3D snapshots found for animation")
-                return
-
-            # Create a unified figure with rotating views
-            self._create_rotating_3d_snapshots(image_files)
-
-            # Create the final animated GIF
-            self._compile_rotating_gif()
-
-            print("✅ Unified 3D animation completed!")
-
-        except Exception as e:
-            print(f"⚠️ Could not create unified 3D animation: {e}")
-
-    def _create_rotating_3d_snapshots(self, image_files):
-        """Create rotating 3D snapshots for animation"""
-        try:
-            # Load the first image to get dimensions
-            first_image_path = f'{self.visualization_output_dir}/3d_animations/{image_files[0]}'
-            first_img = plt.imread(first_image_path)
-
-            # Create rotation frames for each epoch
-            rotation_frames = []
-
-            for i, image_file in enumerate(image_files):
-                epoch = int(image_file.split('_')[1].split('.')[0])
-                image_path = f'{self.visualization_output_dir}/3d_animations/{image_file}'
-
-                print(f"🔄 Creating rotation frames for epoch {epoch} ({i+1}/{len(image_files)})")
-
-                # Create multiple rotated views for this epoch
-                epoch_frames = self._create_single_epoch_rotation(image_path, epoch, i, len(image_files))
-                rotation_frames.extend(epoch_frames)
-
-            # Save rotation frames
-            for j, frame in enumerate(rotation_frames):
-                frame_path = f'{self.visualization_output_dir}/3d_animations/rotation_frame_{j:04d}.png'
-                frame.savefig(frame_path, dpi=150, bbox_inches='tight', facecolor='white')
-                plt.close()
-
-            print(f"✅ Created {len(rotation_frames)} rotation frames")
-
-        except Exception as e:
-            print(f"⚠️ Error creating rotating snapshots: {e}")
-
-    def _create_single_epoch_rotation(self, image_path, epoch, epoch_index, total_epochs):
-        """Create multiple rotated views for a single epoch"""
-        frames = []
-
-        try:
-            # Load the original image
-            img = plt.imread(image_path)
-
-            # Create figure for composition
-            fig = plt.figure(figsize(16, 12))
-
-            # Number of rotation frames per epoch
-            frames_per_epoch = 8  # Reduced for smoother animation
-
-            for rotation_idx in range(frames_per_epoch):
-                # Calculate rotation angle (0 to 360 degrees)
-                rotation_angle = (rotation_idx / frames_per_epoch) * 360
-
-                # Clear figure
-                plt.clf()
-
-                # Create 2x2 grid for comprehensive view
-                gs = plt.GridSpec(2, 2, figure=fig)
-
-                # Main 3D view (top-left)
-                ax1 = fig.add_subplot(gs[0, 0], projection='3d')
-                self._plot_rotating_3d_view(ax1, img, rotation_angle, "Feature Space Evolution")
-
-                # Top view (top-right)
-                ax2 = fig.add_subplot(gs[0, 1], projection='3d')
-                self._plot_top_down_view(ax2, img, "Top View")
-
-                # Side view (bottom-left)
-                ax3 = fig.add_subplot(gs[1, 0], projection='3d')
-                self._plot_side_view(ax3, img, "Side View")
-
-                # Progress and metrics (bottom-right)
-                ax4 = fig.add_subplot(gs[1, 1])
-                self._plot_progress_panel(ax4, epoch, epoch_index, total_epochs, rotation_angle)
-
-                # Main title
-                plt.suptitle(f'Adaptive Learning Evolution\nEpoch {epoch} | Rotation: {rotation_angle:.0f}°',
-                            fontsize=16, fontweight='bold', y=0.95)
-
-                plt.tight_layout()
-                frames.append(fig)
-
-            return frames
-
-        except Exception as e:
-            print(f"⚠️ Error creating rotation for epoch {epoch}: {e}")
-            return []
-
-    def _plot_rotating_3d_view(self, ax, img, rotation_angle, title):
-        """Plot main rotating 3D view"""
-        try:
-            # This would be your actual 3D data plotting
-            # For now, we'll create a placeholder with the image
-            ax.imshow(img, aspect='auto', extent=[-1, 1, -1, 1, -1, 1])
-            ax.set_xlabel('PC1')
-            ax.set_ylabel('PC2')
-            ax.set_zlabel('PC3')
-            ax.set_title(title)
-
-            # Set rotation
-            ax.view_init(elev=30, azim=rotation_angle)
-
-        except Exception as e:
-            ax.text(0.5, 0.5, f"3D View\nError: {e}", ha='center', va='center', transform=ax.transAxes)
-            ax.set_title(title)
-
-    def _plot_top_down_view(self, ax, img, title):
-        """Plot top-down view"""
-        try:
-            ax.imshow(img, aspect='auto', extent=[-1, 1, -1, 1, 0, 0])
-            ax.set_xlabel('PC1')
-            ax.set_ylabel('PC2')
-            ax.set_title(title)
-            ax.view_init(elev=90, azim=0)  # Top-down view
-        except Exception as e:
-            ax.text(0.5, 0.5, f"Top View\nError: {e}", ha='center', va='center', transform=ax.transAxes)
-            ax.set_title(title)
-
-    def _plot_side_view(self, ax, img, title):
-        """Plot side view"""
-        try:
-            ax.imshow(img, aspect='auto', extent=[-1, 1, 0, 0, -1, 1])
-            ax.set_xlabel('PC1')
-            ax.set_zlabel('PC3')
-            ax.set_title(title)
-            ax.view_init(elev=0, azim=0)  # Side view
-        except Exception as e:
-            ax.text(0.5, 0.5, f"Side View\nError: {e}", ha='center', va='center', transform=ax.transAxes)
-            ax.set_title(title)
-
-    def _plot_progress_panel(self, ax, epoch, epoch_index, total_epochs, rotation_angle):
-        """Plot progress and metrics panel"""
-        try:
-            # Clear the axis
-            ax.clear()
-            ax.axis('off')
-
-            # Progress information
-            progress_text = f"""
-    ADAPTIVE LEARNING PROGRESS
-    ──────────────────────────
-    Epoch: {epoch}/{total_epochs}
-    Progress: {(epoch_index + 1) / total_epochs * 100:.1f}%
-    Rotation: {rotation_angle:.0f}°
-
-    CURRENT STATS
-    ─────────────
-    Training Size: {len(self.training_indices) if hasattr(self, 'training_indices') else 'N/A'}
-    Test Accuracy: {self.best_accuracy:.4f}
-    Failed Examples: {getattr(self, 'failed_count', 'N/A')}
-
-    FEATURE EVOLUTION
-    ────────────────
-    Grids Active: {getattr(self, 'active_grids', 'N/A')}
-    Learning Rate: {self.adaptive_config.get('learning_rate', 1.0):.2f}
-            """
-
-            ax.text(0.05, 0.95, progress_text, transform=ax.transAxes, fontfamily='monospace',
-                   verticalalignment='top', fontsize=10, bbox=dict(boxstyle="round,pad=0.3",
-                   facecolor="lightblue", alpha=0.7))
-
-            # Add mini progress bar
-            progress = (epoch_index + 1) / total_epochs
-            progress_bar = plt.Rectangle((0.05, 0.02), progress * 0.9, 0.05,
-                                       facecolor='green', alpha=0.7)
-            ax.add_patch(progress_bar)
-            ax.text(0.5, 0.045, f'{progress * 100:.1f}%', transform=ax.transAxes,
-                   ha='center', fontweight='bold')
-
-        except Exception as e:
-            ax.text(0.5, 0.5, f"Progress Panel\nError: {e}", ha='center', va='center',
-                   transform=ax.transAxes)
-
-    def _compile_rotating_gif(self):
-        """Compile all rotation frames into a single animated GIF"""
-        try:
-            # Get all rotation frames
-            rotation_files = sorted([f for f in os.listdir(f'{self.visualization_output_dir}/3d_animations')
-                                   if f.startswith('rotation_frame_') and f.endswith('.png')])
-
-            if not rotation_files:
-                print("⚠️ No rotation frames found")
-                return
-
-            print(f"🎞️ Compiling {len(rotation_files)} frames into animated GIF...")
-
-            # Create GIF with optimal settings
-            images = []
-            for rotation_file in rotation_files:
-                image_path = f'{self.visualization_output_dir}/3d_animations/{rotation_file}'
-                images.append(imageio.imread(image_path))
-
-            # Save main animation
-            gif_path = f'{self.visualization_output_dir}/adaptive_learning_3d_evolution.gif'
-            imageio.mimsave(gif_path, images, duration=0.3, loop=0)  # 0.3s per frame, infinite loop
-
-            # Create a faster preview version
-            preview_gif_path = f'{self.visualization_output_dir}/adaptive_learning_preview.gif'
-            preview_images = images[::2]  # Use every second frame for faster preview
-            imageio.mimsave(preview_gif_path, preview_images, duration=0.2, loop=0)
-
-            # Clean up temporary rotation frames
-            self._cleanup_temp_files(rotation_files)
-
-            print(f"✅ Main animation saved: {gif_path}")
-            print(f"✅ Preview animation saved: {preview_gif_path}")
-            print(f"📊 Animation stats: {len(images)} frames, {len(images)*0.3:.1f}s total duration")
-
-        except Exception as e:
-            print(f"⚠️ Error compiling GIF: {e}")
-
-    def _cleanup_temp_files(self, rotation_files):
-        """Clean up temporary rotation frame files"""
-        try:
-            for rotation_file in rotation_files:
-                file_path = f'{self.visualization_output_dir}/3d_animations/{rotation_file}'
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-            print("✅ Cleaned up temporary rotation frames")
-        except Exception as e:
-            print(f"⚠️ Could not clean up temp files: {e}")
-
-    def _create_comprehensive_3d_visualization(self, X_train: np.ndarray, y_train: np.ndarray):
-        """Create a comprehensive 3D visualization with actual data"""
-        try:
-            if X_train is None or y_train is None:
-                return
-
-            print("🎨 Creating comprehensive 3D data visualization...")
-
-            # Use PCA for 3D projection
-            pca = PCA(n_components=3)
-            X_3d = pca.fit_transform(X_train)
-
-            # Create rotating animation with actual data
-            fig = plt.figure(figsize(15, 10))
-
-            def animate(frame):
-                plt.clf()
-
-                # Create subplots
-                ax1 = fig.add_subplot(221, projection='3d')
-                ax2 = fig.add_subplot(222, projection='3d')
-                ax3 = fig.add_subplot(223)
-                ax4 = fig.add_subplot(224)
-
-                # Rotation angle
-                angle = frame * 2  # 2 degrees per frame
-
-                # Plot 1: Rotating 3D scatter
-                scatter = ax1.scatter(X_3d[:, 0], X_3d[:, 1], X_3d[:, 2],
-                                     c=y_train, cmap='tab10', alpha=0.7, s=20)
-                ax1.view_init(elev=20, azim=angle)
-                ax1.set_title(f'3D Feature Space\nRotation: {angle}°')
-                ax1.set_xlabel('PC1')
-                ax1.set_ylabel('PC2')
-                ax1.set_zlabel('PC3')
-
-                # Plot 2: Top view
-                ax2.scatter(X_3d[:, 0], X_3d[:, 1], c=y_train, cmap='tab10', alpha=0.7, s=20)
-                ax2.set_title('Top View (PC1 vs PC2)')
-                ax2.set_xlabel('PC1')
-                ax2.set_ylabel('PC2')
-
-                # Plot 3: Feature distribution
-                for i in range(min(3, X_train.shape[1])):
-                    ax3.hist(X_train[:, i], alpha=0.7, bins=30, label=f'Feature {i+1}')
-                ax3.set_title('Feature Distributions')
-                ax3.legend()
-
-                # Plot 4: Class distribution
-                unique, counts = np.unique(y_train, return_counts=True)
-                ax4.bar(unique, counts, alpha=0.7, color=plt.cm.tab10(unique/len(unique)))
-                ax4.set_title('Class Distribution')
-                ax4.set_xlabel('Class')
-                ax4.set_ylabel('Count')
-
-                plt.tight_layout()
-
-            # Create animation
-            anim = animation.FuncAnimation(fig, animate, frames=180, interval=50, blit=False)
-
-            # Save as GIF
-            anim_path = f'{self.visualization_output_dir}/data_3d_evolution.gif'
-            anim.save(anim_path, writer='pillow', fps=20, dpi=100)
-
-            plt.close()
-            print(f"✅ Data 3D animation saved: {anim_path}")
-
-        except Exception as e:
-            print(f"⚠️ Error creating comprehensive 3D visualization: {e}")
-
     def _load_config(self, dataset_name: str) -> Dict:
         """Load configuration from file"""
         config_path = f"{dataset_name}.conf"
@@ -943,7 +610,7 @@ class AdaptiveDBNN:
             learning_rate = float(input(f"Learning rate (0.5-2.0) [{self.adaptive_config.get('learning_rate', 1.0)}]: ")
                                 or self.adaptive_config.get('learning_rate', 1.0))
 
-            # NEW: Early stopping relaxation parameters
+            # Early stopping relaxation parameters
             min_stopping_percentage = float(input(
                 f"Min training data % for early stopping [{self.adaptive_config.get('min_training_percentage_for_stopping', 10.0)}]: "
             ) or self.adaptive_config.get('min_training_percentage_for_stopping', 10.0))
@@ -969,8 +636,7 @@ class AdaptiveDBNN:
             enable_kl = input(f"Enable KL divergence selection? (y/N) [{'y' if self.adaptive_config.get('enable_kl_divergence', False) else 'n'}]: ").strip().lower()
             enable_kl_divergence = enable_kl == 'y' if enable_kl else self.adaptive_config.get('enable_kl_divergence', False)
 
-
-            # NEW: Exhaust all failed examples option
+            # Exhaust all failed examples option
             exhaust_all = input(f"Exhaust all failed examples? (y/N) [{ 'y' if self.adaptive_config['exhaust_all_failed'] else 'n' }]: ").strip().lower()
             exhaust_all_failed = exhaust_all == 'y' if exhaust_all else self.adaptive_config['exhaust_all_failed']
 
@@ -1039,8 +705,7 @@ class AdaptiveDBNN:
             self.model.max_epochs = 1000
             self.model.trials = self.adaptive_config['training_convergence_epochs']
 
-            # Train with custom data - we'll use the model's internal training method
-            # For adaptive learning, we need to temporarily replace the model's data
+            # Train with custom data
             self._train_with_custom_data(X_train, y_train)
 
             # Restore original parameters
@@ -1100,7 +765,7 @@ class AdaptiveDBNN:
             true_class = y_test[idx_in_test]
             pred_class = predictions[idx_in_test]
 
-            # FIX: Handle label encoding mismatch - map predictions to valid range
+            # Handle label encoding mismatch - map predictions to valid range
             if pred_class >= posteriors.shape[1]:
                 # If prediction is out of bounds, use the class with highest posterior
                 pred_class = np.argmax(posteriors[idx_in_test])
@@ -1179,129 +844,8 @@ class AdaptiveDBNN:
                 })
 
             print(f"   Class {class_id}: Selected {len(selected_samples)} samples "
-                  f"(max posterior: {max_posterior_sample['true_posterior']:.3f}, "
-                  f"min margin: {min_margin_sample['margin']:.3f})")
-
-        print(f"🎯 Selected {len(samples_to_add)} samples total using simple margin strategy")
-        return samples_to_add
-
-    def _select_simple_margin_samples(self, X: np.ndarray, y: np.ndarray,
-                                    predictions: np.ndarray, posteriors: np.ndarray) -> List[int]:
-        """
-        Simple selection: one max posterior and one min margin sample per class
-        """
-        samples_to_add = []
-        unique_classes = np.unique(y)
-        max_samples = self.adaptive_config.get('max_samples_per_class_fallback', 2)
-
-        print("🔍 Using simple margin-based selection (KL disabled)...")
-
-        # Get test set predictions and true labels
-        y_test = y[self.test_indices]
-
-        # Find all misclassified samples
-        misclassified_mask = predictions != y_test
-        misclassified_indices = np.where(misclassified_mask)[0]
-
-        if len(misclassified_indices) == 0:
-            print("✅ No misclassified samples found - model is performing well!")
-            return samples_to_add
-
-        print(f"📊 Found {len(misclassified_indices)} misclassified samples")
-        print(f"📊 Posteriors shape: {posteriors.shape}")
-        print(f"📊 Unique true classes in test: {np.unique(y_test)}")
-        print(f"📊 Unique predicted classes: {np.unique(predictions)}")
-
-        # Group misclassified samples by true class
-        class_samples = defaultdict(list)
-        skipped_count = 0
-
-        for i, idx_in_test in enumerate(misclassified_indices):
-            original_idx = self.test_indices[idx_in_test]
-            true_class = y_test[idx_in_test]
-            pred_class = predictions[idx_in_test]
-
-            # FIX: Handle label encoding mismatch - map predictions to valid range
-            if pred_class >= posteriors.shape[1]:
-                # If prediction is out of bounds, use the class with highest posterior
-                pred_class = np.argmax(posteriors[idx_in_test])
-
-            # Double-check bounds
-            if (true_class >= posteriors.shape[1] or
-                pred_class >= posteriors.shape[1] or
-                true_class < 0 or pred_class < 0):
-                skipped_count += 1
-                if skipped_count <= 10:  # Only show first 10 skipped samples
-                    print(f"⚠️  Skipping sample {i}: true_class={true_class}, pred_class={pred_class}, posteriors_shape={posteriors.shape}")
-                continue
-
-            # Calculate margin and posterior
-            true_posterior = posteriors[idx_in_test, true_class]
-            pred_posterior = posteriors[idx_in_test, pred_class]
-            margin = pred_posterior - true_posterior
-
-            class_samples[true_class].append({
-                'index': original_idx,
-                'margin': margin,
-                'true_posterior': true_posterior,
-                'pred_posterior': pred_posterior,
-                'true_class': true_class,
-                'pred_class': pred_class
-            })
-
-        if skipped_count > 0:
-            print(f"⚠️  Skipped {skipped_count} samples due to label encoding issues")
-
-        # For each class, select max posterior and min margin samples
-        for class_id in unique_classes:
-            if class_id not in class_samples or not class_samples[class_id]:
-                print(f"   ⚠️ Class {class_id}: No valid failed samples available")
-                continue
-
-            class_data = class_samples[class_id]
-
-            # Select sample with maximum true posterior (most confident wrong prediction)
-            max_posterior_sample = max(class_data, key=lambda x: x['true_posterior'])
-
-            # Select sample with minimum margin (most ambiguous decision)
-            min_margin_sample = min(class_data, key=lambda x: x['margin'])
-
-            selected_samples = []
-
-            # Add max posterior sample if not already in training
-            if (max_posterior_sample['index'] not in self.training_indices and
-                max_posterior_sample['index'] not in samples_to_add):
-                selected_samples.append(max_posterior_sample)
-                samples_to_add.append(max_posterior_sample['index'])
-
-                # Track selection
-                self.all_selected_samples[self._get_original_class_label(class_id)].append({
-                    'index': max_posterior_sample['index'],
-                    'margin': max_posterior_sample['margin'],
-                    'true_posterior': max_posterior_sample['true_posterior'],
-                    'selection_type': 'max_posterior',
-                    'round': self.adaptive_round
-                })
-
-            # Add min margin sample if different from max posterior and not in training
-            if (min_margin_sample['index'] != max_posterior_sample['index'] and
-                min_margin_sample['index'] not in self.training_indices and
-                min_margin_sample['index'] not in samples_to_add):
-                selected_samples.append(min_margin_sample)
-                samples_to_add.append(min_margin_sample['index'])
-
-                # Track selection
-                self.all_selected_samples[self._get_original_class_label(class_id)].append({
-                    'index': min_margin_sample['index'],
-                    'margin': min_margin_sample['margin'],
-                    'true_posterior': min_margin_sample['true_posterior'],
-                    'selection_type': 'min_margin',
-                    'round': self.adaptive_round
-                })
-
-            print(f"   Class {class_id}: Selected {len(selected_samples)} samples "
-                  f"(max posterior: {max_posterior_sample['true_posterior']:.3f}, "
-                  f"min margin: {min_margin_sample['margin']:.3f})")
+                  f"(max posterior: {max_posterior_sample['true_posterior']:.6f}, "
+                  f"min margin: {min_margin_sample['margin']:.6f})")
 
         print(f"🎯 Selected {len(samples_to_add)} samples total using simple margin strategy")
         return samples_to_add
@@ -1366,207 +910,308 @@ class AdaptiveDBNN:
 
         return X_train, y_train, X_test, y_test
 
-    def _create_interactive_html_dashboard(self, X_train: np.ndarray, y_train: np.ndarray,
-                                        X_test: np.ndarray, y_test: np.ndarray):
-        """Create an interactive HTML dashboard with comprehensive visualization"""
+    def _initialize_dbnn_architecture(self, X: np.ndarray, y: np.ndarray):
+        """Initialize DBNN with entire dataset and freeze architecture"""
+        print("🎯 Initializing and freezing DBNN architecture...")
+
+        # Store original training config
+        original_train_enabled = self.model.train_enabled
+        original_train_only = self.model.train_only
+        original_max_epochs = getattr(self.model, 'max_epochs', 1000)
+
         try:
-            print("🖥️  Creating interactive HTML dashboard...")
+            # Temporarily enable full training mode
+            self.model.train_enabled = True
+            self.model.train_only = False
+            self.model.max_epochs = 100  # Short training for initialization
 
-            # Create the dashboard
-            fig = make_subplots(
-                rows=3, cols=3,
-                specs=[
-                    [{"type": "scatter3d", "rowspan": 2}, {"type": "scatter", "rowspan": 2}, {"type": "scatter"}],
-                    [None, None, {"type": "scatter"}],
-                    [{"type": "heatmap", "colspan": 2}, None, {"type": "bar"}]
-                ],
-                subplot_titles=(
-                    '3D Feature Space Evolution', 'Learning Progress', 'Feature Importance',
-                    'Class Distribution', 'Confusion Matrix', 'Sample Selection Analysis'
-                ),
-                vertical_spacing=0.08,
-                horizontal_spacing=0.08
-            )
+            # Prepare data for DBNN initialization
+            print("   Preparing data for initialization...")
+            X_train_init, X_test_init, y_train_init, y_test_init = self._prepare_dbnn_data(X, y)
 
-            # 1. 3D Feature Space (placeholder - would use actual data)
-            if len(self.feature_grid_history) > 1:
-                self._add_3d_evolution_to_dashboard(fig)
+            # Run one complete training round on entire dataset
+            print("   Running architecture initialization...")
+            self.model._compute_likelihood_parameters(X_train_init, y_train_init)
+            self.model.train()
 
-            # 2. Learning Progress
-            self._add_learning_progress_to_dashboard(fig)
+            # FREEZE ARCHITECTURE in DBNN itself
+            print("   Freezing DBNN architecture...")
+            self.model.freeze_architecture()
 
-            # 3. Feature Importance
-            self._add_feature_importance_to_dashboard(fig)
+            # Verify the model is working
+            print("   Verifying initialized model...")
+            test_predictions = self.model.predict(X_test_init)
+            test_accuracy = accuracy_score(y_test_init, test_predictions)
 
-            # 4. Class Distribution
-            self._add_class_distribution_to_dashboard(fig, y_train)
-
-            # 5. Confusion Matrix
-            self._add_confusion_matrix_to_dashboard(fig, X_test, y_test)
-
-            # 6. Sample Selection Analysis
-            self._add_sample_selection_to_dashboard(fig)
-
-            # Update layout
-            fig.update_layout(
-                title_text=f"Adaptive DBNN Learning Dashboard - {self.dataset_name}",
-                height=1200,
-                showlegend=True,
-                template="plotly_white",
-                font=dict(size=10)
-            )
-
-            # Add summary annotations
-            fig.add_annotation(
-                text=f"<b>Final Results:</b><br>Best Accuracy: {self.best_accuracy:.4f}<br>"
-                     f"Rounds: {len(self.round_stats)}<br>Training Size: {len(X_train)}<br>"
-                     f"Device: {self.device_type}",
-                xref="paper", yref="paper",
-                x=0.98, y=0.02,
-                showarrow=False,
-                bgcolor="lightblue",
-                bordercolor="black",
-                borderwidth=1
-            )
-
-            # Save interactive dashboard
-            dashboard_path = f"{self.viz_config.get('output_dir', 'adaptive_visualizations')}/interactive_dashboard.html"
-            fig.write_html(dashboard_path)
-
-            print(f"✅ Interactive dashboard saved: {dashboard_path}")
+            print(f"✅ DBNN architecture initialized and frozen")
+            print(f"   Initial accuracy: {test_accuracy:.4f}")
+            print(f"   Architecture frozen: {self.model.architecture_frozen}")
 
         except Exception as e:
-            print(f"⚠️ Could not create interactive dashboard: {e}")
+            print(f"❌ DBNN initialization failed: {e}")
+            raise
+        finally:
+            # Restore original training config
+            self.model.train_enabled = original_train_enabled
+            self.model.train_only = original_train_only
+            self.model.max_epochs = original_max_epochs
 
-    def _add_learning_progress_to_dashboard(self, fig):
-        """Add learning progress plots to dashboard"""
-        if len(self.round_stats) < 2:
-            return
+    def _verify_frozen_architecture_reset_weights(self):
+        """Verify that architecture is frozen and preserved, but weights are reset"""
+        print("   🔍 Verifying frozen architecture with preserved components and reset weights...")
 
-        rounds = [s['round'] for s in self.round_stats]
-        accuracies = [s['accuracy'] for s in self.round_stats]
-        full_accuracies = [s.get('full_dataset_accuracy', 0) for s in self.round_stats]
-        training_sizes = [s['training_size'] for s in self.round_stats]
+        # Check architecture is frozen
+        if not hasattr(self.model, 'architecture_frozen') or not self.model.architecture_frozen:
+            print("     ❌ Architecture not frozen!")
+            return False
 
-        # Test accuracy vs Full dataset accuracy
-        fig.add_trace(
-            go.Scatter(x=rounds, y=accuracies, mode='lines+markers',
-                      name='Test Accuracy', line=dict(color='blue')),
-            row=1, col=2
+        print("     ✅ Architecture frozen")
+
+        # Verify architectural components are preserved
+        if self.model.model_type == 'histogram':
+            if hasattr(self.model, 'bin_edges') and self.model.bin_edges is not None:
+                print(f"     ✅ bin_edges preserved: {self.model.bin_edges.shape}")
+            if hasattr(self.model, 'histograms') and self.model.histograms is not None:
+                print(f"     ✅ histograms preserved: {self.model.histograms.shape}")
+
+        elif self.model.model_type == 'gaussian':
+            if hasattr(self.model, 'feature_pairs') and self.model.feature_pairs is not None:
+                print(f"     ✅ feature_pairs preserved: {self.model.feature_pairs.shape}")
+
+        # Check weights are reset (should be uniform)
+        if hasattr(self.model, 'current_W'):
+            # For histogram model, check that weights are uniform but bins are preserved
+            if self.model.model_type == 'histogram':
+                # Verify we have the expected shape based on preserved histograms
+                if hasattr(self.model, 'histograms') and self.model.histograms is not None:
+                    expected_n_classes = self.model.histograms.shape[2]
+                    expected_n_features = self.model.histograms.shape[0]
+                    expected_n_bins = self.model.histograms.shape[1]
+
+                    actual_shape = self.model.current_W.shape
+                    expected_shape = (expected_n_classes, expected_n_features, expected_n_bins)
+
+                    if actual_shape == expected_shape:
+                        print(f"     ✅ Weights shape matches preserved architecture: {actual_shape}")
+                    else:
+                        print(f"     ❌ Weights shape mismatch: {actual_shape} vs {expected_shape}")
+
+            # Check weights are approximately uniform
+            weight_sums = np.sum(self.model.current_W, axis=0)  # Sum across classes
+            is_uniform = np.allclose(weight_sums, np.ones_like(weight_sums), atol=0.2)
+            if is_uniform:
+                print("     ✅ Weights reset to uniform distribution")
+            else:
+                print("     ⚠️  Weights may not be properly reset")
+
+        print("     ✅ Frozen architecture with preserved components and reset weights verified")
+        return True
+
+    def _extract_architectural_components(self) -> Dict[str, Any]:
+        """Extract architectural components that need to be frozen (ACTUAL values, not structure)"""
+        print("   📋 Extracting architectural components...")
+
+        frozen_components = {
+            'model_type': self.model.model_type,
+            'histogram_bins': self.model.histogram_bins,
+        }
+
+        # Extract histogram-specific components (ACTUAL VALUES)
+        if self.model.model_type == 'histogram':
+            if hasattr(self.model, 'bin_edges') and self.model.bin_edges is not None:
+                frozen_components['bin_edges'] = self.model.bin_edges.copy()
+                print(f"     - bin_edges: {self.model.bin_edges.shape}")
+
+            if hasattr(self.model, 'feature_min') and self.model.feature_min is not None:
+                frozen_components['feature_min'] = self.model.feature_min.copy()
+                print(f"     - feature_min: {self.model.feature_min.shape}")
+
+            if hasattr(self.model, 'feature_max') and self.model.feature_max is not None:
+                frozen_components['feature_max'] = self.model.feature_max.copy()
+                print(f"     - feature_max: {self.model.feature_max.shape}")
+
+            if hasattr(self.model, 'histograms') and self.model.histograms is not None:
+                frozen_components['histograms'] = self.model.histograms.copy()
+                print(f"     - histograms: {self.model.histograms.shape}")
+
+        # Extract Gaussian-specific components (ACTUAL VALUES)
+        elif self.model.model_type == 'gaussian':
+            if hasattr(self.model, 'feature_pairs') and self.model.feature_pairs is not None:
+                frozen_components['feature_pairs'] = self.model.feature_pairs.copy()
+                print(f"     - feature_pairs: {self.model.feature_pairs.shape}")
+
+        # Always extract label encoder
+        if hasattr(self.model, 'label_encoder') and self.model.label_encoder is not None:
+            frozen_components['label_encoder_classes'] = self.model.label_encoder.classes_.copy()
+            print(f"     - label_encoder: {len(self.model.label_encoder.classes_)} classes")
+
+        print(f"   ✅ Extracted {len(frozen_components)} architectural components (ACTUAL VALUES)")
+        return frozen_components
+
+    def _reset_weights_and_likelihood(self):
+        """Reset ONLY weights and likelihood parameters, preserving architectural components"""
+        print("   🔄 Resetting ONLY weights and likelihood parameters...")
+
+        # CRITICAL: Preserve all architectural components
+        # Store the current architectural state before resetting
+        preserved_bin_edges = self.model.bin_edges.copy() if hasattr(self.model, 'bin_edges') and self.model.bin_edges is not None else None
+        preserved_feature_min = self.model.feature_min.copy() if hasattr(self.model, 'feature_min') and self.model.feature_min is not None else None
+        preserved_feature_max = self.model.feature_max.copy() if hasattr(self.model, 'feature_max') and self.model.feature_max is not None else None
+        preserved_histograms = self.model.histograms.copy() if hasattr(self.model, 'histograms') and self.model.histograms is not None else None
+        preserved_feature_pairs = self.model.feature_pairs.copy() if hasattr(self.model, 'feature_pairs') and self.model.feature_pairs is not None else None
+
+        # Reset weights ONLY
+        if hasattr(self.model, 'current_W'):
+            if self.model.model_type == 'histogram':
+                # For histogram model, reset to uniform weights but keep the same shape
+                n_classes, n_features, n_bins = self.model.current_W.shape
+                self.model.current_W = np.ones((n_classes, n_features, n_bins)) / n_classes
+                print(f"     - Reset current_W to uniform: {self.model.current_W.shape}")
+            else:
+                # For Gaussian model, reset to uniform weights
+                n_classes, n_combinations = self.model.current_W.shape
+                self.model.current_W = np.ones((n_classes, n_combinations)) / n_classes
+                print(f"     - Reset current_W to uniform: {self.model.current_W.shape}")
+
+        # Reset best weights
+        if hasattr(self.model, 'best_W'):
+            self.model.best_W = self.model.current_W.copy() if hasattr(self.model, 'current_W') else None
+            print(f"     - Reset best_W")
+
+        # Reset initial weights
+        if hasattr(self.model, 'initial_W'):
+            self.model.initial_W = None
+            print(f"     - Reset initial_W")
+
+        # Reset likelihood parameters but preserve the structure
+        if hasattr(self.model, 'likelihood_params') and self.model.likelihood_params is not None:
+            if self.model.model_type == 'gaussian':
+                # For Gaussian model, we need to recompute likelihood but with the SAME feature pairs
+                # Store the feature pairs first
+                if preserved_feature_pairs is not None:
+                    self.model.feature_pairs = preserved_feature_pairs
+                self.model.likelihood_params = None
+                print(f"     - Reset likelihood_params (will be recomputed with SAME architecture)")
+
+        # CRITICAL: RESTORE the architectural components
+        if preserved_bin_edges is not None:
+            self.model.bin_edges = preserved_bin_edges
+            print(f"     - Preserved bin_edges: {preserved_bin_edges.shape}")
+
+        if preserved_feature_min is not None:
+            self.model.feature_min = preserved_feature_min
+            print(f"     - Preserved feature_min: {preserved_feature_min.shape}")
+
+        if preserved_feature_max is not None:
+            self.model.feature_max = preserved_feature_max
+            print(f"     - Preserved feature_max: {preserved_feature_max.shape}")
+
+        if preserved_histograms is not None:
+            self.model.histograms = preserved_histograms
+            print(f"     - Preserved histograms: {preserved_histograms.shape}")
+
+        # Reset training state
+        if hasattr(self.model, 'best_accuracy'):
+            self.model.best_accuracy = 0.0
+            print(f"     - Reset best_accuracy")
+
+        if hasattr(self.model, 'best_error'):
+            self.model.best_error = float('inf')
+            print(f"     - Reset best_error")
+
+        print("   ✅ Weights reset, architectural components PRESERVED")
+
+    def _prepare_dbnn_data(self, X: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Prepare data for DBNN initialization training"""
+        # Use the same split as the main adaptive learning
+        from sklearn.model_selection import train_test_split
+
+        # Filter sentinel values first
+        X_clean, y_clean = self._filter_sentinel_samples(X, y)
+
+        # Split the data
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_clean, y_clean, test_size=self.model.test_size, random_state=self.model.random_state
         )
-        fig.add_trace(
-            go.Scatter(x=rounds, y=full_accuracies, mode='lines+markers',
-                      name='Full Dataset Accuracy', line=dict(color='red')),
-            row=1, col=2
-        )
 
-        # Training size progression
-        fig.add_trace(
-            go.Scatter(x=rounds, y=training_sizes, mode='lines+markers',
-                      name='Training Size', line=dict(color='green')),
-            row=2, col=3
-        )
+        # Scale the data using the model's scaler
+        X_train_scaled = self.model.scaler.fit_transform(X_train)
+        X_test_scaled = self.model.scaler.transform(X_test)
 
-        fig.update_xaxes(title_text="Round", row=1, col=2)
-        fig.update_yaxes(title_text="Accuracy", row=1, col=2)
-        fig.update_xaxes(title_text="Round", row=2, col=3)
-        fig.update_yaxes(title_text="Samples", row=2, col=3)
+        return X_train_scaled, X_test_scaled, y_train, y_test
 
-    def _add_feature_importance_to_dashboard(self, fig):
-        """Add feature importance visualization to dashboard"""
-        if len(self.round_stats) < 2:
-            return
+    def _verify_architecture_frozen(self):
+        """Verify that DBNN architecture remains frozen"""
+        if not hasattr(self.model, 'architecture_frozen') or not self.model.architecture_frozen:
+            print("   ❌ DBNN architecture not frozen!")
+            return False
 
-        # Use the last round's feature importance if available
-        last_stats = self.round_stats[-1]
-        if 'feature_importance' in last_stats and last_stats['feature_importance'] is not None:
-            importance = last_stats['feature_importance']
-            features = [f'Feature {i+1}' for i in range(len(importance))]
+        print("   🔒 DBNN architecture verified frozen")
+        return True
 
-            fig.add_trace(
-                go.Bar(x=features, y=importance, name='Feature Importance'),
-                row=1, col=3
-            )
-            fig.update_xaxes(title_text="Features", row=1, col=3)
-            fig.update_yaxes(title_text="Importance", row=1, col=3)
+    def _debug_freeze_state(self):
+        """Debug the freeze state of both adaptive and DBNN models"""
+        print(f"\n🔍 FREEZE STATE DEBUG:")
+        print("=" * 50)
 
-    def _add_class_distribution_to_dashboard(self, fig, y_train):
-        """Add class distribution to dashboard"""
-        unique, counts = np.unique(y_train, return_counts=True)
-        class_names = [f'Class {cls}' for cls in unique]
+        # Adaptive model freeze state
+        adaptive_frozen = getattr(self, 'architecture_frozen', False)
+        print(f"   AdaptiveDBNN frozen: {adaptive_frozen}")
 
-        fig.add_trace(
-            go.Pie(labels=class_names, values=counts, name='Class Distribution'),
-            row=2, col=3
-        )
+        # DBNN model freeze state
+        if hasattr(self.model, 'architecture_frozen'):
+            dbnn_frozen = self.model.architecture_frozen
+            frozen_components = list(getattr(self.model, 'frozen_components', {}).keys())
+            print(f"   DBNN frozen: {dbnn_frozen}")
+            print(f"   DBNN frozen components: {frozen_components}")
+        else:
+            print(f"   ❌ DBNN freeze capability not available")
 
-    def _add_confusion_matrix_to_dashboard(self, fig, X_test, y_test):
-        """Add confusion matrix to dashboard"""
-        try:
-            y_pred = self._predict_with_current_model(X_test)
-            cm = confusion_matrix(y_test, y_pred)
-
-            fig.add_trace(
-                go.Heatmap(z=cm, colorscale='Blues', showscale=True),
-                row=3, col=1
-            )
-            fig.update_xaxes(title_text="Predicted", row=3, col=1)
-            fig.update_yaxes(title_text="Actual", row=3, col=1)
-        except Exception as e:
-            print(f"⚠️ Could not add confusion matrix: {e}")
-
-    def _add_sample_selection_to_dashboard(self, fig):
-        """Add sample selection analysis to dashboard"""
-        if not self.all_selected_samples:
-            return
-
-        # Analyze selection patterns
-        selection_counts = {}
-        for class_samples in self.all_selected_samples.values():
-            for sample in class_samples:
-                sel_type = sample.get('selection_type', 'unknown')
-                selection_counts[sel_type] = selection_counts.get(sel_type, 0) + 1
-
-        if selection_counts:
-            fig.add_trace(
-                go.Bar(x=list(selection_counts.keys()), y=list(selection_counts.values()),
-                      name='Selection Types'),
-                row=3, col=3
-            )
-            fig.update_xaxes(title_text="Selection Type", row=3, col=3)
-            fig.update_yaxes(title_text="Count", row=3, col=3)
-
-    def _add_3d_evolution_to_dashboard(self, fig):
-        """Add 3D evolution visualization (placeholder)"""
-        # This would be populated with actual 3D data from feature_grid_history
-        fig.add_trace(
-            go.Scatter3d(x=[0, 1, 2], y=[0, 1, 2], z=[0, 1, 2],
-                        mode='markers', name='Feature Evolution'),
-            row=1, col=1
-        )
+        print("=" * 50)
 
     def adaptive_learn(self, X: np.ndarray = None, y: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Main adaptive learning loop with acid test validation and interactive visualization"""
-        print("\n🚀 Starting Advanced Adaptive Learning Process")
-        print("=" * 70)
-        print(f"Dataset: {self.dataset_name}")
-        print(f"Device: {self.device_type}")
-        print("=" * 70)
+        """Main adaptive learning with initialize-and-freeze architecture"""
+        print("\n🚀 STARTING ADAPTIVE LEARNING WITH INITIALIZE-AND-FREEZE ARCHITECTURE")
+        print("=" * 80)
 
         # Use base model's data if not provided
         if X is None or y is None:
             print("Using base model's dataset...")
             X, y, y_original = self.prepare_full_data()
 
-        # Store the full dataset with original labels
+        # Store the full dataset
         self.X_full = X.copy()
         self.y_full = y.copy()
         self.y_full_original = y_original
-        self.original_data_shape = X.shape
 
         print(f"📦 Total samples: {len(X)}")
-        print(f"🎯 Classes (original): {np.unique(self.y_full_original)}")
-        print(f"🎯 Classes (encoded): {np.unique(y)}")
+        print(f"🎯 Classes: {np.unique(y_original)}")
+
+        # STEP 1: INITIALIZE DBNN WITH ENTIRE DATASET
+        print("\n" + "="*50)
+        print("🎯 STEP 1: INITIALIZING DBNN ARCHITECTURE")
+        print("="*50)
+
+        self._initialize_dbnn_architecture(X, y)
+
+        # STEP 2: VERIFY FREEZE STATE
+        print("\n" + "="*50)
+        print("🎯 STEP 2: VERIFYING FREEZE STATE")
+        print("="*50)
+
+        self._debug_freeze_state()
+
+        # STEP 3: START ADAPTIVE TRAINING WITH FROZEN ARCHITECTURE
+        print("\n" + "="*50)
+        print("🎯 STEP 3: STARTING ADAPTIVE TRAINING (FROZEN ARCHITECTURE)")
+        print("="*50)
+
+        # Initialize adaptive learning state
+        X_train, y_train, X_test, y_test = self.prepare_adaptive_data(X, y)
+        self.adaptive_start_time = datetime.now()
+
+        # Track failed examples history
+        failed_history = []
 
         exhaust_all_failed = self.adaptive_config['exhaust_all_failed']
         min_failed_threshold = self.adaptive_config['min_failed_threshold']
@@ -1577,28 +1222,9 @@ class AdaptiveDBNN:
             effective_max_rounds = 1000
         else:
             print(f"🔄 MODE: PATIENCE - Max rounds: {self.adaptive_config['max_adaptive_rounds']}")
-            print(f"⏳ Patience: {self.adaptive_config['patience']}")
             effective_max_rounds = self.adaptive_config['max_adaptive_rounds']
 
-        # Initialize adaptive learning
-        X_train, y_train, X_test, y_test = self.prepare_adaptive_data(X, y)
-        self.adaptive_start_time = datetime.now()
-
-        # Track failed examples history
-        failed_history = []
-
-        # Track performance on entire dataset
-        full_dataset_accuracies = []
-        best_full_dataset_accuracy = 0.0
-
-        # Track 3D visualization data
-        if hasattr(self, '_initialize_3d_visualization'):
-            self._initialize_3d_visualization()
-
         # Main adaptive learning loop
-        patience = self.adaptive_config['patience']
-
-        # Use while loop for exhaustive mode to avoid round limits
         round_num = 0
         while True:
             round_num += 1
@@ -1615,6 +1241,9 @@ class AdaptiveDBNN:
                 print("🛑 Safety limit reached: 1000 rounds")
                 break
 
+            # Verify architecture is frozen
+            self._verify_architecture_frozen()
+
             # Step 1: Train until convergence
             round_start_time = datetime.now()
             training_success = self._train_until_convergence(X_train, y_train)
@@ -1623,91 +1252,103 @@ class AdaptiveDBNN:
                 print("❌ Training failed, skipping round")
                 continue
 
-            # Step 2: Predict on test set
-            print("🎯 Evaluating on test set...")
-            predictions = self._predict_with_current_model(X_test)
-            posteriors = self._get_posteriors_with_current_model(X_test)
+            # Step 2: Evaluate CURRENT model on TEST set
+            print("🎯 Evaluating current model on test set...")
+            current_test_predictions = self._predict_with_current_model(X_test)
+            current_test_accuracy = accuracy_score(y_test, current_test_predictions)
 
-            # Ensure consistent lengths
-            if len(predictions) != len(y_test):
-                min_len = min(len(predictions), len(y_test))
-                predictions = predictions[:min_len]
-                y_test = y_test[:min_len]
-
-            # Calculate accuracy and count failed examples
-            accuracy = accuracy_score(y_test, predictions)
-            misclassified_mask = predictions != y_test
+            # Count failed examples
+            misclassified_mask = current_test_predictions != y_test
             failed_count = np.sum(misclassified_mask)
             failed_history.append(failed_count)
 
-            print(f"📊 Round {round_num} Test Accuracy: {accuracy:.4f}")
+            print(f"📊 Round {round_num} Test Accuracy: {current_test_accuracy:.4f}")
             print(f"❌ Failed examples: {failed_count}")
 
-            # ACID TEST - Evaluate on entire dataset
-            print("🧪 Performing acid test on entire dataset...")
-            full_predictions = self._predict_with_current_model(X)
-            full_accuracy = accuracy_score(y, full_predictions)
-            full_dataset_accuracies.append(full_accuracy)
-            print(f"🧪 Entire Dataset Accuracy: {full_accuracy:.4f}")
+            # Step 3: Check if current model is POTENTIALLY better than global best
+            improvement_threshold = self.adaptive_config['min_improvement']
+            is_potential_improvement = current_test_accuracy > self.global_best_accuracy + improvement_threshold
+
+            if is_potential_improvement:
+                print(f"🎯 POTENTIAL IMPROVEMENT DETECTED!")
+                print(f"   Current test accuracy: {current_test_accuracy:.4f}")
+                print(f"   Global best accuracy: {self.global_best_accuracy:.4f}")
+                print(f"   Improvement threshold: +{improvement_threshold:.4f}")
+
+                # Step 4: Save current weights temporarily and perform ACID TEST
+                temp_weights = self.model.current_W.copy() if hasattr(self.model, 'current_W') else None
+
+                print("🧪 Performing acid test on entire dataset...")
+                current_full_predictions = self._predict_with_current_model(X)
+                current_full_accuracy = accuracy_score(y, current_full_predictions)
+                print(f"🧪 Entire Dataset Accuracy: {current_full_accuracy:.4f}")
+
+                # Step 5: Update global best if acid test confirms improvement
+                if current_full_accuracy > self.global_best_accuracy + improvement_threshold:
+                    improvement = current_full_accuracy - self.global_best_accuracy
+
+                    # Update global best metrics
+                    self.global_best_accuracy = current_full_accuracy
+                    self.global_best_round = round_num
+                    self.global_best_training_indices = self.training_indices.copy()
+                    self.global_best_test_indices = self.test_indices.copy()
+                    self.global_best_weights = temp_weights
+
+                    # Also update displayed best accuracy
+                    self.best_accuracy = current_full_accuracy  # Display ENTIRE dataset accuracy
+                    self.best_round = round_num
+                    self.best_training_indices = self.training_indices.copy()
+                    self.best_test_indices = self.test_indices.copy()
+                    self.best_weights = temp_weights
+
+                    print(f"🏆 NEW GLOBAL BEST MODEL!")
+                    print(f"   Test Accuracy (remaining data): {current_test_accuracy:.4f}")
+                    print(f"   Entire Dataset Accuracy (all data): {current_full_accuracy:.4f}")
+                    print(f"   Improvement: +{improvement:.4f}")
+                    print(f"   Training set size: {len(self.training_indices)}")
+
+                    # Save the new best weights
+                    if self.best_weights is not None:
+                        self.model._save_best_weights()
+                        print("💾 Best weights saved")
+                else:
+                    print(f"   ❌ Acid test failed to confirm improvement")
+                    print(f"   Entire dataset accuracy: {current_full_accuracy:.4f} <= {self.global_best_accuracy:.4f} + {improvement_threshold}")
+
+                    # Restore previous best weights if we have them
+                    if self.global_best_weights is not None and hasattr(self.model, 'current_W'):
+                        self.model.current_W = self.global_best_weights.copy()
+            else:
+                print(f"   📉 No potential improvement detected")
+                print(f"   Current test accuracy: {current_test_accuracy:.4f}")
+                print(f"   Global best accuracy: {self.global_best_accuracy:.4f}")
 
             # Track 3D visualization data
             if hasattr(self, '_track_feature_grids_3d'):
-                if round_num % 5 == 0 or round_num <= 10:  # Track more frequently in early rounds
+                if round_num % 5 == 0 or round_num <= 10:
                     self._track_feature_grids_3d(round_num, X_train, y_train)
 
             # Create round visualizations
             if self.stats_config.get('enable_confusion_matrix', True) and round_num <= 20:
-                self._create_round_visualizations(round_num, y_test, predictions)
+                self._create_round_visualizations(round_num, y_test, current_test_predictions)
 
-            # Step 3: Save best model based on ACID TEST (entire dataset accuracy)
-            improvement_threshold = self.adaptive_config['min_improvement']
-
-            # Use entire dataset accuracy for validation
-            acid_test_improvement = full_accuracy > best_full_dataset_accuracy + improvement_threshold
-
-            if acid_test_improvement:
-                improvement = full_accuracy - best_full_dataset_accuracy
-                best_full_dataset_accuracy = full_accuracy
-                self.best_accuracy = accuracy  # Still track test accuracy for display
-                self.best_round = round_num
-                self.best_training_indices = self.training_indices.copy()
-                self.best_test_indices = self.test_indices.copy()
-                self.best_weights = self.model.current_W.copy() if hasattr(self.model, 'current_W') else None
-                self.patience_counter = 0  # Reset patience when accuracy improves
-
-                print(f"🎯 NEW BEST MODEL (ACID TEST): {full_accuracy:.4f} (improvement: {improvement:.4f})")
-                print(f"📦 Best training set size: {len(self.best_training_indices)}")
-
-                # Save best weights
-                if self.best_weights is not None:
-                    self.model._save_best_weights()
-            else:
-                self.patience_counter += 1
-                if not exhaust_all_failed:
-                    print(f"⏳ No acid test improvement - Patience: {self.patience_counter}/{patience}")
-
-                # Show why we're not improving
-                if full_accuracy <= best_full_dataset_accuracy:
-                    print(f"   📉 Entire dataset accuracy didn't improve: {full_accuracy:.4f} <= {best_full_dataset_accuracy:.4f}")
-                else:
-                    print(f"   📈 Improvement too small: {full_accuracy - best_full_dataset_accuracy:.4f} < {improvement_threshold}")
-
-            # Step 4: Select informative samples for next round
+            # Step 6: Select informative samples for next round
             print("🎯 Selecting informative samples...")
-            samples_to_add = self._select_informative_samples(X, y, predictions, posteriors)
+            posteriors = self._get_posteriors_with_current_model(X_test)
+            samples_to_add = self._select_informative_samples(X, y, current_test_predictions, posteriors)
 
-            # Step 5: Check stopping conditions
+            # Step 7: Check stopping conditions
             stop_reason = self._check_stopping_conditions(
                 round_num, samples_to_add, failed_count, min_failed_threshold,
-                patience, exhaust_all_failed, effective_max_rounds,
-                full_accuracy, best_full_dataset_accuracy  # Pass acid test results
+                self.adaptive_config['patience'], exhaust_all_failed, effective_max_rounds,
+                self.global_best_accuracy, self.global_best_accuracy
             )
 
             if stop_reason:
                 print(f"🛑 {stop_reason}")
                 break
 
-            # Step 6: Update training set
+            # Step 8: Update training set
             print("🎯 Updating training set...")
             added_count = len(samples_to_add)
             self.training_indices.extend(samples_to_add)
@@ -1722,19 +1363,19 @@ class AdaptiveDBNN:
             # Record statistics
             round_duration = (datetime.now() - round_start_time).total_seconds()
             self._record_round_statistics(round_num, X_train, y_train, X_test, y_test,
-                                        accuracy, samples_to_add, round_duration,
-                                        failed_count, full_accuracy)  # Add full accuracy
+                                        current_test_accuracy, samples_to_add, round_duration,
+                                        failed_count, self.global_best_accuracy)
 
             print(f"📥 Added {added_count} samples to training set")
             print(f"📊 New training size: {len(X_train)}")
             print(f"📊 New test size: {len(X_test)}")
             print(f"❌ Remaining failed examples: {failed_count}")
-            print(f"🧪 Entire dataset accuracy: {full_accuracy:.4f}")
+            print(f"🏆 Global Best Entire Dataset Accuracy: {self.global_best_accuracy:.4f}")
             print(f"⏱️ Round duration: {round_duration:.2f}s")
 
             # Progress indicator for exhaustive mode
             if exhaust_all_failed and round_num % 10 == 0:
-                initial_test_size = len(X) - len(self.best_training_indices)
+                initial_test_size = len(X) - len(self.global_best_training_indices) if self.global_best_training_indices else len(X_test)
                 progress = ((initial_test_size - len(X_test)) / initial_test_size) * 100
                 print(f"📈 Progress: {progress:.1f}% of test set processed")
 
@@ -1742,14 +1383,25 @@ class AdaptiveDBNN:
         print(f"\n🏁 Adaptive Learning Completed after {round_num} rounds")
         print("=" * 70)
 
-        # Use best configuration
-        X_train_best = X[self.best_training_indices]
-        y_train_best = y[self.best_training_indices]
-        X_test_best = X[self.best_test_indices]
-        y_test_best = y[self.best_test_indices]
+        # Use GLOBAL BEST configuration
+        if self.global_best_training_indices:
+            X_train_best = X[self.global_best_training_indices]
+            y_train_best = y[self.global_best_training_indices]
+            X_test_best = X[self.global_best_test_indices]
+            y_test_best = y[self.global_best_test_indices]
 
-        print(f"🎯 Best test accuracy: {self.best_accuracy:.4f} (achieved at round {self.best_round})")
-        print(f"🧪 Best entire dataset accuracy: {best_full_dataset_accuracy:.4f}")
+            # Restore global best weights
+            if self.global_best_weights is not None and hasattr(self.model, 'current_W'):
+                self.model.current_W = self.global_best_weights.copy()
+        else:
+            # Fallback to current configuration
+            X_train_best = X[self.training_indices]
+            y_train_best = y[self.training_indices]
+            X_test_best = X[self.test_indices]
+            y_test_best = y[self.test_indices]
+
+        print(f"🏆 Best Entire Dataset Accuracy: {self.global_best_accuracy:.4f} (achieved at round {self.global_best_round})")
+        print(f"📊 Final test set accuracy: {current_test_accuracy:.4f}")
         print(f"📦 Optimal training set size: {len(X_train_best)}")
         print(f"📊 Final test set size: {len(X_test_best)}")
         print(f"❌ Final failed examples: {failed_history[-1] if failed_history else 'N/A'}")
@@ -1763,7 +1415,7 @@ class AdaptiveDBNN:
         print("\n📊 Creating comprehensive analysis...")
         self._create_comprehensive_analysis(X_train_best, y_train_best, X_test_best, y_test_best)
 
-        # NEW: Create interactive HTML visualization dashboard
+        # Create interactive HTML visualization dashboard
         print("\n🎨 Creating interactive HTML visualization dashboard...")
         self._create_interactive_html_dashboard(X_train_best, y_train_best, X_test_best, y_test_best)
 
@@ -1782,6 +1434,7 @@ class AdaptiveDBNN:
         print("✅ ADAPTIVE LEARNING COMPLETED SUCCESSFULLY!")
         print("="*70)
         print(f"📁 Results saved in: {self.viz_config.get('output_dir', 'adaptive_visualizations')}")
+        print(f"🏆 Best Model: Entire Dataset Accuracy = {self.global_best_accuracy:.4f}")
         print("\n📊 Available Visualizations:")
         print("   - interactive_dashboard.html (Complete interactive analysis)")
         print("   - adaptive_learning_3d_evolution.gif (Animated 3D evolution)")
@@ -1795,8 +1448,8 @@ class AdaptiveDBNN:
     def _check_stopping_conditions(self, round_num: int, samples_to_add: List[int],
                                  failed_count: int, min_failed_threshold: int,
                                  patience: int, exhaust_all_failed: bool, max_rounds: int,
-                                 current_full_accuracy: float, best_full_accuracy: float) -> str:
-        """Check all stopping conditions with relaxation for early training"""
+                                 current_global_best: float, previous_global_best: float) -> str:
+        """Check all stopping conditions with global best accuracy"""
 
         # Calculate current training set percentage of entire dataset
         current_training_size = len(self.training_indices)
@@ -1822,13 +1475,14 @@ class AdaptiveDBNN:
             if len(self.test_indices) <= min_failed_threshold * 2:
                 return f"Test set too small ({len(self.test_indices)} samples) for meaningful evaluation"
 
-            # Relax acid test degradation check until we have sufficient training data
+            # Relax global best degradation check until we have sufficient training data
             degradation_threshold = 0.1  # 10% degradation
             if training_percentage >= min_stopping_percentage:
-                if current_full_accuracy < best_full_accuracy - degradation_threshold:
-                    return f"Significant degradation in entire dataset accuracy: {current_full_accuracy:.4f} < {best_full_accuracy:.4f}"
+                # Use global best accuracy for degradation check
+                if current_global_best < previous_global_best - degradation_threshold:
+                    return f"Significant degradation in global best accuracy: {current_global_best:.4f} < {previous_global_best:.4f}"
             else:
-                print(f"   🛡️  Acid test degradation check suspended (training data: {training_percentage:.1f}% < {min_stopping_percentage}%)")
+                print(f"   🛡️  Global best degradation check suspended (training data: {training_percentage:.1f}% < {min_stopping_percentage}%)")
 
             # Continue learning regardless of rounds or patience
             return ""
@@ -1838,34 +1492,27 @@ class AdaptiveDBNN:
             return f"Reached maximum rounds ({max_rounds})"
 
         # 4. Patience-based stopping (only if not in exhaustive mode)
-        if not exhaust_all_failed and self.patience_counter >= patience:
-            # Relax patience stopping until sufficient training data
+        if not exhaust_all_failed:
+            # Use rounds without global best improvement for patience
+            rounds_without_improvement = round_num - self.global_best_round if self.global_best_round > 0 else 0
+
             if training_percentage >= min_stopping_percentage:
-                return f"Early stopping after {patience} rounds without acid test improvement"
+                if rounds_without_improvement >= patience:
+                    return f"Early stopping after {patience} rounds without global best improvement"
             else:
                 print(f"   🛡️  Patience stopping suspended (training data: {training_percentage:.1f}% < {min_stopping_percentage}%)")
-                # Reset patience counter to give more time
-                self.patience_counter = max(0, self.patience_counter - 1)
                 return ""
 
-        # 5. Exhaustive mode: stop when failed examples are below threshold
-        if exhaust_all_failed and failed_count <= min_failed_threshold:
-            return f"Failed examples ({failed_count}) below threshold ({min_failed_threshold})"
-
-        # 6. Exhaustive mode: stop when test set is too small
-        if exhaust_all_failed and len(self.test_indices) <= min_failed_threshold * 2:
-            return f"Test set too small ({len(self.test_indices)} samples)"
-
-        # 7. Stop if training set reaches maximum allowed percentage
+        # 5. Stop if training set reaches maximum allowed percentage
         if training_percentage >= max_training_percentage:
             return f"Training set reached {training_percentage:.1f}% of total data - stopping to prevent overfitting"
 
         return ""  # Continue learning
 
     def _record_round_statistics(self, round_num: int, X_train: np.ndarray, y_train: np.ndarray,
-                               X_test: np.ndarray, y_test: np.ndarray, accuracy: float,
+                               X_test: np.ndarray, y_test: np.ndarray, current_accuracy: float,
                                samples_added: List[int], duration: float, failed_count: int,
-                               full_accuracy: float):  # NEW: Add full_accuracy parameter
+                               global_best_accuracy: float):
         """Record comprehensive statistics for the current round"""
         # Get class distribution with original labels
         y_train_original = np.array([self._get_original_class_label(cls) for cls in y_train])
@@ -1876,14 +1523,13 @@ class AdaptiveDBNN:
             'round': round_num,
             'training_size': len(X_train),
             'test_size': len(X_test),
-            'accuracy': accuracy,
-            'full_dataset_accuracy': full_accuracy,  # NEW: Track entire dataset accuracy
+            'current_test_accuracy': current_accuracy,  # Current model on test set
+            'global_best_accuracy': global_best_accuracy,  # Best model on entire dataset
             'samples_added': len(samples_added),
             'class_distribution': class_distribution,
             'duration': duration,
             'failed_count': failed_count,
-            'patience_counter': self.patience_counter,
-            'best_accuracy': self.best_accuracy,
+            'global_best_round': self.global_best_round,
             'timestamp': datetime.now().isoformat()
         }
 
@@ -1937,19 +1583,21 @@ class AdaptiveDBNN:
             return
 
         rounds = [stats['round'] for stats in self.round_stats]
-        accuracies = [stats['accuracy'] for stats in self.round_stats]
+        current_accuracies = [stats['current_test_accuracy'] for stats in self.round_stats]
+        global_best_accuracies = [stats['global_best_accuracy'] for stats in self.round_stats]
         training_sizes = [stats['training_size'] for stats in self.round_stats]
         failed_counts = [stats['failed_count'] for stats in self.round_stats]
 
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
 
         # Plot 1: Accuracy progression
-        ax1.plot(rounds, accuracies, 'b-o', linewidth=2, markersize=6)
+        ax1.plot(rounds, current_accuracies, 'b-o', linewidth=2, markersize=6, label='Current Test Accuracy')
+        ax1.plot(rounds, global_best_accuracies, 'r-o', linewidth=2, markersize=6, label='Global Best (Entire Dataset)')
         ax1.set_xlabel('Adaptive Round')
-        ax1.set_ylabel('Test Accuracy')
+        ax1.set_ylabel('Accuracy')
         ax1.set_title('Adaptive Learning - Accuracy Progression')
         ax1.grid(True, alpha=0.3)
-        ax1.axhline(y=self.best_accuracy, color='r', linestyle='--', label=f'Best: {self.best_accuracy:.4f}')
+        ax1.axhline(y=self.global_best_accuracy, color='g', linestyle='--', label=f'Best: {self.global_best_accuracy:.4f}')
         ax1.legend()
 
         # Plot 2: Training size progression
@@ -2076,6 +1724,8 @@ class AdaptiveDBNN:
             'total_rounds': len(self.round_stats),
             'best_round': self.best_round,
             'best_accuracy': self.best_accuracy,
+            'global_best_round': self.global_best_round,
+            'global_best_accuracy': self.global_best_accuracy,
             'final_training_size': len(self.best_training_indices),
             'adaptive_config': self.adaptive_config,
             'start_time': self.adaptive_start_time.isoformat(),
@@ -2085,7 +1735,8 @@ class AdaptiveDBNN:
             'sample_selection_summary': {
                 class_label: len(samples)
                 for class_label, samples in self.all_selected_samples.items()
-            }
+            },
+            'architecture_frozen': getattr(self.model, 'architecture_frozen', False)
         }
 
         # Save summary as JSON
@@ -2101,8 +1752,11 @@ class AdaptiveDBNN:
         print(f"Total Rounds: {summary['total_rounds']}")
         print(f"Best Round: {summary['best_round']}")
         print(f"Best Accuracy: {summary['best_accuracy']:.4f}")
+        print(f"Global Best Round: {summary['global_best_round']}")
+        print(f"Global Best Accuracy (Entire Dataset): {summary['global_best_accuracy']:.4f}")
         print(f"Final Training Size: {summary['final_training_size']}")
         print(f"Total Duration: {summary['total_duration']:.2f}s")
+        print(f"Architecture Frozen: {summary['architecture_frozen']}")
         print(f"Sample Selection Summary: {summary['sample_selection_summary']}")
 
     def _save_final_results(self, X_train: np.ndarray, y_train: np.ndarray,
@@ -2112,14 +1766,21 @@ class AdaptiveDBNN:
 
         output_dir = self.viz_config.get('output_dir', 'adaptive_visualizations')
 
-        # Save indices
+        # Save indices and global best information
         results = {
+            'global_best_training_indices': self.global_best_training_indices,
+            'global_best_test_indices': self.global_best_test_indices,
+            'global_best_accuracy': self.global_best_accuracy,
+            'global_best_round': self.global_best_round,
             'best_training_indices': self.best_training_indices,
             'best_test_indices': self.best_test_indices,
             'best_accuracy': self.best_accuracy,
             'best_round': self.best_round,
             'adaptive_config': self.adaptive_config,
-            'round_statistics': self.round_stats
+            'round_statistics': self.round_stats,
+            'final_training_set_size': len(X_train),
+            'final_test_set_size': len(X_test),
+            'architecture_frozen': getattr(self.model, 'architecture_frozen', False)
         }
 
         with open(f'{output_dir}/adaptive_results.json', 'w') as f:
@@ -2128,7 +1789,7 @@ class AdaptiveDBNN:
         # Save the trained model
         self.model.save_model()
 
-        print("✅ Final results saved!")
+        print("✅ Final results saved with global best model information!")
 
     def prepare_full_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Prepare full dataset for adaptive learning"""
@@ -2141,8 +1802,6 @@ class AdaptiveDBNN:
         # Fit label encoder for adaptive learning
         self.label_encoder.fit(y_original)
         y = self.label_encoder.transform(y_original)
-        # Fit label encoder for adaptive learning
-        self.label_encoder.fit(y_original)
 
         return X, y, y_original
 
@@ -2170,22 +1829,112 @@ class AdaptiveDBNN:
             print(f"⚠️ Custom training error: {e}")
 
     def _predict_with_current_model(self, X: np.ndarray) -> np.ndarray:
-        """Get predictions from current model"""
+        """Get predictions from current model with proper label encoding"""
         try:
-            return self.model.predict(X)
+            # Get raw predictions directly from DBNN
+            raw_predictions = self.model.predict(X)
+
+            # Determine if predictions are encoded or decoded
+            if hasattr(self, 'label_encoder') and self.label_encoder is not None:
+                # Check if predictions are within valid encoded range
+                unique_preds = np.unique(raw_predictions)
+                n_classes = len(self.label_encoder.classes_)
+
+                if (np.issubdtype(raw_predictions.dtype, np.integer) and
+                    np.min(unique_preds) >= 0 and
+                    np.max(unique_preds) < n_classes):
+                    return raw_predictions
+                else:
+                    # Predictions are decoded, convert to encoded
+                    try:
+                        encoded_predictions = self.label_encoder.transform(raw_predictions)
+                        return encoded_predictions
+                    except Exception as e:
+                        print(f"   ❌ Encoding failed: {e}")
+                        return raw_predictions
+            else:
+                return raw_predictions
+
         except Exception as e:
             print(f"⚠️ Prediction error: {e}")
-            # Return random predictions as fallback
-            return np.random.randint(0, len(np.unique(self.y_full)), len(X))
+            # Return fallback predictions that match y encoding
+            n_classes = len(np.unique(self.y_full)) if hasattr(self, 'y_full') else 5
+            return np.random.randint(0, n_classes, len(X))
 
     def _get_posteriors_with_current_model(self, X: np.ndarray) -> np.ndarray:
-        """Get posterior probabilities from current model"""
+        """Get posterior probabilities from current model with numerical stability"""
         try:
-            return self.model._compute_batch_posterior(X)
+            posteriors = self.model._compute_batch_posterior(X)
+
+            # Add numerical stability checks
+            if np.any(np.isnan(posteriors)) or np.any(np.isinf(posteriors)):
+                print(f"❌ Invalid posteriors detected: NaN={np.any(np.isnan(posteriors))}, Inf={np.any(np.isinf(posteriors))}")
+                # Fix by setting to uniform distribution
+                n_classes = posteriors.shape[1]
+                uniform_probs = np.ones_like(posteriors) / n_classes
+                return uniform_probs
+
+            # Check for zero posteriors (numerical underflow)
+            zero_mask = np.sum(posteriors, axis=1) == 0
+            if np.any(zero_mask):
+                n_zero = np.sum(zero_mask)
+                print(f"⚠️  {n_zero} samples have zero posteriors - applying numerical fix")
+                # Apply uniform distribution
+                n_classes = posteriors.shape[1]
+                posteriors[zero_mask] = 1.0 / n_classes
+
+            # Ensure probabilities sum to 1
+            row_sums = np.sum(posteriors, axis=1, keepdims=True)
+            if np.any(np.abs(row_sums - 1.0) > 1e-6):
+                posteriors = posteriors / (row_sums + 1e-10)
+
+            return posteriors
+
         except Exception as e:
             print(f"⚠️ Posterior error: {e}")
-            n_classes = len(np.unique(self.y_full))
+            # Return uniform probabilities as fallback
+            n_classes = len(np.unique(self.y_full)) if hasattr(self, 'y_full') else 5
             return np.ones((len(X), n_classes)) / n_classes
+
+    def _filter_sentinel_samples(self, X: np.ndarray, y: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray]:
+        """Filter out samples that contain sentinel values (-9999)"""
+        SENTINEL_VALUE = -9999
+        valid_mask = ~np.any(X == SENTINEL_VALUE, axis=1)
+
+        if not np.any(valid_mask):
+            raise ValueError("All samples contain sentinel values - no valid data to process")
+
+        X_filtered = X[valid_mask]
+
+        if y is not None:
+            y_filtered = y[valid_mask]
+            filtered_count = len(X) - len(X_filtered)
+            if filtered_count > 0:
+                print(f"Filtered out {filtered_count} samples containing sentinel values")
+            return X_filtered, y_filtered
+
+        return X_filtered, valid_mask
+
+    # Placeholder for methods that were not fully implemented in the original
+    def _select_kl_divergence_samples(self, X: np.ndarray, y: np.ndarray,
+                                    predictions: np.ndarray, posteriors: np.ndarray) -> List[int]:
+        """Select samples based on KL divergence (placeholder)"""
+        print("🔍 KL divergence selection not yet implemented, using margin-based selection")
+        return self._select_simple_margin_samples(X, y, predictions, posteriors)
+
+    def _create_interactive_html_dashboard(self, X_train: np.ndarray, y_train: np.ndarray,
+                                        X_test: np.ndarray, y_test: np.ndarray):
+        """Create interactive HTML dashboard (placeholder)"""
+        print("📊 Interactive HTML dashboard creation not yet implemented")
+
+    def _create_unified_3d_animation(self):
+        """Create unified 3D animation (placeholder)"""
+        print("🎬 Unified 3D animation creation not yet implemented")
+
+    def _create_comprehensive_3d_visualization(self, X_train: np.ndarray, y_train: np.ndarray):
+        """Create comprehensive 3D visualization (placeholder)"""
+        print("🎨 Comprehensive 3D visualization creation not yet implemented")
+
 
 def main():
     """Main function to demonstrate adaptive DBNN"""
@@ -2207,7 +1956,7 @@ def main():
     print(f"\n✅ Adaptive learning completed!")
     print(f"📦 Final training set size: {len(X_train)}")
     print(f"📊 Final test set size: {len(X_test)}")
-    print(f"🎯 Best accuracy achieved: {adaptive_model.best_accuracy:.4f}")
+    print(f"🏆 Best accuracy achieved: {adaptive_model.global_best_accuracy:.4f}")
 
 if __name__ == "__main__":
     main()

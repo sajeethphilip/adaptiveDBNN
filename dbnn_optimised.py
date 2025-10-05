@@ -665,6 +665,9 @@ class GPUDBNN:
         self.active_feature_mask = None
         self.original_feature_indices = None
 
+        # Add freeze architecture flag
+        self.architecture_frozen = False
+        self.frozen_components = {}
         # Extract training configuration
         training_config = self.config.get('training_config', {})
         self.trials = training_config.get('trials', 100)
@@ -777,6 +780,82 @@ class GPUDBNN:
         else:
             print("Visualization: DISABLED (default for performance)")
 
+#----------------------------for adaptive learning----------------------------
+    def freeze_architecture(self):
+        """Freeze all architectural components to prevent changes during training"""
+        print("🔒 Freezing DBNN architecture...")
+        self.architecture_frozen = True
+
+        # Store current architectural state
+        self.frozen_components = {
+            'model_type': self.model_type,
+            'histogram_bins': self.histogram_bins,
+            'feature_pairs': self.feature_pairs.copy() if self.feature_pairs is not None else None,
+            'label_encoder_classes': self.label_encoder.classes_.copy() if hasattr(self.label_encoder, 'classes_') else None,
+        }
+
+        # Freeze histogram-specific components
+        if self.model_type == 'histogram':
+            if hasattr(self, 'bin_edges') and self.bin_edges is not None:
+                self.frozen_components['bin_edges'] = self.bin_edges.copy()
+            if hasattr(self, 'feature_min') and self.feature_min is not None:
+                self.frozen_components['feature_min'] = self.feature_min.copy()
+            if hasattr(self, 'feature_max') and self.feature_max is not None:
+                self.frozen_components['feature_max'] = self.feature_max.copy()
+            if hasattr(self, 'histograms') and self.histograms is not None:
+                self.frozen_components['histograms'] = self.histograms.copy()
+
+        # Freeze Gaussian-specific components
+        elif self.model_type == 'gaussian':
+            if hasattr(self, 'likelihood_params') and self.likelihood_params is not None:
+                frozen_likelihood = {}
+                for key, value in self.likelihood_params.items():
+                    if hasattr(value, 'copy'):
+                        frozen_likelihood[key] = value.copy()
+                    else:
+                        frozen_likelihood[key] = value
+                self.frozen_components['likelihood_params'] = frozen_likelihood
+
+        print(f"✅ Architecture frozen with {len(self.frozen_components)} components")
+
+    def unfreeze_architecture(self):
+        """Unfreeze architecture to allow changes"""
+        print("🔓 Unfreezing DBNN architecture...")
+        self.architecture_frozen = False
+        self.frozen_components = {}
+
+    def _check_architecture_frozen(self, operation: str):
+        """Check if architecture is frozen and prevent modifications"""
+        if self.architecture_frozen:
+            print(f"🚫 Architecture frozen - skipping {operation}")
+            return True
+        return False
+
+    def _restore_frozen_architecture(self):
+        """Restore frozen architecture components (ACTUAL VALUES)"""
+        if not self.architecture_frozen or not self.frozen_components:
+            return
+
+        # Restore ALL architectural components to their exact initialized values
+        if 'bin_edges' in self.frozen_components:
+            self.bin_edges = self.frozen_components['bin_edges'].copy()
+
+        if 'feature_min' in self.frozen_components:
+            self.feature_min = self.frozen_components['feature_min'].copy()
+
+        if 'feature_max' in self.frozen_components:
+            self.feature_max = self.frozen_components['feature_max'].copy()
+
+        if 'histograms' in self.frozen_components:
+            self.histograms = self.frozen_components['histograms'].copy()
+
+        if 'feature_pairs' in self.frozen_components:
+            self.feature_pairs = self.frozen_components['feature_pairs'].copy()
+
+        if 'label_encoder_classes' in self.frozen_components and hasattr(self, 'label_encoder'):
+            self.label_encoder.classes_ = self.frozen_components['label_encoder_classes'].copy()
+
+#----------------------------for adaptive learning----------------------------
     def _get_model_filename(self) -> str:
         """Get model filename from config or use default"""
         if ('model_config' in self.config and
@@ -835,6 +914,25 @@ class GPUDBNN:
             return False
 
         return True
+
+    def freeze_architecture_with_components(self, frozen_components: Dict[str, Any]):
+        """Freeze architecture with specific components (ACTUAL VALUES)"""
+        print("🔒 Freezing DBNN architecture with specified components...")
+        self.architecture_frozen = True
+        self.frozen_components = frozen_components
+
+        # IMMEDIATELY restore all architectural components to ensure consistency
+        self._restore_frozen_architecture()
+
+        print(f"✅ Architecture frozen with {len(frozen_components)} components")
+
+        # Verify the restoration
+        if 'bin_edges' in frozen_components:
+            print(f"   - bin_edges: {self.bin_edges.shape if hasattr(self, 'bin_edges') else 'N/A'}")
+        if 'histograms' in frozen_components:
+            print(f"   - histograms: {self.histograms.shape if hasattr(self, 'histograms') else 'N/A'}")
+        if 'feature_pairs' in frozen_components:
+            print(f"   - feature_pairs: {self.feature_pairs.shape if hasattr(self, 'feature_pairs') else 'N/A'}")
 
     def _handle_missing_values(self, df: pd.DataFrame) -> pd.DataFrame:
         """Handle NaN and missing values by replacing with sentinel value (-9999)"""
@@ -998,7 +1096,20 @@ class GPUDBNN:
         }
 
     def _compute_likelihood_parameters(self, X_train: np.ndarray, y_train: np.ndarray):
-        """Compute likelihood parameters based on selected model type"""
+        """Compute likelihood parameters with freeze check"""
+        if self._check_architecture_frozen("likelihood parameters computation"):
+            # If frozen, just verify we have existing parameters
+            if self.model_type == 'histogram' and self.histograms is not None:
+                print("✅ Using frozen histogram parameters")
+                return
+            elif self.model_type == 'gaussian' and self.likelihood_params is not None:
+                print("✅ Using frozen Gaussian parameters")
+                return
+            else:
+                print("⚠️ Architecture frozen but no parameters found")
+                # Allow computation if no parameters exist
+                pass
+
         if self.model_type == 'histogram' and self.histograms is not None:
             print("✅ Using pre-loaded histogram parameters")
             return
@@ -1011,8 +1122,15 @@ class GPUDBNN:
         else:
             self._compute_gaussian_likelihood(X_train, y_train)
 
+        # After computation, restore frozen state if needed
+        if self.architecture_frozen:
+            self._restore_frozen_architecture()
+
     def _compute_gaussian_likelihood(self, X_train: np.ndarray, y_train: np.ndarray):
-        """Compute Gaussian likelihood parameters"""
+        """Compute Gaussian likelihood with freeze check"""
+        if self._check_architecture_frozen("Gaussian likelihood computation"):
+            return
+
         print("Computing Gaussian likelihood parameters...")
 
         group_size = self.config.get('likelihood_config', {}).get('feature_group_size', 2)
@@ -1063,7 +1181,10 @@ class GPUDBNN:
         print(f"Computed Gaussian parameters for {len(self.feature_pairs)} feature combinations")
 
     def _compute_histogram_likelihood_traditional(self, X_train: np.ndarray, y_train: np.ndarray):
-        """Traditional histogram computation (original method)"""
+        """Traditional histogram computation with freeze check"""
+        if self._check_architecture_frozen("histogram computation"):
+            return
+
         print(f"Computing histogram likelihood parameters with {self.histogram_bins} bins (traditional method)...")
 
         n_features = X_train.shape[1]
@@ -1104,7 +1225,10 @@ class GPUDBNN:
         print(f"Computed histogram parameters for {n_features} features (traditional method)")
 
     def _compute_histogram_likelihood_vectorized(self, X_train: np.ndarray, y_train: np.ndarray):
-        """Vectorized histogram computation using advanced NumPy operations"""
+        """Vectorized histogram computation with freeze check"""
+        if self._check_architecture_frozen("histogram computation"):
+            return
+
         print(f"Computing histogram likelihood parameters with {self.histogram_bins} bins (vectorized method)...")
 
         n_samples, n_features = X_train.shape
