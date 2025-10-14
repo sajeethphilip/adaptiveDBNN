@@ -1,2461 +1,3960 @@
-[file name]: dbnn.py
-[file content begin]
-import torch
-import numpy as np
-import pandas as pd
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
-from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.metrics import classification_report, confusion_matrix
-import matplotlib.pyplot as plt
-import seaborn as sns
-from typing import Dict, Tuple, Any, List, Union
-from collections import defaultdict
-import requests
-from io import StringIO
+#!/usr/bin/env python3
+"""
+Optimized DBNN implementation as a modular class structure
+Core algorithm with unified configuration and visualization capabilities
+"""
+
+import math
+import sys
+import time
 import os
 import json
-from itertools import combinations
-from sklearn.mixture import GaussianMixture
-from scipy import stats
-from scipy.stats import normaltest
-import numpy as np
-from itertools import combinations
-import torch
-import os
+import csv
+import glob
 import pickle
-from tqdm import tqdm, trange
-from concurrent.futures import ThreadPoolExecutor
-import multiprocessing as mp
-from datetime import datetime
+import gzip
+from typing import List, Tuple, Dict, Any, Optional, Union
+import numpy as np
+from numba import jit, prange
+from multiprocessing import Pool, cpu_count
+from functools import lru_cache
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox, scrolledtext
+import pandas as pd
+import traceback
 
-# Assume no keyboard control by default. If you have X11 running and want to be interactive, set nokbd = False
-nokbd = True  # Disabled keyboard control for minimal systems
-if nokbd==False:
-    print("Will attempt keyboard interaction...")
-    if os.name == 'nt' or 'darwin' in os.uname()[0].lower():  # Windows or MacOS
-        try:
-            from pynput import keyboard
-            nokbd = False
-        except:
-            print("Could not initialize keyboard control")
-    else:
-        # Check if X server is available on Linux
-        def is_x11_available():
-            if os.name != 'posix':  # Not Linux/Unix
-                return True
+# Global constants
+max_resol = 1600
+features = 100
+classes = 500
 
-            # Check if DISPLAY environment variable is set
-            if 'DISPLAY' not in os.environ:
-                return False
+@jit(nopython=True, fastmath=True, cache=True)
+def round_cpp(x: float) -> int:
+    """Match C++ rounding behavior - Numba compatible"""
+    return int(x + 0.5) if x >= 0 else int(x - 0.5)
 
-            if os.path.isdir('/usr/lib/X11/'):
-                return True
+@jit(nopython=True, fastmath=True, cache=True)
+def normalize_feature(value, min_val, max_val, resolution_val):
+    """Normalize single feature value - Numba compatible"""
+    if max_val - min_val > 0:
+        return round_cpp((value - min_val) / (max_val - min_val) * resolution_val)
+    return 0
 
-        # Only try to import pynput if X11 is available
-        if is_x11_available():
-            try:
-                from pynput import keyboard
-                nokbd = False
-            except:
-                print("Could not initialize keyboard control despite X11 being available")
-        else:
-            print("Keyboard control using q key for skipping training is not supported without X11!")
-else:
-    print('Keyboard is disabled by default. To enable it please set nokbd=False')
+@jit(nopython=True, parallel=False, fastmath=True)
+def process_training_sample(vects, tmpv, anti_net, anti_wts, binloc,
+                           resolution, dmyclass, min_val, max_val,
+                           innodes, outnodes):
+    """Process single training sample - core algorithm unchanged"""
+    normalized_vects = np.zeros(innodes + 2)
 
+    # Normalize vectors
+    for i in range(1, innodes + 1):
+        normalized_vects[i] = normalize_feature(vects[i], min_val[i], max_val[i], resolution[i])
 
-class DatasetConfig:
-    """Handle dataset configuration loading, validation, and automatic migration"""
+    # Find bins for all features
+    bins = np.zeros(innodes + 2, dtype=np.int32)
+    for i in range(1, innodes + 1):
+        bins[i] = find_closest_bin_numba(normalized_vects[i], binloc[i], resolution[i])
 
-    DEFAULT_CONFIG = {
-        "training_config": {
-            "trials": 100,
-            "cardinality_threshold": 0.9,
-            "cardinality_tolerance": 4,
-            "learning_rate": 0.1,
-            "random_seed": 42,
-            "epochs": 1000,
-            "test_fraction": 0.2,
-            "train": True,
-            "train_only": False,
-            "predict": True,
-            "gen_samples": False
-        },
-        "likelihood_config": {
-            "feature_group_size": 2,
-            "max_combinations": 1000,
-            "update_strategy": 3,
-            "model_type": "histogram",
-            "histogram_bins": 64,
-            "laplace_smoothing": 1.0,
-            "histogram_method": "vectorized"
-        },
-        "visualization_config": {
-            "enabled": False,
-            "output_dir": "visualizations",
-            "epoch_interval": 10,
-            "max_frames": 50,
-            "create_animations": True,
-            "create_reports": True,
-            "create_3d_visualizations": True,
-            "rotation_speed": 5,
-            "elevation_oscillation": True
-        },
-        "prediction_config": {
-            "batch_size": 10000,
-            "max_memory_mb": 1024,
-            "output_include_probabilities": True,
-            "output_include_confidence": True,
-            "auto_batch_adjustment": True,
-            "streaming_mode": True,
-            "evaluation_sample_size": 10000
-        }
-    }
+    # Update network counts
+    for i in range(1, innodes + 1):
+        j = bins[i]
+        for l in range(1, innodes + 1):
+            m = bins[l]
 
-    @staticmethod
-    def _get_user_input(prompt: str, default_value: Any = None, validation_fn: callable = None) -> Any:
-        """Helper method to get validated user input"""
-        while True:
-            if default_value is not None:
-                user_input = input(f"{prompt} (default: {default_value}): ").strip()
-                if not user_input:
-                    return default_value
-            else:
-                user_input = input(f"{prompt}: ").strip()
+            # Find correct output class
+            k_class = 1
+            while k_class <= outnodes and abs(tmpv - dmyclass[k_class]) > dmyclass[0]:
+                k_class += 1
 
-            if validation_fn:
-                try:
-                    validated_value = validation_fn(user_input)
-                    return validated_value
-                except ValueError as e:
-                    print(f"Invalid input: {e}")
-            else:
-                return user_input
+            if k_class <= outnodes:
+                anti_net[i, j, l, m, k_class] += 1
+                anti_net[i, j, l, m, 0] += 1
 
-    @staticmethod
-    def _validate_boolean(value: str) -> bool:
-        """Validate and convert string to boolean"""
-        value = value.lower()
-        if value in ('true', 't', 'yes', 'y', '1'):
-            return True
-        elif value in ('false', 'f', 'no', 'n', '0'):
-            return False
-        raise ValueError("Please enter 'yes' or 'no'")
+    return anti_net
 
-    @staticmethod
-    def _validate_int(value: str) -> int:
-        """Validate and convert string to integer"""
-        try:
-            return int(value)
-        except ValueError:
-            raise ValueError("Please enter a valid integer")
+@jit(nopython=True, parallel=False, fastmath=True)
+def compute_class_probabilities_numba(vects, anti_net, anti_wts, binloc,
+                                    resolution, dmyclass, min_val, max_val,
+                                    innodes, outnodes):
+    """Compute class probabilities - core algorithm unchanged"""
+    classval = np.ones(outnodes + 2)
+    normalized_vects = np.zeros(innodes + 2)
 
-    @staticmethod
-    def _validate_float(value: str) -> float:
-        """Validate and convert string to float"""
-        try:
-            return float(value)
-        except ValueError:
-            raise ValueError("Please enter a valid number")
+    # Normalize vectors
+    for i in range(1, innodes + 1):
+        normalized_vects[i] = normalize_feature(vects[i], min_val[i], max_val[i], resolution[i])
 
-    @staticmethod
-    def _prompt_for_config(dataset_name: str) -> Dict:
-        """Prompt user for configuration parameters"""
-        print(f"\nConfiguration file for {dataset_name} not found or invalid.")
-        print("Please provide the following configuration parameters:\n")
+    # Find bins for all features
+    bins = np.zeros(innodes + 2, dtype=np.int32)
+    for i in range(1, innodes + 1):
+        bins[i] = find_closest_bin_numba(normalized_vects[i], binloc[i], resolution[i])
 
-        config = {}
-
-        # Get file path
-        config['file_path'] = DatasetConfig._get_user_input(
-            "Enter the path to your CSV file",
-            f"{dataset_name}.csv"
-        )
-
-        # Get target column
-        target_column = DatasetConfig._get_user_input(
-            "Enter the name or index of the target column",
-            "target"
-        )
-        # Convert to integer if possible
-        try:
-            config['target_column'] = int(target_column)
-        except ValueError:
-            config['target_column'] = target_column
-
-        # Get separator
-        config['separator'] = DatasetConfig._get_user_input(
-            "Enter the CSV separator character",
-            ","
-        )
-
-        # Get header information
-        config['has_header'] = DatasetConfig._get_user_input(
-            "Does the file have a header row? (True/False)",
-            True,
-            DatasetConfig._validate_boolean
-        )
-
-        # Get training configuration
-        print("\nTraining Configuration:")
-        config['training_config'] = {
-            'trials': DatasetConfig._get_user_input(
-                "Enter number of epochs to wait for improvement",
-                100,
-                DatasetConfig._validate_int
-            ),
-            'cardinality_threshold': DatasetConfig._get_user_input(
-                "Enter cardinality threshold for feature filtering",
-                0.9,
-                DatasetConfig._validate_float
-            ),
-            'cardinality_tolerance': DatasetConfig._get_user_input(
-                "Enter cardinality tolerance (decimal precision)",
-                4,
-                DatasetConfig._validate_int
-            ),
-            'learning_rate': DatasetConfig._get_user_input(
-                "Enter learning rate",
-                0.1,
-                DatasetConfig._validate_float
-            ),
-            'random_seed': DatasetConfig._get_user_input(
-                "Enter random seed (or -1 for no seed)",
-                42,
-                lambda x: int(x) if int(x) >= 0 else None
-            ),
-            'epochs': DatasetConfig._get_user_input(
-                "Enter maximum number of epochs",
-                1000,
-                DatasetConfig._validate_int
-            ),
-            'test_fraction': DatasetConfig._get_user_input(
-                "Enter test set fraction",
-                0.2,
-                DatasetConfig._validate_float
-            ),
-            'train': DatasetConfig._get_user_input(
-                "Enable training? (True/False)",
-                True,
-                DatasetConfig._validate_boolean
-            ),
-            'train_only': DatasetConfig._get_user_input(
-                "Train only (no evaluation)? (True/False)",
-                False,
-                DatasetConfig._validate_boolean
-            ),
-            'predict': DatasetConfig._get_user_input(
-                "Enable prediction/evaluation? (True/False)",
-                True,
-                DatasetConfig._validate_boolean
-            ),
-            'gen_samples': DatasetConfig._get_user_input(
-                "Enable sample generation? (True/False)",
-                False,
-                DatasetConfig._validate_boolean
-            )
-        }
-
-        # Get likelihood configuration
-        print("\nLikelihood Configuration:")
-        config['likelihood_config'] = {
-            'feature_group_size': DatasetConfig._get_user_input(
-                "Enter the feature group size",
-                2,
-                DatasetConfig._validate_int
-            ),
-            'max_combinations': DatasetConfig._get_user_input(
-                "Enter the maximum number of feature combinations",
-                1000,
-                DatasetConfig._validate_int
-            ),
-            'update_strategy': DatasetConfig._get_user_input(
-                "Enter update strategy (1: batch average, 2: max error add to failed, 3: max error add/subtract, 4: max error subtract only)",
-                3,
-                lambda x: int(x) if int(x) in [1, 2, 3, 4] else ValueError("Must be 1, 2, 3, or 4")
-            ),
-            'model_type': DatasetConfig._get_user_input(
-                "Enter model type (gaussian/histogram)",
-                "gaussian",
-                lambda x: x if x in ['gaussian', 'histogram'] else ValueError("Must be 'gaussian' or 'histogram'")
-            ),
-            'histogram_bins': DatasetConfig._get_user_input(
-                "Enter number of bins for histogram model",
-                64,
-                DatasetConfig._validate_int
-            ),
-            'laplace_smoothing': DatasetConfig._get_user_input(
-                "Enter Laplace smoothing parameter for histogram",
-                1.0,
-                DatasetConfig._validate_float
-            ),
-            'histogram_method': DatasetConfig._get_user_input(
-                "Enter histogram method (traditional/vectorized)",
-                "traditional",
-                lambda x: x if x in ['traditional', 'vectorized'] else ValueError("Must be 'traditional' or 'vectorized'")
-            )
-        }
-
-        # Get visualization configuration
-        print("\nVisualization Configuration:")
-        config['visualization_config'] = {
-            'enabled': DatasetConfig._get_user_input(
-                "Enable visualization? (yes/no) - WARNING: This may slow down training",
-                "no",
-                DatasetConfig._validate_boolean
-            ),
-            'output_dir': DatasetConfig._get_user_input(
-                "Enter output directory for visualizations",
-                "visualizations"
-            ),
-            'epoch_interval': DatasetConfig._get_user_input(
-                "Enter epoch interval for animation frames",
-                10,
-                DatasetConfig._validate_int
-            ),
-            'max_frames': DatasetConfig._get_user_input(
-                "Enter maximum number of animation frames",
-                50,
-                DatasetConfig._validate_int
-            ),
-            'create_animations': DatasetConfig._get_user_input(
-                "Create animated GIFs? (True/False)",
-               True,
-                DatasetConfig._validate_boolean
-            ),
-            'create_reports': DatasetConfig._get_user_input(
-                "Create comprehensive reports? (True/False)",
-                True,
-                DatasetConfig._validate_boolean
-            ),
-            'create_3d_visualizations': DatasetConfig._get_user_input(
-                "Create 3D VR-style visualizations? (True/False)",
-                True,
-                DatasetConfig._validate_boolean
-            ),
-            'rotation_speed': DatasetConfig._get_user_input(
-                "Enter rotation speed (degrees per frame)",
-                5,
-                DatasetConfig._validate_int
-            )
-        }
-
-        # Get prediction configuration
-        print("\nPrediction Configuration:")
-        config['prediction_config'] = {
-            'batch_size': DatasetConfig._get_user_input(
-                "Enter prediction batch size",
-                10000,
-                DatasetConfig._validate_int
-            ),
-            'max_memory_mb': DatasetConfig._get_user_input(
-                "Enter maximum memory usage in MB for prediction",
-                1024,
-                DatasetConfig._validate_int
-            ),
-            'output_include_probabilities': DatasetConfig._get_user_input(
-                "Include class probabilities in output? (True/False)",
-                True,
-                DatasetConfig._validate_boolean
-            ),
-            'output_include_confidence': DatasetConfig._get_user_input(
-                "Include prediction confidence in output? (True/False)",
-                True,
-                DatasetConfig._validate_boolean
-            ),
-            'auto_batch_adjustment': DatasetConfig._get_user_input(
-                "Auto-adjust batch size based on memory? (True/False)",
-                True,
-                DatasetConfig._validate_boolean
-            ),
-            'streaming_mode': DatasetConfig._get_user_input(
-                "Use streaming mode for large files? (True/False)",
-                True,
-                DatasetConfig._validate_boolean
-            ),
-            'evaluation_sample_size': DatasetConfig._get_user_input(
-                "Number of samples to use for evaluation",
-                10000,
-                DatasetConfig._validate_int
-            )
-        }
-
-        return config
-
-    @staticmethod
-    def _extract_training_columns(df: pd.DataFrame, target_column: str) -> Dict:
-        """Extract training columns information from DataFrame"""
-        feature_columns = [col for col in df.columns if col != target_column]
-
-        # Generate dataset fingerprint
-        import hashlib
-        col_info = [(col, str(df[col].dtype)) for col in df.columns]
-        col_info.sort()
-        fingerprint_str = ''.join([f"{col}_{dtype}" for col, dtype in col_info])
-        dataset_fingerprint = hashlib.md5(fingerprint_str.encode()).hexdigest()
-
-        return {
-            "feature_columns": feature_columns,
-            "target_column": target_column,
-            "total_features": len(feature_columns),
-            "dataset_fingerprint": dataset_fingerprint,
-            "timestamp": datetime.now().isoformat(),
-            "auto_created": True,
-            "all_columns": df.columns.tolist()
-        }
-
-    @staticmethod
-    def _ensure_training_columns_config(config: Dict, df: pd.DataFrame) -> Dict:
-        """Ensure training_columns section exists in config"""
-        if 'training_columns' not in config:
-            target_col = config['target_column']
-            config['training_columns'] = DatasetConfig._extract_training_columns(df, target_col)
-
-        # Ensure model_config exists with proper inheritance
-        if 'model_config' not in config:
-            config['model_config'] = {}
-
-        # If this is a prediction config, try to inherit from the trained model
-        training_config = config.get('training_config', {})
-        if not training_config.get('train', True) and training_config.get('predict', True):
-            # This is a prediction-only config, try to find the trained model
-            if 'model_filename' not in config['model_config']:
-                # Try to infer the trained model name from the dataset name
-                # Remove '_predict' suffix if present
-                base_name = config.get('file_path', '').split('.')[0]
-                if '_predict' in base_name or 'predict' in base_name.lower():
-                    # This looks like a prediction file, try to find the training counterpart
-                    trained_name = base_name.replace('_predict', '').replace('predict', 'train')
-                    config['model_config']['model_filename'] = f"Best_{trained_name}"
-                    print(f"🔍 Inferred model filename: {config['model_config']['model_filename']}")
+    # Compute probabilities
+    classval[0] = 0.0
+    for i in range(1, innodes + 1):
+        j = bins[i]
+        for l in range(1, innodes + 1):
+            m = bins[l]
+            for k in range(1, outnodes + 1):
+                if anti_net[i, j, l, m, 0] > 0:
+                    tmp2_wts = anti_net[i, j, l, m, k] / anti_net[i, j, l, m, 0]
                 else:
-                    # Use the dataset name for the model
-                    config['model_config']['model_filename'] = f"Best_{base_name}"
+                    tmp2_wts = 1.0 / outnodes
+                classval[k] *= tmp2_wts * anti_wts[i, j, l, m, k]
+                classval[0] += classval[k]
 
-        return config
+    # Normalize
+    if classval[0] > 0:
+        for k in range(1, outnodes + 1):
+            classval[k] /= classval[0]
+    classval[0] = 0.0
 
-    @staticmethod
-    def _migrate_old_config(config: Dict) -> Dict:
-        """Migrate old configuration files to include new sections"""
-        migrations_applied = []
+    return classval
 
-        # Check if prediction_config is missing
-        if 'prediction_config' not in config:
-            config['prediction_config'] = DatasetConfig.DEFAULT_CONFIG['prediction_config']
-            migrations_applied.append("prediction_config")
+@jit(nopython=True, parallel=False, fastmath=True)
+def update_weights_numba(vects, tmpv, classval, anti_wts, binloc, resolution,
+                        dmyclass, min_val, max_val, innodes, outnodes, gain):
+    """Update weights - core algorithm unchanged"""
+    normalized_vects = np.zeros(innodes + 2)
 
-        # Check for any missing fields in existing prediction_config
-        if 'prediction_config' in config:
-            default_prediction = DatasetConfig.DEFAULT_CONFIG['prediction_config']
-            for key, default_value in default_prediction.items():
-                if key not in config['prediction_config']:
-                    config['prediction_config'][key] = default_value
-                    migrations_applied.append(f"prediction_config.{key}")
+    # Normalize vectors
+    for i in range(1, innodes + 1):
+        normalized_vects[i] = normalize_feature(vects[i], min_val[i], max_val[i], resolution[i])
 
-        # Ensure training_columns section exists (for backward compatibility)
-        if 'training_columns' not in config:
-            config['training_columns'] = {}
-            migrations_applied.append("training_columns")
+    # Find bins for all features
+    bins = np.zeros(innodes + 2, dtype=np.int32)
+    for i in range(1, innodes + 1):
+        bins[i] = find_closest_bin_numba(normalized_vects[i], binloc[i], resolution[i])
 
-        # Ensure model_config section exists (for backward compatibility)
-        if 'model_config' not in config:
-            config['model_config'] = {}
-            migrations_applied.append("model_config")
+    # Find predicted class
+    kmax = 1
+    cmax = 0.0
+    for k in range(1, outnodes + 1):
+        if classval[k] > cmax:
+            cmax = classval[k]
+            kmax = k
 
-        if migrations_applied:
-            print(f"🔧 Applied configuration migrations: {', '.join(migrations_applied)}")
+    # Update weights if wrong
+    if abs(dmyclass[kmax] - tmpv) > dmyclass[0]:
+        for i in range(1, innodes + 1):
+            j = bins[i]
+            for l in range(1, innodes + 1):
+                m = bins[l]
 
-        return config
+                # Find correct class
+                k_correct = 1
+                while k_correct <= outnodes and abs(dmyclass[k_correct] - tmpv) > dmyclass[0]:
+                    k_correct += 1
 
-    @staticmethod
-    def load_config(dataset_name: str) -> Dict:
-        """Load configuration from file, automatically migrating old formats"""
-        config_path = f"{dataset_name}.conf"
+                if (k_correct <= outnodes and classval[kmax] > 0 and
+                    classval[k_correct] < classval[kmax]):
+                    adjustment = gain * (1.0 - (classval[k_correct] / classval[kmax]))
+                    anti_wts[i, j, l, m, k_correct] += adjustment
 
-        try:
-            if os.path.exists(config_path):
-                # Read existing configuration
-                with open(config_path, 'r') as f:
-                    # Skip lines starting with # and join remaining lines
-                    config_str = ''.join(line for line in f if not line.strip().startswith('#'))
+    return anti_wts
 
-                    try:
-                        config = json.load(StringIO(config_str))
-                    except json.JSONDecodeError:
-                        print(f"Error reading configuration file: {config_path}")
-                        config = DatasetConfig._prompt_for_config(dataset_name)
+@jit(nopython=True, fastmath=True, cache=True)
+def find_closest_bin_numba(value, binloc_row, resolution_val):
+    """Optimized bin finding for single value"""
+    if resolution_val <= 0:
+        return 0
+    min_dist = 2.0 * resolution_val
+    best_bin = 0
+    for j in range(1, resolution_val + 1):
+        dist = abs(value - binloc_row[j])
+        if dist < min_dist:
+            min_dist = dist
+            best_bin = j
+    if best_bin > 0:
+        best_bin -= 1
+    return best_bin
+
+class ClassEncoder:
+    """Handles encoding and decoding of class labels"""
+
+    def __init__(self):
+        self.class_to_encoded = {}
+        self.encoded_to_class = {}
+        self.encoded_to_original = {}
+        self.is_fitted = False
+
+    def fit(self, class_labels):
+        """Fit encoder to class labels"""
+        unique_classes = sorted(set(class_labels))
+
+        for encoded_val, original_class in enumerate(unique_classes, 1):
+            self.class_to_encoded[original_class] = float(encoded_val)
+            self.encoded_to_class[float(encoded_val)] = original_class
+            self.encoded_to_original[float(encoded_val)] = str(original_class)
+
+        self.is_fitted = True
+        print(f"Fitted encoder with {len(unique_classes)} classes: {unique_classes}")
+
+    def transform(self, class_labels):
+        """Transform class labels to encoded numeric values"""
+        if not self.is_fitted:
+            raise ValueError("Encoder must be fitted before transforming")
+
+        encoded = []
+        for label in class_labels:
+            if label in self.class_to_encoded:
+                encoded.append(self.class_to_encoded[label])
             else:
-                config = DatasetConfig._prompt_for_config(dataset_name)
+                raise ValueError(f"Unknown class label: {label}")
 
-            # Migrate old configuration files
-            config = DatasetConfig._migrate_old_config(config)
+        return np.array(encoded, dtype=np.float64)
 
-            # Validate and ensure all required fields exist
-            required_fields = ['file_path', 'target_column', 'separator', 'has_header']
-            missing_fields = [field for field in required_fields if field not in config]
+    def inverse_transform(self, encoded_values):
+        """Transform encoded values back to original class labels"""
+        if not self.is_fitted:
+            raise ValueError("Encoder must be fitted before inverse transforming")
 
-            if missing_fields:
-                print(f"Missing required fields: {missing_fields}")
-                config = DatasetConfig._prompt_for_config(dataset_name)
-
-            # Ensure training_config exists with defaults
-            if 'training_config' not in config:
-                config['training_config'] = DatasetConfig.DEFAULT_CONFIG['training_config']
+        original = []
+        for encoded_val in encoded_values:
+            if encoded_val in self.encoded_to_class:
+                original.append(self.encoded_to_class[encoded_val])
             else:
-                # Ensure all training_config fields exist
-                default_training = DatasetConfig.DEFAULT_CONFIG['training_config']
-                for key, default_value in default_training.items():
-                    if key not in config['training_config']:
-                        config['training_config'][key] = default_value
+                closest = min(self.encoded_to_class.keys(),
+                            key=lambda x: abs(x - encoded_val))
+                original.append(self.encoded_to_class[closest])
+                print(f"Warning: Encoded value {encoded_val} not found, using closest: {closest}")
 
-            # Ensure likelihood_config exists with defaults
-            if 'likelihood_config' not in config:
-                config['likelihood_config'] = DatasetConfig.DEFAULT_CONFIG['likelihood_config']
-            else:
-                # Ensure all likelihood_config fields exist
-                default_likelihood = DatasetConfig.DEFAULT_CONFIG['likelihood_config']
-                for key, default_value in default_likelihood.items():
-                    if key not in config['likelihood_config']:
-                        config['likelihood_config'][key] = default_value
+        return original
 
-            # Ensure visualization_config exists with defaults
-            if 'visualization_config' not in config:
-                config['visualization_config'] = DatasetConfig.DEFAULT_CONFIG['visualization_config']
-            else:
-                # Ensure all visualization_config fields exist
-                default_visualization = DatasetConfig.DEFAULT_CONFIG['visualization_config']
-                for key, default_value in default_visualization.items():
-                    if key not in config['visualization_config']:
-                        config['visualization_config'][key] = default_value
+    def get_encoded_classes(self):
+        """Get the encoded class values used in dmyclass"""
+        return sorted(self.encoded_to_class.keys())
 
-            # Ensure prediction_config exists with defaults
-            if 'prediction_config' not in config:
-                config['prediction_config'] = DatasetConfig.DEFAULT_CONFIG['prediction_config']
-                print("✅ Added default prediction configuration")
-            else:
-                # Ensure all prediction_config fields exist
-                default_prediction = DatasetConfig.DEFAULT_CONFIG['prediction_config']
-                for key, default_value in default_prediction.items():
-                    if key not in config['prediction_config']:
-                        config['prediction_config'][key] = default_value
-                        print(f"✅ Added missing prediction config: {key} = {default_value}")
-
-            # Save the updated configuration
-            with open(config_path, 'w') as f:
-                json.dump(config, f, indent=4)
-                print(f"✅ Configuration saved to: {config_path}")
-
-            return config
-
-        except Exception as e:
-            print(f"Error handling configuration: {str(e)}")
-            return DatasetConfig._prompt_for_config(dataset_name)
-
-    @staticmethod
-    def repair_config(dataset_name: str) -> bool:
-        """Repair a configuration file by adding missing sections"""
-        config_path = f"{dataset_name}.conf"
-
-        if not os.path.exists(config_path):
-            print(f"❌ Configuration file not found: {config_path}")
-            return False
-
-        try:
-            # Load and migrate the config
-            with open(config_path, 'r') as f:
-                config_str = ''.join(line for line in f if not line.strip().startswith('#'))
-                config = json.load(StringIO(config_str))
-
-            # Apply migrations
-            config = DatasetConfig._migrate_old_config(config)
-
-            # Save the repaired config
-            with open(config_path, 'w') as f:
-                json.dump(config, f, indent=4)
-
-            print(f"✅ Configuration repaired: {config_path}")
-            return True
-
-        except Exception as e:
-            print(f"❌ Error repairing configuration: {str(e)}")
-            return False
-
-    @staticmethod
-    def get_available_datasets() -> List[str]:
-        """Get list of available dataset configurations"""
-        # Look for .conf files in the current directory
-        return [f.split('.')[0] for f in os.listdir()
-                if f.endswith('.conf') and os.path.isfile(f)]
-
-
-def _filter_features_from_config(df: pd.DataFrame, config: Dict) -> pd.DataFrame:
-    """
-    Filter DataFrame columns based on commented features in config
-
-    Args:
-        df: Input DataFrame
-        config: Configuration dictionary containing column names
-
-    Returns:
-        DataFrame with filtered columns
-    """
-    # If no column names in config, return original DataFrame
-    if 'column_names' not in config:
-        return df
-
-    # Get column names from config
-    column_names = config['column_names']
-
-    # Create mapping of position to column name
-    col_mapping = {i: name.strip() for i, name in enumerate(column_names)}
-
-    # Identify commented features (starting with #)
-    commented_features = {
-        i: name.lstrip('#').strip()
-        for i, name in col_mapping.items()
-        if name.startswith('#')
-    }
-
-    # Get current DataFrame columns
-    current_cols = df.columns.tolist()
-
-    # Columns to drop (either by name or position)
-    cols_to_drop = []
-
-    for pos, name in commented_features.items():
-        # Try to drop by name first
-        if name in current_cols:
-            cols_to_drop.append(name)
-        # If name not found, try position
-        elif pos < len(current_cols):
-            cols_to_drop.append(current_cols[pos])
-
-    # Drop identified columns
-    if cols_to_drop:
-        df = df.drop(columns=cols_to_drop)
-        print(f"Dropped commented features: {cols_to_drop}")
-
-    return df
-
-
-class DBNNVisualizer:
-    """Enhanced visualization system for DBNN model"""
-
-    def __init__(self, model, output_dir: str = "visualizations", enabled: bool = True):
-        self.model = model
-        self.output_dir = output_dir
-        self.enabled = enabled
-        self.animation_frames = []
-
-        # Create output directory
-        os.makedirs(output_dir, exist_ok=True)
-
-        # Visualization state
-        self.training_history = {
-            'epochs': [],
-            'train_accuracy': [],
-            'test_accuracy': [],
-            'train_error': [],
-            'test_error': [],
-            'confidence': []
+    def get_class_mapping(self):
+        """Get the complete class mapping"""
+        return {
+            'class_to_encoded': self.class_to_encoded,
+            'encoded_to_class': self.encoded_to_class
         }
 
-        print(f"Visualizer initialized: {'ENABLED' if enabled else 'DISABLED'}")
+class DBNNCore:
+    """
+    Core DBNN algorithm powerhouse that can be used by other algorithms
+    """
 
-    def configure(self, config: Dict):
-        """Configure visualization parameters"""
-        self.epoch_interval = config.get('epoch_interval', 10)
-        self.max_frames = config.get('max_frames', 50)
-        self.create_animations = config.get('create_animations', True)
-        self.create_reports = config.get('create_reports', True)
-        self.create_3d_visualizations = config.get('create_3d_visualizations', True)
-        self.rotation_speed = config.get('rotation_speed', 5)
-
-    def set_data_context(self, X_train: np.ndarray, y_train: np.ndarray,
-                        feature_names: List[str], class_names: List[str]):
-        """Set data context for visualization"""
-        self.X_train = X_train
-        self.y_train = y_train
-        self.feature_names = feature_names
-        self.class_names = class_names
-
-    def create_interactive_prior_distribution(self, epoch: int, weights: np.ndarray):
-        """Create interactive prior distribution visualization"""
-        if not self.enabled:
-            return
-
-        try:
-            fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-            fig.suptitle(f'DBNN Prior Distributions - Epoch {epoch}', fontsize=16)
-
-            # Plot 1: Weight distributions across classes
-            if len(weights.shape) == 3:  # Histogram model
-                n_classes, n_features, n_bins = weights.shape
-                avg_weights = np.mean(weights, axis=(1, 2))
-
-                axes[0, 0].bar(range(n_classes), avg_weights)
-                axes[0, 0].set_title('Average Weights per Class')
-                axes[0, 0].set_xlabel('Class')
-                axes[0, 0].set_ylabel('Average Weight')
-                axes[0, 0].set_xticks(range(n_classes))
-                if hasattr(self, 'class_names') and self.class_names:
-                    axes[0, 0].set_xticklabels(self.class_names[:n_classes])
-
-                # Plot 2: Feature importance
-                feature_importance = np.mean(weights, axis=(0, 2))
-                axes[0, 1].bar(range(len(feature_importance)), feature_importance)
-                axes[0, 1].set_title('Feature Importance')
-                axes[0, 1].set_xlabel('Feature Index')
-                axes[0, 1].set_ylabel('Average Weight')
-
-            else:  # Gaussian model
-                n_classes, n_combinations = weights.shape
-                axes[0, 0].bar(range(n_classes), np.mean(weights, axis=1))
-                axes[0, 0].set_title('Average Weights per Class')
-                axes[0, 0].set_xlabel('Class')
-                axes[0, 0].set_ylabel('Average Weight')
-
-            # Plot 3: Weight evolution (if history available)
-            if len(self.training_history['epochs']) > 1:
-                axes[1, 0].plot(self.training_history['epochs'],
-                               self.training_history['train_accuracy'],
-                               label='Train Accuracy', marker='o')
-                if self.training_history['test_accuracy']:
-                    axes[1, 0].plot(self.training_history['epochs'],
-                                   self.training_history['test_accuracy'],
-                                   label='Test Accuracy', marker='s')
-                axes[1, 0].set_title('Training Progress')
-                axes[1, 0].set_xlabel('Epoch')
-                axes[1, 0].set_ylabel('Accuracy')
-                axes[1, 0].legend()
-                axes[1, 0].grid(True)
-
-            # Plot 4: Confidence distribution
-            if self.training_history['confidence']:
-                axes[1, 1].hist(self.training_history['confidence'][-1], bins=20, alpha=0.7)
-                axes[1, 1].set_title('Prediction Confidence Distribution')
-                axes[1, 1].set_xlabel('Confidence')
-                axes[1, 1].set_ylabel('Frequency')
-
-            plt.tight_layout()
-            plt.savefig(f'{self.output_dir}/prior_distribution_epoch_{epoch:04d}.png',
-                       dpi=150, bbox_inches='tight')
-            plt.close()
-
-        except Exception as e:
-            print(f"Visualization error: {e}")
-
-    def create_interactive_feature_space_3d(self, epoch: int):
-        """Create 3D feature space visualization"""
-        if not self.enabled or not self.create_3d_visualizations:
-            return
-
-        try:
-            if not hasattr(self, 'X_train') or self.X_train is None or len(self.X_train) < 3:
-                return
-
-            # Select first 3 features for 3D visualization
-            n_features = min(3, self.X_train.shape[1])
-            if n_features < 3:
-                return
-
-            fig = plt.figure(figsize=(12, 10))
-            ax = fig.add_subplot(111, projection='3d')
-
-            # Color by class
-            scatter = ax.scatter(self.X_train[:, 0], self.X_train[:, 1], self.X_train[:, 2],
-                               c=self.y_train, cmap='viridis', alpha=0.6, s=20)
-
-            ax.set_xlabel(f'Feature 0: {self.feature_names[0] if hasattr(self, "feature_names") else "Feature 0"}')
-            ax.set_ylabel(f'Feature 1: {self.feature_names[1] if hasattr(self, "feature_names") else "Feature 1"}')
-            ax.set_zlabel(f'Feature 2: {self.feature_names[2] if hasattr(self, "feature_names") else "Feature 2"}')
-            ax.set_title(f'3D Feature Space - Epoch {epoch}')
-
-            # Add colorbar
-            cbar = plt.colorbar(scatter, ax=ax, pad=0.1)
-            cbar.set_label('Class')
-
-            plt.savefig(f'{self.output_dir}/feature_space_3d_epoch_{epoch:04d}.png',
-                       dpi=150, bbox_inches='tight')
-            plt.close()
-
-        except Exception as e:
-            print(f"3D visualization error: {e}")
-
-    def create_confusion_matrix_visualization(self, y_true: np.ndarray, y_pred: np.ndarray,
-                                            epoch: int = None):
-        """Create confusion matrix visualization"""
-        if not self.enabled:
-            return
-
-        try:
-            cm = confusion_matrix(y_true, y_pred)
-            plt.figure(figsize=(10, 8))
-            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-
-            title = 'Confusion Matrix'
-            if epoch is not None:
-                title += f' - Epoch {epoch}'
-
-            plt.title(title)
-            plt.ylabel('True Label')
-            plt.xlabel('Predicted Label')
-            plt.tight_layout()
-
-            filename = 'confusion_matrix'
-            if epoch is not None:
-                filename += f'_epoch_{epoch:04d}'
-            filename += '.png'
-
-            plt.savefig(f'{self.output_dir}/{filename}', dpi=150, bbox_inches='tight')
-            plt.close()
-
-        except Exception as e:
-            print(f"Confusion matrix error: {e}")
-
-    def create_training_history_plot(self):
-        """Create comprehensive training history plot"""
-        if not self.enabled or len(self.training_history['epochs']) < 2:
-            return
-
-        try:
-            fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
-
-            # Plot 1: Accuracy
-            epochs = self.training_history['epochs']
-            ax1.plot(epochs, self.training_history['train_accuracy'],
-                    label='Train Accuracy', marker='o', linewidth=2)
-            if self.training_history['test_accuracy']:
-                ax1.plot(epochs, self.training_history['test_accuracy'],
-                        label='Test Accuracy', marker='s', linewidth=2)
-            ax1.set_title('Model Accuracy')
-            ax1.set_xlabel('Epoch')
-            ax1.set_ylabel('Accuracy')
-            ax1.legend()
-            ax1.grid(True)
-
-            # Plot 2: Error
-            ax2.plot(epochs, self.training_history['train_error'],
-                    label='Train Error', marker='o', linewidth=2)
-            if self.training_history['test_error']:
-                ax2.plot(epochs, self.training_history['test_error'],
-                        label='Test Error', marker='s', linewidth=2)
-            ax2.set_title('Model Error')
-            ax2.set_xlabel('Epoch')
-            ax2.set_ylabel('Error')
-            ax2.legend()
-            ax2.grid(True)
-
-            # Plot 3: Confidence evolution
-            if self.training_history['confidence']:
-                avg_confidence = [np.mean(conf) for conf in self.training_history['confidence']]
-                ax3.plot(epochs, avg_confidence, marker='o', linewidth=2, color='green')
-                ax3.set_title('Average Prediction Confidence')
-                ax3.set_xlabel('Epoch')
-                ax3.set_ylabel('Confidence')
-                ax3.grid(True)
-
-            # Plot 4: Learning rate effect (if available)
-            if hasattr(self.model, 'learning_rate'):
-                lr_effect = [1.0 / (1.0 + epoch * 0.01) for epoch in epochs]
-                ax4.plot(epochs, lr_effect, marker='s', linewidth=2, color='red')
-                ax4.set_title('Learning Rate Effect (Theoretical)')
-                ax4.set_xlabel('Epoch')
-                ax4.set_ylabel('Learning Rate Multiplier')
-                ax4.grid(True)
-
-            plt.tight_layout()
-            plt.savefig(f'{self.output_dir}/training_history.png',
-                       dpi=150, bbox_inches='tight')
-            plt.close()
-
-        except Exception as e:
-            print(f"Training history plot error: {e}")
-
-    def create_feature_importance_plot(self, weights: np.ndarray):
-        """Create feature importance visualization"""
-        if not self.enabled:
-            return
-
-        try:
-            if len(weights.shape) == 3:  # Histogram model
-                feature_importance = np.mean(weights, axis=(0, 2))
-            else:  # Gaussian model
-                feature_importance = np.mean(weights, axis=0)
-
-            plt.figure(figsize=(12, 6))
-            indices = np.argsort(feature_importance)[::-1]
-            sorted_importance = feature_importance[indices]
-
-            bars = plt.bar(range(len(sorted_importance)), sorted_importance)
-            plt.title('Feature Importance Ranking')
-            plt.xlabel('Features')
-            plt.ylabel('Importance Score')
-            plt.xticks(range(len(sorted_importance)), [f'Feature {i}' for i in indices], rotation=45, ha='right')
-
-            # Add value labels on bars
-            for bar, value in zip(bars, sorted_importance):
-                plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
-                        f'{value:.3f}', ha='center', va='bottom', fontsize=8)
-
-            plt.tight_layout()
-            plt.savefig(f'{self.output_dir}/feature_importance.png',
-                       dpi=150, bbox_inches='tight')
-            plt.close()
-
-        except Exception as e:
-            print(f"Feature importance plot error: {e}")
-
-    def create_comprehensive_report(self, model, X_test: np.ndarray = None, y_test: np.ndarray = None):
-        """Create comprehensive model report"""
-        if not self.enabled or not self.create_reports:
-            return
-
-        try:
-            print("Generating comprehensive model report...")
-
-            # Create report directory
-            report_dir = f"{self.output_dir}/model_report"
-            os.makedirs(report_dir, exist_ok=True)
-
-            # 1. Model summary
-            self._create_model_summary(report_dir, model)
-
-            # 2. Training history
-            if len(self.training_history['epochs']) > 1:
-                self.create_training_history_plot()
-                plt.savefig(f'{report_dir}/training_history.png', dpi=150, bbox_inches='tight')
-                plt.close()
-
-            # 3. Feature importance
-            if hasattr(model, 'best_W') and model.best_W is not None:
-                self.create_feature_importance_plot(model.best_W)
-                plt.savefig(f'{report_dir}/feature_importance.png', dpi=150, bbox_inches='tight')
-                plt.close()
-
-            # 4. Performance metrics
-            if X_test is not None and y_test is not None:
-                self._create_performance_report(report_dir, model, X_test, y_test)
-
-            # 5. Configuration summary
-            self._create_configuration_summary(report_dir, model)
-
-            print(f"Comprehensive report generated in: {report_dir}")
-
-        except Exception as e:
-            print(f"Report generation error: {e}")
-
-    def _create_model_summary(self, report_dir: str, model):
-        """Create model summary report"""
-        summary = {
-            'Dataset': getattr(model, 'dataset_name', 'Unknown'),
-            'Best Accuracy': f"{getattr(model, 'best_accuracy', 0):.4f}",
-            'Input Features': getattr(model, 'innodes', 'Unknown'),
-            'Output Classes': getattr(model, 'outnodes', 'Unknown'),
-            'Model Type': getattr(model, 'model_type', 'Unknown'),
-            'Training Epochs': len(self.training_history['epochs']),
-            'Device': str(getattr(model, 'device', 'Unknown'))
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        # Default configuration
+        self.config = config or {
+            'LoC': 0.65,
+            'nLoC': 0.0,
+            'resol': 100,
+            'nresol': 0,
+            'nLoCcnt': 0,
+            'skpchk': 0,
+            'oneround': 100,
+            'fst_gain': 1.0,
+            'gain': 2.0,
+            'margin': 0.2,
+            'patience': 10,
+            'min_improvement': 0.1
         }
 
-        with open(f'{report_dir}/model_summary.txt', 'w') as f:
-            f.write("DBNN Model Summary\n")
-            f.write("==================\n\n")
-            for key, value in summary.items():
-                f.write(f"{key}: {value}\n")
-
-    def _create_performance_report(self, report_dir: str, model, X_test: np.ndarray, y_test: np.ndarray):
-        """Create performance metrics report"""
-        try:
-            predictions = model.predict(X_test)
-            accuracy = accuracy_score(y_test, predictions)
-
-            # Classification report
-            report = classification_report(y_test, predictions)
-
-            # Confusion matrix
-            self.create_confusion_matrix_visualization(y_test, predictions)
-            plt.savefig(f'{report_dir}/confusion_matrix_final.png',
-                       dpi=150, bbox_inches='tight')
-            plt.close()
-
-            with open(f'{report_dir}/performance_metrics.txt', 'w') as f:
-                f.write("Performance Metrics\n")
-                f.write("===================\n\n")
-                f.write(f"Test Accuracy: {accuracy:.4f}\n\n")
-                f.write("Classification Report:\n")
-                f.write(report)
-
-        except Exception as e:
-            print(f"Performance report error: {e}")
-
-    def _create_configuration_summary(self, report_dir: str, model):
-        """Create configuration summary"""
-        if hasattr(model, 'config'):
-            with open(f'{report_dir}/configuration.json', 'w') as f:
-                json.dump(model.config, f, indent=4)
-
-    def update_training_history(self, epoch: int, train_accuracy: float, test_accuracy: float = None,
-                               confidence: List[float] = None):
-        """Update training history records"""
-        self.training_history['epochs'].append(epoch)
-        self.training_history['train_accuracy'].append(train_accuracy)
-        self.training_history['train_error'].append(1 - train_accuracy)
-
-        if test_accuracy is not None:
-            self.training_history['test_accuracy'].append(test_accuracy)
-            self.training_history['test_error'].append(1 - test_accuracy)
-
-        if confidence is not None:
-            self.training_history['confidence'].append(confidence)
-
-    def finalize_visualizations(self, final_weights, training_errors=None, training_accuracies=None):
-        """Finalize all visualizations after training"""
-        if not self.enabled:
-            return
-
-        try:
-            # Create final training history plot
-            self.create_training_history_plot()
-
-            # Create feature importance plot
-            self.create_feature_importance_plot(final_weights)
-
-            # Create comprehensive report
-            self.create_comprehensive_report(self.model)
-
-            print("All visualizations finalized and saved")
-
-        except Exception as e:
-            print(f"Finalization error: {e}")
-
-
-class CppStyleDBNNCore:
-    """
-    Core C++ algorithm implementation with GPU acceleration
-    This is used internally by GPUDBNN
-    """
-
-    def __init__(self, device):
-        self.device = device
-        self.use_gpu = device.type == 'cuda'
-
-        # C++ algorithm parameters
-        self.max_resol = 500
-        self.fst_gain = 0.25
-        self.gain = 2.0
-
-        # Network structures
+        # Core data structures
         self.anti_net = None
         self.anti_wts = None
-        self.mask_min = None
-        self.mask_max = None
-        self.resolution = None
-        self.max_vals = None
-        self.min_vals = None
+        self.antit_wts = None
+        self.antip_wts = None
+        self.binloc = None
+        self.max_val = None
+        self.min_val = None
         self.dmyclass = None
+        self.resolution_arr = None
 
-    def _initialize_network(self, innodes: int, outnodes: int):
-        """Initialize network structures"""
+        # Training state
+        self.innodes = 0
+        self.outnodes = 0
+        self.class_encoder = ClassEncoder()
+        self.training_history = []
+        self.is_trained = False
+
+        # Visualization integration
+        self.visualizer = None
+
+        # Logging
+        self.log_callback = None
+
+    def predict_batch_optimized(self, features_batch, clear_cache_every=100):
+        """Optimized batch prediction with periodic cache clearing"""
+        predictions = []
+        probabilities = []
+
+        # Use static arrays to avoid repeated allocations
+        if not hasattr(self, '_prediction_vects'):
+            self._prediction_vects = np.zeros(self.innodes + self.outnodes + 2)
+
+        for sample_idx in range(len(features_batch)):
+            # Reuse the same vector to avoid memory allocation
+            vects = self._prediction_vects
+            vects.fill(0)  # Reset vector
+
+            for i in range(1, self.innodes + 1):
+                vects[i] = features_batch[sample_idx, i-1]
+
+            # Compute class probabilities
+            classval = compute_class_probabilities_numba(
+                vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
+                self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes
+            )
+
+            # Find predicted class
+            kmax = 1
+            cmax = 0.0
+            for k in range(1, self.outnodes + 1):
+                if classval[k] > cmax:
+                    cmax = classval[k]
+                    kmax = k
+
+            predicted = self.dmyclass[kmax]
+            predictions.append(predicted)
+
+            # Store probabilities
+            prob_dict = {}
+            for k in range(1, self.outnodes + 1):
+                class_val = self.dmyclass[k]
+                if self.class_encoder.is_fitted:
+                    class_name = self.class_encoder.encoded_to_class.get(class_val, f"Class_{k}")
+                else:
+                    class_name = f"Class_{k}"
+                prob_dict[class_name] = float(classval[k])
+
+            probabilities.append(prob_dict)
+
+            # Clear cache periodically to prevent memory buildup
+            if clear_cache_every > 0 and sample_idx % clear_cache_every == 0:
+                import gc
+                gc.collect()
+
+        return predictions, probabilities
+
+    def detect_system_resources(self):
+        """Detect available system resources and set optimal parameters"""
+        resource_info = {
+            'cpu_cores': 1,
+            'memory_gb': 4,
+            'has_gpu': False,
+            'gpu_memory_gb': 0,
+            'system_memory_gb': 4
+        }
+
+        try:
+            import psutil
+            # CPU cores
+            resource_info['cpu_cores'] = psutil.cpu_count(logical=False) or 1
+            resource_info['logical_cores'] = psutil.cpu_count(logical=True) or 1
+
+            # System memory
+            system_memory = psutil.virtual_memory()
+            resource_info['system_memory_gb'] = system_memory.total / (1024**3)
+            resource_info['available_memory_gb'] = system_memory.available / (1024**3)
+
+            # Process memory
+            process = psutil.Process()
+            resource_info['process_memory_mb'] = process.memory_info().rss / (1024**2)
+
+        except ImportError:
+            print("⚠️ psutil not available, using default resource values")
+
+        # GPU detection
+        try:
+            import torch
+            if torch.cuda.is_available():
+                resource_info['has_gpu'] = True
+                resource_info['gpu_count'] = torch.cuda.device_count()
+                resource_info['gpu_memory_gb'] = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                resource_info['gpu_name'] = torch.cuda.get_device_name(0)
+            else:
+                resource_info['has_gpu'] = False
+        except ImportError:
+            # Try alternative GPU detection
+            try:
+                import subprocess
+                result = subprocess.run(['nvidia-smi', '--query-gpu=memory.total', '--format=csv,noheader,nounits'],
+                                      capture_output=True, text=True)
+                if result.returncode == 0:
+                    gpu_memory_mb = int(result.stdout.strip().split('\n')[0])
+                    resource_info['has_gpu'] = True
+                    resource_info['gpu_memory_gb'] = gpu_memory_mb / 1024
+            except:
+                resource_info['has_gpu'] = False
+
+        return resource_info
+
+    def calculate_optimal_parameters(self, resource_info, operation_type="prediction"):
+        """Calculate optimal parameters based on available resources"""
+        params = {
+            'batch_size': 1000,
+            'max_concurrent_batches': 1,
+            'memory_safety_factor': 0.7,
+            'clear_cache_every': 50,
+            'write_to_disk_every': 10,
+            'use_memory_mapping': False,
+            'optimization_level': 'balanced'
+        }
+
+        # Extract resource information
+        cpu_cores = resource_info['cpu_cores']
+        available_memory_gb = resource_info['available_memory_gb']
+        system_memory_gb = resource_info['system_memory_gb']
+        has_gpu = resource_info['has_gpu']
+        gpu_memory_gb = resource_info.get('gpu_memory_gb', 0)
+
+        # Memory-based optimization
+        if system_memory_gb >= 32:
+            # High memory system
+            params['optimization_level'] = 'performance'
+            params['batch_size'] = 5000
+            params['max_concurrent_batches'] = min(4, cpu_cores)
+            params['memory_safety_factor'] = 0.8
+            params['clear_cache_every'] = 100
+            params['write_to_disk_every'] = 20
+
+        elif system_memory_gb >= 16:
+            # Medium memory system
+            params['optimization_level'] = 'balanced'
+            params['batch_size'] = 2000
+            params['max_concurrent_batches'] = min(2, cpu_cores)
+            params['memory_safety_factor'] = 0.7
+            params['clear_cache_every'] = 50
+            params['write_to_disk_every'] = 15
+
+        else:
+            # Low memory system
+            params['optimization_level'] = 'memory_safe'
+            params['batch_size'] = 500
+            params['max_concurrent_batches'] = 1
+            params['memory_safety_factor'] = 0.5
+            params['clear_cache_every'] = 20
+            params['write_to_disk_every'] = 5
+
+        # CPU-based adjustments
+        if cpu_cores >= 8:
+            params['max_concurrent_batches'] = min(params['max_concurrent_batches'] + 2, cpu_cores // 2)
+        elif cpu_cores >= 4:
+            params['max_concurrent_batches'] = min(params['max_concurrent_batches'] + 1, cpu_cores // 2)
+
+        # GPU-based optimizations
+        if has_gpu and gpu_memory_gb >= 4:
+            params['use_gpu'] = True
+            if gpu_memory_gb >= 16:
+                params['batch_size'] = params['batch_size'] * 2
+                params['optimization_level'] = 'gpu_optimized'
+            elif gpu_memory_gb >= 8:
+                params['batch_size'] = int(params['batch_size'] * 1.5)
+
+        # Operation-specific adjustments
+        if operation_type == "training":
+            # Training requires more memory
+            params['batch_size'] = max(100, params['batch_size'] // 2)
+            params['write_to_disk_every'] = max(5, params['write_to_disk_every'] // 2)
+        elif operation_type == "prediction":
+            # Prediction can use larger batches
+            params['batch_size'] = min(10000, params['batch_size'] * 2)
+
+        # Safety limits
+        params['batch_size'] = min(params['batch_size'], 10000)  # Absolute max
+        params['max_concurrent_batches'] = min(params['max_concurrent_batches'], 8)
+
+        # Calculate memory limits
+        estimated_batch_memory_mb = self.estimate_batch_memory(params['batch_size'])
+        safe_memory_limit_mb = available_memory_gb * 1024 * params['memory_safety_factor']
+
+        # Adjust batch size if it exceeds safe memory
+        max_safe_batches = int(safe_memory_limit_mb / estimated_batch_memory_mb) if estimated_batch_memory_mb > 0 else 1
+        if max_safe_batches < params['max_concurrent_batches']:
+            params['max_concurrent_batches'] = max(1, max_safe_batches)
+            params['batch_size'] = max(100, params['batch_size'] // 2)
+
+        return params
+
+    def estimate_batch_memory(self, batch_size):
+        """Estimate memory usage for a batch"""
+        if not hasattr(self, 'innodes') or self.innodes == 0:
+            return 100  # Default estimate
+
+        # Rough memory estimation (in MB)
+        feature_memory = batch_size * self.innodes * 8 / (1024**2)  # float64
+        network_memory = (self.innodes * 100 * self.innodes * 100 * self.outnodes * 8) / (1024**2)  # anti_net
+        total_estimate = feature_memory + network_memory + 100  # Buffer
+
+        return total_estimate
+
+    def print_resource_report(self):
+        """Print detailed resource report"""
+        resources = self.detect_system_resources()
+
+        print("\n" + "="*50)
+        print("SYSTEM RESOURCE ANALYSIS")
+        print("="*50)
+        print(f"CPU Cores (physical): {resources['cpu_cores']}")
+        print(f"CPU Cores (logical): {resources.get('logical_cores', 'N/A')}")
+        print(f"System Memory: {resources['system_memory_gb']:.1f} GB")
+        print(f"Available Memory: {resources['available_memory_gb']:.1f} GB")
+        print(f"GPU Available: {'Yes' if resources['has_gpu'] else 'No'}")
+
+        if resources['has_gpu']:
+            print(f"GPU Memory: {resources['gpu_memory_gb']:.1f} GB")
+            print(f"GPU Name: {resources.get('gpu_name', 'N/A')}")
+
+        # Calculate optimal parameters
+        pred_params = self.calculate_optimal_parameters(resources, "prediction")
+        train_params = self.calculate_optimal_parameters(resources, "training")
+
+        print(f"\nPREDICTION OPTIMIZATION:")
+        print(f"  Optimization Level: {pred_params['optimization_level']}")
+        print(f"  Batch Size: {pred_params['batch_size']}")
+        print(f"  Concurrent Batches: {pred_params['max_concurrent_batches']}")
+        print(f"  Memory Safety: {pred_params['memory_safety_factor']*100:.0f}%")
+
+        print(f"\nTRAINING OPTIMIZATION:")
+        print(f"  Optimization Level: {train_params['optimization_level']}")
+        print(f"  Batch Size: {train_params['batch_size']}")
+        print(f"  Concurrent Batches: {train_params['max_concurrent_batches']}")
+        print("="*50)
+
+        return resources, pred_params, train_params
+
+    def set_log_callback(self, log_callback):
+        """Set a callback function for logging"""
+        self.log_callback = log_callback
+
+    def log(self, message: str):
+        """Log message through callback or print"""
+        if self.log_callback:
+            self.log_callback(message)
+        else:
+            print(f"[DBNNCore] {message}")
+
+    def initialize_arrays(self, innodes: int, resol: int, outnodes: int):
+        """Initialize arrays with optimal data types and memory layout"""
         self.innodes = innodes
         self.outnodes = outnodes
 
-        # Initialize tensors
-        self.anti_net = torch.ones((innodes + 1, self.max_resol + 1, outnodes + 1),
-                                  device=self.device) / (self.max_resol * innodes * outnodes)
-        self.anti_wts = torch.ones((innodes + 1, self.max_resol + 1, outnodes + 1),
-                                  device=self.device)
-        self.mask_min = torch.full((innodes + 1, self.max_resol + 1, innodes + 1, outnodes + 1),
-                                  -1.0, device=self.device)
-        self.mask_max = torch.full((innodes + 1, self.max_resol + 1, innodes + 1, outnodes + 1),
-                                  -1.0, device=self.device)
-        self.resolution = torch.zeros(innodes + 1, dtype=torch.int32, device=self.device)
+        # Use optimal numpy dtypes
+        self.anti_net = np.zeros((innodes+2, resol+2, innodes+2, resol+2, outnodes+2),
+                               dtype=np.int32)
+        self.anti_wts = np.ones((innodes+2, resol+2, innodes+2, resol+2, outnodes+2),
+                               dtype=np.float64)
+        self.antit_wts = np.ones_like(self.anti_wts)
+        self.antip_wts = np.ones_like(self.anti_wts)
 
-    def _compute_feature_resolution(self, X: np.ndarray):
-        """Compute feature resolutions"""
-        for i in range(1, self.innodes + 1):
-            feature_range = self.max_vals[i] - self.min_vals[i]
-            resolution_val = min(self.max_resol, max(1, int(feature_range * 10)))
-            self.resolution[i] = resolution_val
+        self.binloc = np.zeros((innodes+2, resol+8), dtype=np.float64)
+        self.max_val = np.zeros(innodes+2, dtype=np.float64)
+        self.min_val = np.zeros(innodes+2, dtype=np.float64)
+        self.resolution_arr = np.zeros(innodes+8, dtype=np.int32)
 
-    def _create_apf_file(self, X: np.ndarray, y: np.ndarray):
-        """Create conditional probabilities"""
-        X_tensor = torch.from_numpy(X).float().to(self.device)
-        y_tensor = torch.from_numpy(y).float().to(self.device)
+        # Initialize dmyclass
+        self.dmyclass = np.zeros(outnodes + 2, dtype=np.float64)
+        self.dmyclass[0] = self.config.get('margin', 0.2)
 
-        self.anti_net = torch.zeros_like(self.anti_net)
+        print(f"Initialized arrays for {innodes} input nodes, {outnodes} output nodes, resolution {resol}")
 
-        for i in range(1, self.innodes + 1):
-            feature_normalized = (X_tensor[:, i-1] - self.min_vals[i]) / (self.max_vals[i] - self.min_vals[i]) * self.resolution[i]
-            feature_normalized = torch.clamp(feature_normalized, 0, self.resolution[i])
-            bin_indices = torch.round(feature_normalized).long()
-            bin_indices = torch.clamp(bin_indices, 0, self.resolution[i] - 1)
-
-            for k in range(1, self.outnodes + 1):
-                class_mask = (torch.abs(y_tensor - self.dmyclass[k]) <= self.dmyclass[0])
-                if torch.any(class_mask):
-                    bin_class_mask = (bin_indices[class_mask] == torch.arange(self.resolution[i], device=self.device).unsqueeze(1))
-                    counts = bin_class_mask.sum(dim=1).float()
-                    self.anti_net[i, :self.resolution[i], k] += counts
-
-    def _find_closest_bin_vectorized(self, feature_values: torch.Tensor, feature_idx: int) -> torch.Tensor:
-        """Vectorized bin finding"""
-        resolution = self.resolution[feature_idx]
-        j_indices = torch.arange(resolution + 1, device=self.device).float()
-
-        feature_expanded = feature_values.unsqueeze(1)
-        j_expanded = j_indices.unsqueeze(0)
-
-        distances = torch.abs(feature_expanded - j_expanded)
-        closest_bins = torch.argmin(distances, dim=1)
-        closest_bins = torch.clamp(closest_bins - 1, 0, resolution - 1)
-
-        return closest_bins
-
-    def _optimize_gpu_settings(self):
-        """Optimize GPU settings for faster training"""
-        if self.use_gpu:
-            torch.backends.cudnn.benchmark = True
-            torch.backends.cudnn.deterministic = False
-
-    def _precompute_bin_assignments(self, X: torch.Tensor):
-        """Precompute bin assignments for all features to avoid recomputation"""
-        n_samples = X.shape[0]
-        bin_assignments = torch.zeros((n_samples, self.innodes + 1), dtype=torch.long, device=self.device)
-
-        for i in range(1, self.innodes + 1):
-            feature_normalized = (X[:, i-1] - self.min_vals[i]) / (self.max_vals[i] - self.min_vals[i]) * self.resolution[i]
-            feature_normalized = torch.clamp(feature_normalized, 0, self.resolution[i])
-            bin_assignments[:, i] = self._find_closest_bin_vectorized(feature_normalized, i)
-
-        return bin_assignments
-
-    def train_epoch(self, X: torch.Tensor, y: torch.Tensor, epoch: int) -> Tuple[float, float]:
-        """Train one epoch - OPTIMIZED VERSION"""
-        n_samples = X.shape[0]
-
-        # Use larger batch size for better GPU utilization
-        batch_size = min(4096, n_samples)  # Increased from 1024 to 4096
-        total_correct = 0
-
-        # Precompute bin assignments once per epoch (major optimization)
-        bin_assignments = self._precompute_bin_assignments(X)
-
-        # Convert dmyclass to tensor for efficient computation
-        dmyclass_tensor = torch.tensor(self.dmyclass, device=self.device)
-        margin = dmyclass_tensor[0]
-
-        for batch_start in range(0, n_samples, batch_size):
-            batch_end = min(batch_start + batch_size, n_samples)
-            batch_size_actual = batch_end - batch_start
-
-            X_batch = X[batch_start:batch_end]
-            y_batch = y[batch_start:batch_end]
-            bin_batch = bin_assignments[batch_start:batch_end]
-
-            classval = torch.ones((batch_size_actual, self.outnodes + 1), device=self.device)
-
-            for i in range(1, self.innodes + 1):
-                bin_indices = bin_batch[:, i]
-                for k in range(1, self.outnodes + 1):
-                    conditional_probs = self.anti_net[i, bin_indices, k]
-                    boundary_weights = torch.ones(batch_size_actual, device=self.device)
-
-                    for l in range(1, self.innodes + 1):
-                        feature_vals = X_batch[:, l-1]
-                        min_boundary = self.mask_min[i, bin_indices, l, k]
-                        max_boundary = self.mask_max[i, bin_indices, l, k]
-                        out_of_bounds = (feature_vals < min_boundary) | (feature_vals > max_boundary)
-                        boundary_weights[out_of_bounds] = self.fst_gain
-
-                    weighted_probs = conditional_probs * boundary_weights
-                    classval[:, k] *= weighted_probs * self.anti_wts[i, bin_indices, k]
-
-            # Get predictions
-            classval_effective = classval[:, 1:]
-            max_vals, predictions = torch.max(classval_effective, dim=1)
-            predictions = predictions + 1  # Convert to 1-based indexing
-
-            # Calculate accuracy - FIXED: Use vectorized comparison
-            predicted_classes = dmyclass_tensor[predictions.long()]  # Convert predictions to indices
-            correct_mask = torch.abs(predicted_classes - y_batch) <= margin
-            total_correct += correct_mask.sum().item()
-
-            # Weight updates for misclassified samples (EXACT SAME ALGORITHM)
-            if epoch > 0:
-                misclassified = ~correct_mask
-                if torch.any(misclassified):
-                    misclassified_indices = torch.where(misclassified)[0]
-
-                    for idx in misclassified_indices:
-                        # Find true class (EXACT SAME LOGIC)
-                        true_class = 1
-                        while true_class <= self.outnodes:
-                            if torch.abs(dmyclass_tensor[true_class] - y_batch[idx]) <= margin:
-                                break
-                            true_class += 1
-
-                        if true_class <= self.outnodes:
-                            for i in range(1, self.innodes + 1):
-                                bin_idx = bin_batch[idx, i]
-                                adjustment = self.gain * (1.0 - classval[idx, true_class] / classval[idx, predictions[idx]])
-                                self.anti_wts[i, bin_idx, true_class] += adjustment
-
-        accuracy = total_correct / n_samples
-        return accuracy, accuracy
-
-    def predict(self, X: torch.Tensor) -> torch.Tensor:
-        """Make predictions - OPTIMIZED VERSION"""
-        n_samples = X.shape[0]
-
-        # Use larger batch size for prediction
-        batch_size = min(4096, n_samples)  # Increased from 1024 to 4096
-
-        # Precompute bin assignments once (major optimization)
-        bin_assignments = self._precompute_bin_assignments(X)
-
-        # Convert dmyclass to tensor
-        dmyclass_tensor = torch.tensor(self.dmyclass, device=self.device)
-
-        predictions = torch.zeros(n_samples, device=self.device, dtype=torch.long)
-
-        for batch_start in range(0, n_samples, batch_size):
-            batch_end = min(batch_start + batch_size, n_samples)
-            batch_size_actual = batch_end - batch_start
-
-            X_batch = X[batch_start:batch_end]
-            bin_batch = bin_assignments[batch_start:batch_end]
-
-            classval = torch.ones((batch_size_actual, self.outnodes + 1), device=self.device)
-
-            for i in range(1, self.innodes + 1):
-                bin_indices = bin_batch[:, i]
-                for k in range(1, self.outnodes + 1):
-                    conditional_probs = self.anti_net[i, bin_indices, k]
-                    boundary_weights = torch.ones(batch_size_actual, device=self.device)
-
-                    for l in range(1, self.innodes + 1):
-                        feature_vals = X_batch[:, l-1]
-                        min_boundary = self.mask_min[i, bin_indices, l, k]
-                        max_boundary = self.mask_max[i, bin_indices, l, k]
-                        out_of_bounds = (feature_vals < min_boundary) | (feature_vals > max_boundary)
-                        boundary_weights[out_of_bounds] = self.fst_gain
-
-                    weighted_probs = conditional_probs * boundary_weights
-                    classval[:, k] *= weighted_probs * self.anti_wts[i, bin_indices, k]
-
-            classval_effective = classval[:, 1:]
-            _, batch_predictions = torch.max(classval_effective, dim=1)
-            batch_predictions = batch_predictions + 1  # Convert to 1-based indexing
-
-            # Convert predictions to actual class values
-            predicted_values = dmyclass_tensor[batch_predictions.long()]
-            predictions[batch_start:batch_end] = predicted_values.long()
-
-        return predictions
-
-
-class GPUDBNN:
-    """Memory-Optimized Deep Bayesian Neural Network with streaming prediction support
-    Maintains EXACT same interface as original but uses enhanced C++ algorithm internally"""
-
-    def __init__(self, dataset_name: str, device: str = None, config: Dict = None):
-        # Set device based on availability
-        if device is None:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    def load_data(self, filename: str, target_column: Optional[str] = None,
+                 feature_columns: Optional[List[str]] = None, batch_size: int = 10000):
+        """Load data from file (CSV or legacy DAT format)"""
+        if filename.endswith('.csv'):
+            return self._load_csv_data(filename, target_column, feature_columns, batch_size)
         else:
-            self.device = torch.device(device)
+            return self._load_dat_data(filename, batch_size)
 
-        print(f"Using device: {self.device}")
-        self.use_gpu = self.device.type == 'cuda'
+    def _load_csv_data(self, filename: str, target_column: str,
+                      feature_columns: List[str], batch_size: int):
+        """Load CSV data with specified target and feature columns - enhanced for prediction"""
+        features_batches = []
+        targets_batches = []
+        original_targets_batches = []
 
-        self.dataset_name = dataset_name.lower()
+        print(f"Loading CSV data from: {filename}")
 
-        # Load dataset configuration and data
-        if config is not None:
-            # Use the provided config directly
-            self.config = config
-            print(f"✅ Using provided configuration for {self.dataset_name}")
-        else:
-            # Load config from file as before
-            self.config = DatasetConfig.load_config(self.dataset_name)
+        with open(filename, 'r') as f:
+            reader = csv.DictReader(f)
 
-        # Initialize C++ core with optimizations
-        self.cpp_core = CppStyleDBNNCore(self.device)
-        self.cpp_core._optimize_gpu_settings()  # Apply GPU optimizations
+            if not reader.fieldnames:
+                raise ValueError("No headers found in CSV file")
 
-        # Initialize pruning structures (maintain compatibility)
-        self.active_feature_mask = None
-        self.original_feature_indices = None
+            available_columns = reader.fieldnames
+            print(f"Available columns in CSV: {available_columns}")
 
-        # Extract training configuration
-        training_config = self.config.get('training_config', {})
-        self.trials = training_config.get('trials', 100)
-        self.cardinality_threshold = training_config.get('cardinality_threshold', 0.9)
-        self.cardinality_tolerance = training_config.get('cardinality_tolerance', 4)
-        self.learning_rate = training_config.get('learning_rate', 0.1)
-        self.random_state = training_config.get('random_seed', 42)
-        self.max_epochs = training_config.get('epochs', 1000)
-        self.test_size = training_config.get('test_fraction', 0.2)
-        self.train_enabled = training_config.get('train', True)
-        self.train_only = training_config.get('train_only', False)
-        self.predict_enabled = training_config.get('predict', True)
-        self.gen_samples_enabled = training_config.get('gen_samples', False)
+            # For prediction mode: if target_column is None or 'None', skip target validation
+            is_prediction_mode = (target_column is None or target_column == 'None' or target_column == '')
 
-        # Extract likelihood configuration
-        likelihood_config = self.config.get('likelihood_config', {})
-        self.model_type = likelihood_config.get('model_type', 'histogram')
-        self.histogram_bins = likelihood_config.get('histogram_bins', 64)
-        self.laplace_smoothing = likelihood_config.get('laplace_smoothing', 1.0)
-        self.histogram_method = likelihood_config.get('histogram_method', 'vectorized')
+            # Validate columns exist - handle prediction mode differently
+            missing_columns = []
 
-        # Extract prediction configuration
-        prediction_config = self.config.get('prediction_config', {})
-        self.prediction_batch_size = prediction_config.get('batch_size', 10000)
-        self.prediction_max_memory_mb = prediction_config.get('max_memory_mb', 1024)
-        self.output_include_probabilities = prediction_config.get('output_include_probabilities', True)
-        self.output_include_confidence = prediction_config.get('output_include_confidence', True)
-        self.auto_batch_adjustment = prediction_config.get('auto_batch_adjustment', True)
-        self.streaming_mode = prediction_config.get('streaming_mode', True)
-        self.evaluation_sample_size = prediction_config.get('evaluation_sample_size', 10000)
+            if not is_prediction_mode and target_column and target_column not in available_columns:
+                missing_columns.append(target_column)
 
-        print(f"📊 Prediction configuration:")
-        print(f"   Batch size: {self.prediction_batch_size:,}")
-        print(f"   Max memory: {self.prediction_max_memory_mb} MB")
-        print(f"   Streaming mode: {self.streaming_mode}")
-        print(f"   Auto-adjustment: {self.auto_batch_adjustment}")
+            # Check feature columns - use all available if not specified
+            if not feature_columns:
+                # If no features specified, use all columns except target (if target exists)
+                if not is_prediction_mode and target_column and target_column in available_columns:
+                    feature_columns = [col for col in available_columns if col != target_column]
+                else:
+                    # For prediction mode with no target, or target not found, use all columns
+                    feature_columns = available_columns.copy()
+                print(f"Auto-selected feature columns: {feature_columns}")
 
-        # Set random seed if specified
-        if self.random_state is not None:
-            np.random.seed(self.random_state)
-            torch.manual_seed(self.random_state)
+            # Now validate feature columns
+            for col in feature_columns:
+                if col not in available_columns:
+                    missing_columns.append(col)
 
-        self.target_column = self.config['target_column']
+            if missing_columns and not is_prediction_mode:
+                raise ValueError(f"Columns not found in CSV: {missing_columns}")
+            elif missing_columns and is_prediction_mode:
+                print(f"⚠️ Warning: Some feature columns not found in CSV: {missing_columns}")
+                # Remove missing columns from feature_columns
+                feature_columns = [col for col in feature_columns if col not in missing_columns]
+                if not feature_columns:
+                    raise ValueError("No valid feature columns found in CSV file")
 
-        # Model components
-        self.scaler = StandardScaler()
-        self.label_encoder = LabelEncoder()
+            print(f"Using feature columns: {feature_columns}")
+            if not is_prediction_mode and target_column:
+                print(f"Using target column: {target_column}")
 
-        # Maintain compatibility attributes
-        self.likelihood_params = None
-        self.feature_pairs = None
-        self.best_W = None
-        self.best_error = float('inf')
-        self.current_W = None
-        self.best_accuracy = 0.0
+            current_batch_features = []
+            current_batch_targets = []
+            current_batch_original_targets = []
 
-        # Histogram model components (maintain compatibility)
-        self.histograms = None
-        self.feature_min = None
-        self.feature_max = None
-        self.bin_edges = None
+            line_count = 0
+            for row in reader:
+                line_count += 1
+                try:
+                    # Extract features - use only the specified feature columns in the correct order
+                    feature_vec = []
+                    for col in feature_columns:
+                        try:
+                            feature_vec.append(float(row[col]))
+                        except (ValueError, TypeError):
+                            feature_vec.append(0.0)
+                            if line_count <= 5:  # Only warn for first few rows
+                                print(f"⚠️ Warning: Could not convert column '{col}' value '{row[col]}' to float, using 0.0")
 
-        # Categorical feature handling
-        self.categorical_encoders = {}
+                    # Extract target (only if not in prediction mode and target exists)
+                    target_val = None
+                    if not is_prediction_mode and target_column and target_column in row:
+                        target_val = row[target_column]
+                    else:
+                        # For prediction mode or missing target, use a placeholder
+                        target_val = "unknown"
 
-        # Create Model directory
-        os.makedirs('Model', exist_ok=True)
+                    current_batch_features.append(feature_vec)
+                    current_batch_targets.append(target_val)
+                    current_batch_original_targets.append(target_val)
 
-        # Load data
-        self.data = self._load_dataset()
+                    if len(current_batch_features) >= batch_size:
+                        features_batches.append(np.array(current_batch_features, dtype=np.float64))
+                        targets_batches.append(np.array(current_batch_targets))
+                        original_targets_batches.append(np.array(current_batch_original_targets))
+                        current_batch_features = []
+                        current_batch_targets = []
+                        current_batch_original_targets = []
 
-        # Load saved weights and encoders
-        self._load_best_weights()
-        self._load_categorical_encoders()
+                except (ValueError, KeyError) as e:
+                    print(f"⚠️ Warning: Skipping row {line_count} due to error: {e}")
+                    continue
 
-        # Add tracking for initial weights and pruning
-        self.initial_W = None
-        self.pruning_warmup_epochs = 3
-        self.pruning_threshold = 1e-6
-        self.pruning_aggressiveness = 0.1
+            # Add remaining samples
+            if current_batch_features:
+                features_batches.append(np.array(current_batch_features, dtype=np.float64))
+                targets_batches.append(np.array(current_batch_targets))
+                original_targets_batches.append(np.array(current_batch_original_targets))
 
-        # Extract visualization configuration
-        visualization_config = self.config.get('visualization_config', {})
-        self.visualization_enabled = visualization_config.get('enabled', False)
-        self.visualization_output_dir = visualization_config.get('output_dir', 'visualizations')
-        self.visualization_output_dir = os.path.join(
-            visualization_config.get('output_dir', 'visualizations'),
-            self.dataset_name
-        )
-        self.visualization_epoch_interval = visualization_config.get('epoch_interval', 10)
-        self.visualization_max_frames = visualization_config.get('max_frames', 50)
+        total_samples = sum(len(batch) for batch in features_batches)
+        print(f"Loaded {total_samples} samples in {len(features_batches)} batches")
+        return features_batches, targets_batches, feature_columns, original_targets_batches
 
-        # Import and initialize visualizer (conditional import)
-        try:
-            self.visualizer = DBNNVisualizer(
-                self,
-                output_dir=self.visualization_output_dir,
-                enabled=self.visualization_enabled
+    def _load_dat_data(self, filename: str, batch_size: int):
+        """Load legacy DAT format data"""
+        features = []
+        targets = []
+        original_targets = []
+
+        print(f"Loading legacy DAT file: {filename}")
+
+        with open(filename, 'r') as f:
+            current_batch_features = []
+            current_batch_targets = []
+            current_batch_original_targets = []
+
+            for line in f:
+                values = line.strip().split()
+                if len(values) >= self.innodes + 1:
+                    feature_vec = [float(x) for x in values[:self.innodes]]
+                    target_val = values[self.innodes]
+
+                    try:
+                        target_val_float = float(target_val)
+                        current_batch_original_targets.append(target_val_float)
+                    except ValueError:
+                        current_batch_original_targets.append(target_val)
+
+                    current_batch_features.append(feature_vec)
+                    current_batch_targets.append(target_val)
+
+                    if len(current_batch_features) >= batch_size:
+                        features.append(np.array(current_batch_features, dtype=np.float64))
+                        targets.append(np.array(current_batch_targets))
+                        original_targets.append(np.array(current_batch_original_targets))
+                        current_batch_features = []
+                        current_batch_targets = []
+                        current_batch_original_targets = []
+
+            # Add remaining samples
+            if current_batch_features:
+                features.append(np.array(current_batch_features, dtype=np.float64))
+                targets.append(np.array(current_batch_targets))
+                original_targets.append(np.array(current_batch_original_targets))
+
+        print(f"Loaded {sum(len(batch) for batch in features)} samples in {len(features)} batches")
+        return features, targets, [f'feature_{i}' for i in range(1, self.innodes + 1)], original_targets
+
+    def fit_encoder(self, original_targets_batches):
+        """Fit class encoder to target data"""
+        all_original_targets = np.concatenate(original_targets_batches) if original_targets_batches else np.array([])
+        self.class_encoder.fit(all_original_targets)
+
+        # Update dmyclass with encoded values
+        encoded_classes = self.class_encoder.get_encoded_classes()
+        for i, encoded_val in enumerate(encoded_classes, 1):
+            self.dmyclass[i] = float(encoded_val)
+
+    def initialize_training(self, features_batches, encoded_targets_batches, resol: int):
+        """Initialize training parameters and arrays"""
+        # Set resolutions
+        for i in range(1, self.innodes + 1):
+            self.resolution_arr[i] = resol
+            for j in range(self.resolution_arr[i] + 1):
+                self.binloc[i][j+1] = j * 1.0
+
+        # Find min/max values
+        omax = -400.0
+        omin = 400.0
+        for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
+            for i in range(1, self.innodes + 1):
+                batch_max = np.max(features_batch[:, i-1])
+                batch_min = np.min(features_batch[:, i-1])
+                if batch_max > self.max_val[i]:
+                    self.max_val[i] = batch_max
+                if batch_min < self.min_val[i]:
+                    self.min_val[i] = batch_min
+
+            # Update omax/omin from targets
+            batch_omax = np.max(targets_batch)
+            batch_omin = np.min(targets_batch)
+            if batch_omax > omax:
+                omax = batch_omax
+            if batch_omin < omin:
+                omin = batch_omin
+
+        # Initialize network counts
+        self.anti_wts.fill(1.0)
+        for k in range(1, self.outnodes + 1):
+            for i in range(1, self.innodes + 1):
+                for j in range(self.resolution_arr[i] + 1):
+                    for l in range(1, self.innodes + 1):
+                        for m in range(self.resolution_arr[l] + 1):
+                            self.anti_net[i, j, l, m, k] = 1
+
+        return omax, omin
+
+    def process_training_batch(self, features_batch, targets_batch):
+        """Process a single batch of training data"""
+        batch_size = len(features_batch)
+        processed_count = 0
+
+        for sample_idx in range(batch_size):
+            vects = np.zeros(self.innodes + self.outnodes + 2)
+            for i in range(1, self.innodes + 1):
+                vects[i] = features_batch[sample_idx, i-1]
+            tmpv = targets_batch[sample_idx]
+
+            self.anti_net = process_training_sample(
+                vects, tmpv, self.anti_net, self.anti_wts, self.binloc,
+                self.resolution_arr, self.dmyclass, self.min_val, self.max_val,
+                self.innodes, self.outnodes
             )
-            self.visualizer.configure(visualization_config)
-        except ImportError:
-            print("Warning: Visualization module not available. Continuing without visualization.")
-            self.visualizer = None
-            self.visualization_enabled = False
 
-        print(f"Using enhanced C++ algorithm with {self.model_type} model")
-        if self.visualization_enabled:
-            print("Visualization: ENABLED")
-        else:
-            print("Visualization: DISABLED (default for performance)")
+            processed_count += 1
 
-        # Memory optimization attributes
-        self.X_train_tensor = None
-        self.y_train_tensor = None
-        self.X_test_tensor = None
-        self.y_test_tensor = None
+        return processed_count
 
-    def _optimize_gpu_memory(self):
-        """Optimize GPU memory usage for faster training"""
-        if self.use_gpu:
-            torch.backends.cudnn.benchmark = True
-            torch.backends.cudnn.deterministic = False
-            print("✅ GPU memory optimizations applied")
+    def train_epoch(self, features_batches, encoded_targets_batches, gain: float):
+        """Train for one epoch"""
+        for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
+            batch_size = len(features_batch)
 
-    def _optimized_data_preparation(self):
-        """Optimize data preparation pipeline with memory optimizations - FIXED VERSION"""
-        X_train, X_test, y_train, y_test = self._prepare_data()
+            for sample_idx in range(batch_size):
+                vects = np.zeros(self.innodes + self.outnodes + 2)
+                for i in range(1, self.innodes + 1):
+                    vects[i] = features_batch[sample_idx, i-1]
+                tmpv = targets_batch[sample_idx]
 
-        # Convert to tensors once with non-blocking transfer
-        self.X_train_tensor = torch.from_numpy(X_train).float().to(self.device, non_blocking=True)
-        self.y_train_tensor = torch.from_numpy(y_train).float().to(self.device, non_blocking=True)
+                # Compute probabilities
+                classval = compute_class_probabilities_numba(
+                    vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
+                    self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes
+                )
 
-        if X_test is not None:
-            self.X_test_tensor = torch.from_numpy(X_test).float().to(self.device, non_blocking=True)
-            self.y_test_tensor = torch.from_numpy(y_test).float().to(self.device, non_blocking=True)
+                # Find predicted class
+                kmax = 1
+                cmax = 0.0
+                for k in range(1, self.outnodes + 1):
+                    if classval[k] > cmax:
+                        cmax = classval[k]
+                        kmax = k
 
-        # Only pin memory for CPU tensors, not GPU tensors
-        if self.use_gpu:
-            # For GPU, we don't need to pin memory since tensors are already on GPU
-            pass
-        else:
-            # For CPU, we can pin memory if needed
-            self.X_train_tensor = self.X_train_tensor.pin_memory()
-            self.y_train_tensor = self.y_train_tensor.pin_memory()
-            if self.X_test_tensor is not None:
-                self.X_test_tensor = self.X_test_tensor.pin_memory()
-                self.y_test_tensor = self.y_test_tensor.pin_memory()
-
-    def _optimized_visualization_update(self, epoch: int, train_accuracy: float, test_accuracy: float = None):
-        """Optimized visualization updates to reduce overhead"""
-        if not self.visualization_enabled or self.visualizer is None:
-            return
-
-        # Only create detailed visualizations at strategic intervals
-        visualization_interval = 50 if self.max_epochs > 500 else 25
-
-        if epoch % visualization_interval == 0 and epoch > 0:
-            # Full visualization only at intervals
-            weights_np = self.cpp_core.anti_wts.cpu().numpy()
-            self.visualizer.create_interactive_prior_distribution(epoch, weights_np)
-
-            if epoch % 100 == 0 and self.visualization_enabled:
-                self.visualizer.create_interactive_feature_space_3d(epoch)
-
-        # Always update training history (lightweight)
-        self.visualizer.update_training_history(epoch, train_accuracy, test_accuracy)
-
-    def _optimized_early_stopping_check(self, current_accuracy: float, epoch: int,
-                                      trials_without_improvement: int) -> Tuple[bool, int]:
-        """Optimized early stopping checks to reduce frequency"""
-        # Only check for early stopping every 10 epochs after warmup period
-        if epoch < 100 or epoch % 10 != 0:
-            return False, trials_without_improvement
-
-        if current_accuracy > self.best_accuracy:
-            self.best_accuracy = current_accuracy
-            return False, 0
-        else:
-            trials_without_improvement += 1
-            return trials_without_improvement >= self.trials, trials_without_improvement
-
-    def _cleanup_memory(self):
-        """Clean up memory between epochs to prevent slowdown"""
-        if self.use_gpu:
-            torch.cuda.empty_cache()
-
-        # Clear intermediate tensors that aren't needed
-        if hasattr(self, 'temp_tensors'):
-            del self.temp_tensors
-
-    def _compute_likelihood_parameters(self, X_train: np.ndarray, y_train: np.ndarray):
-        """Compute likelihood parameters - maintained for compatibility"""
-        print("Using enhanced C++ algorithm - likelihood parameters computed internally")
-        pass
-
-    def _compute_batch_posterior(self, features: np.ndarray, epsilon: float = 1e-10):
-        """Compute posterior probabilities - maintained for compatibility"""
-        # Convert to tensor and use C++ core
-        features_tensor = torch.from_numpy(features).float().to(self.device)
-        predictions = self.cpp_core.predict(features_tensor)
-
-        # Convert to probability format (simplified)
-        n_classes = len(self.label_encoder.classes_)
-        n_samples = len(features)
-        posteriors = np.zeros((n_samples, n_classes))
-
-        for i, pred in enumerate(predictions.cpu().numpy()):
-            class_idx = int(pred) - 1  # Convert to 0-based
-            if 0 <= class_idx < n_classes:
-                posteriors[i, class_idx] = 0.9  # High confidence for correct class
-                # Distribute remaining probability
-                other_prob = 0.1 / (n_classes - 1) if n_classes > 1 else 0
-                for j in range(n_classes):
-                    if j != class_idx:
-                        posteriors[i, j] = other_prob
-            else:
-                # Uniform distribution if prediction is out of bounds
-                posteriors[i] = 1.0 / n_classes
-
-        return posteriors
-
-    def _update_priors_parallel(self, failed_cases: List[Tuple], batch_size: int = 32):
-        """Update priors based on failed cases - maintained for compatibility"""
-        # This is now handled internally by the C++ core during training
-        print("Weight updates handled internally by enhanced algorithm")
-        pass
-
-    def _compute_gaussian_likelihood(self, X_train: np.ndarray, y_train: np.ndarray):
-        """Compute Gaussian likelihood - maintained for compatibility"""
-        print("Using enhanced C++ algorithm instead of Gaussian likelihood")
-        pass
-
-    def _compute_histogram_likelihood_vectorized(self, X_train: np.ndarray, y_train: np.ndarray):
-        """Compute histogram likelihood - maintained for compatibility"""
-        print("Using enhanced C++ algorithm instead of histogram likelihood")
-        pass
-
-    def _compute_histogram_likelihood_traditional(self, X_train: np.ndarray, y_train: np.ndarray):
-        """Compute traditional histogram likelihood - maintained for compatibility"""
-        print("Using enhanced C++ algorithm instead of traditional histogram")
-        pass
-
-    def _compute_gaussian_posterior(self, features: np.ndarray, epsilon: float = 1e-10):
-        """Compute Gaussian posterior - maintained for compatibility"""
-        return self._compute_batch_posterior(features, epsilon)
-
-    def _compute_histogram_posterior_vectorized(self, features: np.ndarray, epsilon: float = 1e-10):
-        """Compute histogram posterior - maintained for compatibility"""
-        return self._compute_batch_posterior(features, epsilon)
-
-    def _compute_histogram_posterior_traditional(self, features: np.ndarray, epsilon: float = 1e-10):
-        """Compute traditional histogram posterior - maintained for compatibility"""
-        return self._compute_batch_posterior(features, epsilon)
-
-    def _compute_histogram_posterior_cpu_vectorized(self, valid_features, n_samples, n_features, n_classes, epsilon, sentinel_mask, original_features):
-        """CPU histogram posterior - maintained for compatibility"""
-        return self._compute_batch_posterior(original_features, epsilon)
-
-    def _compute_histogram_posterior_gpu(self, valid_features, n_samples, n_features, n_classes, epsilon, sentinel_mask, original_features):
-        """GPU histogram posterior - maintained for compatibility"""
-        return self._compute_batch_posterior(original_features, epsilon)
-
-    def _ensure_numpy(self, data):
-        """Convert data to numpy array if it's a tensor"""
-        if isinstance(data, torch.Tensor):
-            return data.cpu().numpy()
-        return data
-
-    def _update_gaussian_priors(self, failed_cases: List[Tuple], batch_size: int = 32):
-        """Update Gaussian priors - maintained for compatibility"""
-        print("Weight updates handled internally by enhanced algorithm")
-        pass
-
-    def _update_histogram_priors_traditional(self, failed_cases: List[Tuple], batch_size: int = 32):
-        """Update traditional histogram priors - maintained for compatibility"""
-        print("Weight updates handled internally by enhanced algorithm")
-        pass
-
-    def _update_histogram_priors_vectorized(self, failed_cases: List[Tuple], batch_size: int = 32):
-        """Update vectorized histogram priors - maintained for compatibility"""
-        print("Weight updates handled internally by enhanced algorithm")
-        pass
-
-    def _process_batch_weight_updates_vectorized(self, batch_cases, update_strategy):
-        """Process batch weight updates - maintained for compatibility"""
-        print("Weight updates handled internally by enhanced algorithm")
-        pass
-
-    def _apply_batch_weight_updates_vectorized(self, batch_updates):
-        """Apply batch weight updates - maintained for compatibility"""
-        print("Weight updates handled internally by enhanced algorithm")
-        pass
-
-    def _compute_batch_pair_log_likelihood_gpu(self, feature_groups, class_idx):
-        """Compute batch pair log likelihood - maintained for compatibility"""
-        # Return dummy values for compatibility
-        return torch.zeros(feature_groups.shape[0], device=self.device)
-
-    def _calculate_feature_contributions(self, features, true_class_idx, predicted_class_idx):
-        """Calculate feature contributions - maintained for compatibility"""
-        # Return dummy values for compatibility
-        return np.zeros(10)  # Assuming 10 feature pairs
-
-    def _compute_pair_log_likelihood(self, feature_values, class_idx, pair_idx):
-        """Compute pair log likelihood - maintained for compatibility"""
-        return 0.0  # Dummy value
-
-    def _update_strategy2(self, contributions, true_class_idx, predicted_class_idx, adjustment):
-        """Update strategy 2 - maintained for compatibility"""
-        print("Weight updates handled internally by enhanced algorithm")
-        pass
-
-    def _update_strategy3(self, contributions, true_class_idx, predicted_class_idx, adjustment):
-        """Update strategy 3 - maintained for compatibility"""
-        print("Weight updates handled internally by enhanced algorithm")
-        pass
-
-    def _update_strategy4(self, contributions, true_class_idx, predicted_class_idx, adjustment):
-        """Update strategy 4 - maintained for compatibility"""
-        print("Weight updates handled internally by enhanced algorithm")
-        pass
-
-    def _prune_feature_hypercubes(self, min_contribution_threshold: float = 0.01):
-        """Prune feature hypercubes - maintained for compatibility"""
-        print("Pruning handled internally by enhanced algorithm")
-        pass
-
-    def _apply_pruning(self, new_active_mask):
-        """Apply pruning - maintained for compatibility"""
-        print("Pruning handled internally by enhanced algorithm")
-        pass
-
-    def _initialize_pruning_structures(self, n_pairs: int):
-        """Initialize pruning structures - maintained for compatibility"""
-        self.active_feature_mask = np.ones(n_pairs, dtype=bool)
-        self.original_feature_indices = np.arange(n_pairs)
-
-    def _prune_stagnant_connections(self, epoch: int):
-        """Prune stagnant connections - maintained for compatibility"""
-        print("Pruning handled internally by enhanced algorithm")
-        pass
-
-    def set_pruning_enabled(self, enabled: bool):
-        """Enable or disable pruning - maintained for compatibility"""
-        if enabled:
-            self.pruning_warmup_epochs = 3
-        else:
-            self.pruning_warmup_epochs = 0
-
-    def _get_memory_usage(self) -> dict:
-        """Get current memory usage in MB"""
-        try:
-            memory_usage = {}
-            if self.use_gpu and torch.cuda.is_available():
-                memory_usage['gpu_allocated'] = torch.cuda.memory_allocated() / 1024 / 1024
-                memory_usage['gpu_reserved'] = torch.cuda.memory_reserved() / 1024 / 1024
-
-            import psutil
-            process = psutil.Process()
-            memory_usage['ram'] = process.memory_info().rss / 1024 / 1024
-
-            return memory_usage
-        except:
-            return {'ram': 0.0, 'gpu_allocated': 0.0, 'gpu_reserved': 0.0}
-
-    def _validate_prediction_ready(self) -> bool:
-        """Validate that all required components for prediction are available"""
-        checks = []
-
-        if not hasattr(self.cpp_core, 'anti_wts') or self.cpp_core.anti_wts is None:
-            checks.append("❌ No weights available in C++ core")
-
-        if not hasattr(self.label_encoder, 'classes_') or len(self.label_encoder.classes_) == 0:
-            checks.append("❌ Label encoder not fitted")
-
-        if not hasattr(self.scaler, 'mean_') or self.scaler.mean_ is None:
-            checks.append("❌ Scaler not fitted")
-
-        if checks:
-            print("Prediction readiness check failed:")
-            for check in checks:
-                print(f"  {check}")
-            return False
-
-        return True
-
-    def _ensure_likelihood_parameters(self, X_train: np.ndarray, y_train: np.ndarray) -> bool:
-        """Ensure likelihood parameters are computed if missing"""
-        # Always return True since C++ core handles this internally
-        return True
-
-    def _stream_predict_from_csv(self, output_file: str) -> bool:
-        """Stream predictions directly from CSV file - maintained for compatibility"""
-        try:
-            file_path = self.config['file_path']
-            separator = self.config['separator']
-            has_header = self.config['has_header']
-
-            # Use pandas chunks for streaming
-            chunks = pd.read_csv(file_path, sep=separator, header=0 if has_header else None,
-                               chunksize=self.prediction_batch_size, low_memory=False)
-
-            first_chunk = True
-            for chunk_idx, df_chunk in enumerate(chunks):
-                print(f"Processing chunk {chunk_idx + 1}: {len(df_chunk):,} rows")
-
-                # Prepare data for this chunk
-                X_scaled, df_valid = self._prepare_prediction_data_chunk(df_chunk)
-
-                if len(X_scaled) > 0:
-                    # Use C++ core for prediction
-                    X_tensor = torch.from_numpy(X_scaled).float().to(self.device)
-                    predictions_float = self.cpp_core.predict(X_tensor)
-                    predictions = self.label_encoder.inverse_transform(
-                        predictions_float.cpu().numpy().astype(int)
+                # Update weights if wrong classification
+                if abs(self.dmyclass[kmax] - tmpv) > self.dmyclass[0]:
+                    self.anti_wts = update_weights_numba(
+                        vects, tmpv, classval, self.anti_wts, self.binloc, self.resolution_arr,
+                        self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes, gain
                     )
 
-                    df_result_chunk = df_valid.copy()
-                    df_result_chunk['predicted_class'] = predictions
-                    df_result_chunk['prediction_confidence'] = 0.9  # Placeholder
+    def evaluate(self, features_batches, encoded_targets_batches):
+        """Evaluate model accuracy"""
+        correct_predictions = 0
+        total_samples = 0
+        all_predictions = []
+
+        for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
+            batch_size = len(features_batch)
+            total_samples += batch_size
+
+            for sample_idx in range(batch_size):
+                vects = np.zeros(self.innodes + self.outnodes + 2)
+                for i in range(1, self.innodes + 1):
+                    vects[i] = features_batch[sample_idx, i-1]
+                actual = targets_batch[sample_idx]
+
+                # Compute class probabilities
+                classval = compute_class_probabilities_numba(
+                    vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
+                    self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes
+                )
+
+                # Find predicted class
+                kmax = 1
+                cmax = 0.0
+                for k in range(1, self.outnodes + 1):
+                    if classval[k] > cmax:
+                        cmax = classval[k]
+                        kmax = k
+
+                predicted = self.dmyclass[kmax]
+                all_predictions.append(predicted)
+
+                # Check if prediction is correct
+                if abs(actual - predicted) <= self.dmyclass[0]:
+                    correct_predictions += 1
+
+        accuracy = (correct_predictions / total_samples) * 100 if total_samples > 0 else 0
+        return accuracy, correct_predictions, all_predictions
+
+    def predict_batch(self, features_batch):
+        """Predict classes for a batch of features"""
+        predictions = []
+        probabilities = []
+
+        for sample_idx in range(len(features_batch)):
+            vects = np.zeros(self.innodes + self.outnodes + 2)
+            for i in range(1, self.innodes + 1):
+                vects[i] = features_batch[sample_idx, i-1]
+
+            # Compute class probabilities
+            classval = compute_class_probabilities_numba(
+                vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
+                self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes
+            )
+
+            # Find predicted class
+            kmax = 1
+            cmax = 0.0
+            for k in range(1, self.outnodes + 1):
+                if classval[k] > cmax:
+                    cmax = classval[k]
+                    kmax = k
+
+            predicted = self.dmyclass[kmax]
+            predictions.append(predicted)
+
+            # Store probabilities
+            prob_dict = {}
+            for k in range(1, self.outnodes + 1):
+                class_val = self.dmyclass[k]
+                if self.class_encoder.is_fitted:
+                    class_name = self.class_encoder.encoded_to_class.get(class_val, f"Class_{k}")
                 else:
-                    df_result_chunk = df_chunk.copy()
-                    df_result_chunk['predicted_class'] = 'INVALID'
-                    df_result_chunk['prediction_confidence'] = 0.0
+                    class_name = f"Class_{k}"
+                prob_dict[class_name] = float(classval[k])
 
-                # Write to output file
-                mode = 'w' if first_chunk else 'a'
-                header = first_chunk
-                df_result_chunk.to_csv(output_file, mode=mode, header=header, index=False)
-                first_chunk = False
+            probabilities.append(prob_dict)
 
-            print(f"✅ Streaming prediction completed: {output_file}")
+        return predictions, probabilities
+
+    def train_with_early_stopping(self, train_file: str, test_file: Optional[str] = None,
+                                 use_csv: bool = True, target_column: Optional[str] = None,
+                                 feature_columns: Optional[List[str]] = None):
+        """Main training method with early stopping"""
+        print("Starting model training with early stopping...")
+
+        # Load training data
+        features_batches, targets_batches, feature_columns_used, original_targets_batches = self.load_data(
+            train_file, target_column, feature_columns
+        )
+
+        if not features_batches:
+            print("No training data loaded")
+            return False
+
+        # Fit encoder and determine architecture
+        self.fit_encoder(original_targets_batches)
+        encoded_targets_batches = []
+        for batch in original_targets_batches:
+            encoded_batch = self.class_encoder.transform(batch)
+            encoded_targets_batches.append(encoded_batch)
+
+        self.innodes = len(feature_columns_used)
+        self.outnodes = len(self.class_encoder.get_encoded_classes())
+
+        # Initialize arrays
+        resol = self.config.get('resol', 100)
+        self.initialize_arrays(self.innodes, resol, self.outnodes)
+
+        # Initialize training
+        omax, omin = self.initialize_training(features_batches, encoded_targets_batches, resol)
+
+        # Process training data for initial APF
+        print("Processing training data for initial network counts...")
+        total_samples = sum(len(batch) for batch in features_batches)
+        total_processed = 0
+
+        for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
+            processed = self.process_training_batch(features_batch, targets_batch)
+            total_processed += processed
+            if total_processed % 1000 == 0:
+                print(f"Processed {total_processed}/{total_samples} samples")
+
+        # Training with early stopping
+        gain = self.config.get('gain', 2.0)
+        max_epochs = self.config.get('epochs', 100)
+        patience = self.config.get('patience', 10)
+        min_improvement = self.config.get('min_improvement', 0.1)
+
+        print(f"Starting weight training with early stopping...")
+        best_accuracy = 0.0
+        best_round = 0
+        patience_counter = 0
+
+        for rnd in range(max_epochs + 1):
+            if rnd == 0:
+                # Initial evaluation
+                current_accuracy, correct_predictions, _ = self.evaluate(features_batches, encoded_targets_batches)
+                print(f"Round {rnd:3d}: Initial Accuracy = {current_accuracy:.2f}% ({correct_predictions}/{total_samples})")
+                best_accuracy = current_accuracy
+                continue
+
+            # Training pass
+            self.train_epoch(features_batches, encoded_targets_batches, gain)
+
+            # Evaluation after training round
+            current_accuracy, correct_predictions, _ = self.evaluate(features_batches, encoded_targets_batches)
+            print(f"Round {rnd:3d}: Accuracy = {current_accuracy:.2f}% ({correct_predictions}/{total_samples})")
+
+            # Capture visualization snapshot if visualizer is attached
+            if self.visualizer and rnd % 5 == 0:
+                sample_features = np.vstack(features_batches)[:1000]  # Sample for performance
+                sample_targets = np.concatenate(encoded_targets_batches)[:1000]
+                sample_predictions, _ = self.predict_batch(sample_features)
+                self.visualizer.capture_training_snapshot(
+                    sample_features, sample_targets, self.anti_wts,
+                    sample_predictions, current_accuracy, rnd
+                )
+
+            # Early stopping logic
+            if current_accuracy > best_accuracy + min_improvement:
+                best_accuracy = current_accuracy
+                best_round = rnd
+                patience_counter = 0
+                print(f"  → New best accuracy! (Improved by {current_accuracy - best_accuracy:.2f}%)")
+            else:
+                patience_counter += 1
+                print(f"  → No improvement (Patience: {patience_counter}/{patience})")
+
+            if patience_counter >= patience:
+                print(f"\nEarly stopping triggered after {rnd} rounds.")
+                print(f"Best accuracy {best_accuracy:.2f}% achieved at round {best_round}")
+                break
+
+        self.is_trained = True
+        print("Training completed successfully!")
+        return True
+
+    def save_model(self, model_path: str, feature_columns=None, target_column=None, use_json=False):
+        """Save complete model to file in binary format (default) or JSON format"""
+        try:
+            # Ensure all required fields are set
+            if not hasattr(self, 'innodes') or self.innodes is None:
+                # Try to infer from array shapes
+                if hasattr(self, 'anti_net') and self.anti_net is not None:
+                    self.innodes = self.anti_net.shape[0] - 2
+                else:
+                    self.innodes = 0
+
+            if not hasattr(self, 'outnodes') or self.outnodes is None:
+                if hasattr(self, 'anti_net') and self.anti_net is not None:
+                    self.outnodes = self.anti_net.shape[4] - 2
+                else:
+                    self.outnodes = 0
+
+            # Ensure directory exists
+            model_dir = os.path.dirname(os.path.abspath(model_path))
+            if model_dir and not os.path.exists(model_dir):
+                os.makedirs(model_dir, exist_ok=True)
+
+            # Build model data with feature information
+            model_data = {
+                'config': self.config,
+                'innodes': self.innodes,
+                'outnodes': self.outnodes,
+                'is_trained': self.is_trained,
+                'best_accuracy': getattr(self, 'best_accuracy', 0.0),
+                'class_encoder': self.class_encoder.get_class_mapping() if hasattr(self.class_encoder, 'is_fitted') and self.class_encoder.is_fitted else {},
+                'feature_columns': feature_columns if feature_columns else [],
+                'target_column': target_column if target_column else '',
+                'arrays_format': 'numpy'  # Mark that arrays are stored as numpy objects
+            }
+
+            # Add arrays with proper validation
+            if hasattr(self, 'anti_net') and self.anti_net is not None:
+                model_data['anti_net'] = self.anti_net
+            else:
+                model_data['anti_net'] = np.array([], dtype=np.int32)
+
+            if hasattr(self, 'anti_wts') and self.anti_wts is not None:
+                model_data['anti_wts'] = self.anti_wts
+            else:
+                model_data['anti_wts'] = np.array([], dtype=np.float64)
+
+            if hasattr(self, 'binloc') and self.binloc is not None:
+                model_data['binloc'] = self.binloc
+            else:
+                model_data['binloc'] = np.array([], dtype=np.float64)
+
+            if hasattr(self, 'max_val') and self.max_val is not None:
+                model_data['max_val'] = self.max_val
+            else:
+                model_data['max_val'] = np.array([], dtype=np.float64)
+
+            if hasattr(self, 'min_val') and self.min_val is not None:
+                model_data['min_val'] = self.min_val
+            else:
+                model_data['min_val'] = np.array([], dtype=np.float64)
+
+            if hasattr(self, 'dmyclass') and self.dmyclass is not None:
+                model_data['dmyclass'] = self.dmyclass
+            else:
+                model_data['dmyclass'] = np.array([], dtype=np.float64)
+
+            if hasattr(self, 'resolution_arr') and self.resolution_arr is not None:
+                model_data['resolution_arr'] = self.resolution_arr
+            else:
+                model_data['resolution_arr'] = np.array([], dtype=np.int32)
+
+            if use_json:
+                # Convert numpy arrays to lists for JSON
+                json_model_data = model_data.copy()
+                for key in ['anti_net', 'anti_wts', 'binloc', 'max_val', 'min_val', 'dmyclass', 'resolution_arr']:
+                    if isinstance(json_model_data[key], np.ndarray):
+                        json_model_data[key] = json_model_data[key].tolist()
+
+                with open(model_path, 'w') as f:
+                    json.dump(json_model_data, f, indent=2)
+                print(f"Model saved in JSON format to: {model_path}")
+            else:
+                # Save in binary format (default)
+                with gzip.open(model_path, 'wb') as f:
+                    pickle.dump(model_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+                print(f"Model saved in binary format to: {model_path}")
+
+            if feature_columns:
+                print(f"✅ Feature configuration saved: {len(feature_columns)} features")
             return True
 
         except Exception as e:
-            print(f"❌ Error during streaming prediction: {str(e)}")
-            return False
-
-    def _prepare_prediction_data_chunk(self, df_chunk: pd.DataFrame, expected_features: list = None) -> Tuple[np.ndarray, pd.DataFrame]:
-        """Prepare a single chunk of data for prediction"""
-        if expected_features is None:
-            # Use all available features
-            if isinstance(self.target_column, int) and self.target_column < len(df_chunk.columns):
-                df_features = df_chunk.drop(df_chunk.columns[self.target_column], axis=1)
-            else:
-                df_features = df_chunk
-        else:
-            # Use expected features from training
-            selected_features = [col for col in expected_features if col in df_chunk.columns]
-            df_features = df_chunk[selected_features]
-
-        # Handle missing values
-        df_features = self._handle_missing_values(df_features)
-
-        # Encode categorical features
-        for column in df_features.columns:
-            if column in self.categorical_encoders:
-                try:
-                    unseen_mask = ~df_features[column].isin(self.categorical_encoders[column].classes_)
-                    if unseen_mask.any():
-                        default_value = self.categorical_encoders[column].classes_[0]
-                        df_features.loc[unseen_mask, column] = default_value
-                    df_features[column] = self.categorical_encoders[column].transform(df_features[column])
-                except Exception as e:
-                    print(f"Error encoding categorical feature '{column}': {e}")
-                    # Use default encoding
-                    df_features[column] = 0
-
-        X_raw = df_features.values
-        X_scaled = self.scaler.transform(X_raw)
-        X_scaled, valid_mask = self._filter_sentinel_samples(X_scaled, None)
-        df_valid = df_chunk[valid_mask] if valid_mask is not None else df_chunk
-
-        return X_scaled, df_valid
-
-    def _count_csv_rows(self, file_path: str) -> int:
-        """Count rows in CSV file efficiently"""
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                if self.config.get('has_header', True):
-                    next(f)
-                row_count = sum(1 for _ in f)
-            return row_count
-        except Exception as e:
-            print(f"⚠️  Could not count CSV rows: {e}, using approximate progress")
-            return 0
-
-    def _evaluate_predictions_if_possible(self, output_file: str) -> np.ndarray:
-        """Evaluate predictions if target column exists in the data"""
-        try:
-            # Sample the output file for evaluation
-            sample_df = pd.read_csv(output_file, nrows=1000)
-
-            training_cols = self.config.get('training_columns', {})
-            target_column = training_cols.get('target_column')
-
-            if not target_column or target_column not in sample_df.columns:
-                print(f"ℹ️  No target column found for evaluation")
-                return None
-
-            print(f"📊 Evaluating predictions using target column '{target_column}'")
-
-            # Use sample for evaluation
-            eval_df = pd.read_csv(output_file, nrows=10000) if len(sample_df) >= 1000 else sample_df
-
-            valid_mask = (~eval_df['predicted_class'].isin(['INVALID', 'ERROR'])) & \
-                       (eval_df[target_column].notna())
-
-            if valid_mask.any():
-                df_valid = eval_df[valid_mask]
-                y_true = df_valid[target_column].values
-                y_pred = df_valid['predicted_class'].values
-
-                accuracy = accuracy_score(y_true, y_pred)
-                print(f"   Accuracy: {accuracy:.4f} (on {len(df_valid):,} valid samples)")
-
-                # Create confusion matrix visualization if visualizer is available
-                if self.visualization_enabled and self.visualizer is not None:
-                    self.visualizer.create_confusion_matrix_visualization(y_true, y_pred)
-
-                    # Update visualizer with class names if available
-                    if hasattr(self.label_encoder, 'classes_'):
-                        self.visualizer.class_names = [str(cls) for cls in self.label_encoder.classes_]
-
-            return eval_df['predicted_class'].values
-
-        except Exception as e:
-            print(f"⚠️  Could not evaluate predictions: {e}")
-            return None
-
-    def _generate_gaussian_samples(self, n_samples: int = 100, class_id: int = None):
-        """Generate Gaussian samples - maintained for compatibility"""
-        print("Sample generation not fully implemented in enhanced version")
-        # Return dummy data for compatibility
-        if self.cpp_core.innodes is None:
-            return np.random.randn(n_samples, 5), np.zeros(n_samples)
-
-        samples = np.random.randn(n_samples, self.cpp_core.innodes)
-        class_ids = np.full(n_samples, class_id if class_id is not None else 0)
-        return samples, class_ids
-
-    def _generate_histogram_samples(self, n_samples: int = 100, class_id: int = None):
-        """Generate histogram samples - maintained for compatibility"""
-        print("Sample generation not fully implemented in enhanced version")
-        # Return dummy data for compatibility
-        if self.cpp_core.innodes is None:
-            return np.random.rand(n_samples, 5), np.zeros(n_samples)
-
-        samples = np.random.rand(n_samples, self.cpp_core.innodes)
-        class_ids = np.full(n_samples, class_id if class_id is not None else 0)
-        return samples, class_ids
-
-    def _get_model_filename(self) -> str:
-        """Get model filename from config or use default"""
-        if ('model_config' in self.config and
-            'model_filename' in self.config['model_config']):
-            return self.config['model_config']['model_filename']
-        else:
-            return f"Best_{self.dataset_name}"
-
-    def _get_weights_filename(self):
-        """Get the filename for saving/loading weights using config model_filename"""
-        model_filename = self._get_model_filename()
-        return os.path.join('Model', f'{model_filename}_weights.json')
-
-    def _get_encoders_filename(self):
-        """Get encoders filename using config model_filename"""
-        model_filename = self._get_model_filename()
-        return os.path.join('Model', f'{model_filename}_encoders.pkl')
-
-    def _load_dataset(self) -> pd.DataFrame:
-        """Load dataset from file or URL with enhanced configuration"""
-        file_path = self.config['file_path']
-        separator = self.config['separator']
-        has_header = self.config['has_header']
-
-        print(f"Loading dataset from: {file_path}")
-
-        try:
-            if os.path.exists(file_path):
-                if has_header:
-                    df = pd.read_csv(file_path, sep=separator)
-                else:
-                    df = pd.read_csv(file_path, sep=separator, header=None)
-            else:
-                response = requests.get(file_path)
-                response.raise_for_status()
-
-                if has_header:
-                    df = pd.read_csv(StringIO(response.text), sep=separator)
-                else:
-                    df = pd.read_csv(StringIO(response.text), sep=separator, header=None)
-
-            df = _filter_features_from_config(df, self.config)
-            df = self._handle_missing_values(df)
-            df = self._remove_high_cardinality_columns(df, self._calculate_cardinality_threshold())
-
-            self.config = DatasetConfig._ensure_training_columns_config(self.config, df)
-
-            if not self.train_enabled and self.predict_enabled:
-                if not self._validate_feature_consistency(df):
-                    print("⚠️  Feature inconsistency detected. Prediction may be unreliable.")
-
-            print(f"Dataset loaded with shape: {df.shape}")
-            print(f"Model filename: {self._get_model_filename()}")
-            return df
-
-        except Exception as e:
-            print(f"Error loading dataset: {str(e)}")
-            raise
-
-    def _handle_missing_values(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Handle NaN and missing values by replacing with sentinel value (-9999)"""
-        df_clean = df.copy()
-        SENTINEL_VALUE = -9999
-
-        for column in df_clean.columns:
-            if df_clean[column].isna().any():
-                count_nan = df_clean[column].isna().sum()
-                print(f"Found {count_nan} NaN values in column '{column}', replacing with sentinel value {SENTINEL_VALUE}")
-                df_clean[column] = df_clean[column].fillna(SENTINEL_VALUE)
-
-        return df_clean
-
-    def _remove_high_cardinality_columns(self, df: pd.DataFrame, threshold: float = None) -> pd.DataFrame:
-        """Remove columns with unique values exceeding the threshold percentage"""
-        if threshold is None:
-            threshold = self.cardinality_threshold
-
-        df_filtered = df.copy()
-        columns_to_drop = []
-
-        # First apply cardinality tolerance (rounding)
-        df_rounded = df_filtered.round(self.cardinality_tolerance)
-
-        print(f"🔍 Applying cardinality filtering: threshold={threshold}, tolerance={self.cardinality_tolerance}")
-
-        for column in df_rounded.columns:
-            if column == self.target_column:
-                continue
-
-            unique_ratio = len(df_rounded[column].unique()) / len(df_rounded)
-            n_unique = len(df_rounded[column].unique())
-            n_total = len(df_rounded)
-
-            if unique_ratio > threshold:
-                columns_to_drop.append(column)
-                print(f"   🗑️  Dropping column '{column}': {n_unique}/{n_total} unique values ({unique_ratio:.3f} > {threshold})")
-            else:
-                print(f"   ✅ Keeping column '{column}': {n_unique}/{n_total} unique values ({unique_ratio:.3f} <= {threshold})")
-
-        if columns_to_drop:
-            df_filtered = df_filtered.drop(columns=columns_to_drop)
-            print(f"🗑️  Dropped {len(columns_to_drop)} high cardinality columns: {columns_to_drop}")
-        else:
-            print("✅ No high cardinality columns found")
-
-        return df_filtered
-
-    def _prepare_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Prepare training and test data"""
-        df_encoded = self._encode_categorical_features(self.data)
-
-        if isinstance(self.target_column, int):
-            X = df_encoded.drop(df_encoded.columns[self.target_column], axis=1).values
-            y = df_encoded.iloc[:, self.target_column].values
-        else:
-            X = df_encoded.drop(self.target_column, axis=1).values
-            y = df_encoded[self.target_column].values
-
-        X, y = self._filter_sentinel_samples(X, y)
-        y_encoded = self.label_encoder.fit_transform(y)
-
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y_encoded, test_size=self.test_size, random_state=self.random_state
-        )
-
-        X_train_scaled = self.scaler.fit_transform(X_train)
-        X_test_scaled = self.scaler.transform(X_test)
-
-        return X_train_scaled, X_test_scaled, y_train, y_test
-
-    def _encode_categorical_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Encode categorical features using LabelEncoder"""
-        df_encoded = df.copy()
-
-        for column in df_encoded.columns:
-            if column == self.target_column:
-                continue
-
-            if (df_encoded[column].dtype == 'object' or
-                    df_encoded[column].nunique() / len(df_encoded) < 0.05):
-
-                if column not in self.categorical_encoders:
-                    self.categorical_encoders[column] = LabelEncoder()
-                    self.categorical_encoders[column].fit(df_encoded[column])
-
-                df_encoded[column] = self.categorical_encoders[column].transform(df_encoded[column])
-
-        return df_encoded
-
-    def _filter_sentinel_samples(self, X: np.ndarray, y: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray]:
-        """Filter out samples that contain sentinel values (-9999)"""
-        SENTINEL_VALUE = -9999
-        valid_mask = ~np.any(X == SENTINEL_VALUE, axis=1)
-
-        if not np.any(valid_mask):
-            raise ValueError("All samples contain sentinel values - no valid data to process")
-
-        X_filtered = X[valid_mask]
-
-        if y is not None:
-            y_filtered = y[valid_mask]
-            filtered_count = len(X) - len(X_filtered)
-            if filtered_count > 0:
-                print(f"Filtered out {filtered_count} samples containing sentinel values")
-            return X_filtered, y_filtered
-
-        return X_filtered, valid_mask
-
-    def _calculate_cardinality_threshold(self):
-        """Calculate the cardinality threshold based on the number of distinct classes"""
-        return self.cardinality_threshold
-
-    def train(self):
-        """Train the model using enhanced C++ algorithm - OPTIMIZED VERSION"""
-        if not self.train_enabled:
-            print("Training is disabled in configuration")
-            return
-
-        print("Starting OPTIMIZED C++ algorithm training...")
-
-        # Apply memory optimizations
-        self._optimize_gpu_memory()
-        self._optimized_data_preparation()
-
-        X_train, X_test, y_train, y_test = self._prepare_data()
-
-        # Convert to float for C++ algorithm - use actual class values
-        unique_classes = np.unique(y_train)
-        y_train_float = y_train.astype(float)
-        y_test_float = y_test.astype(float) if y_test is not None else None
-
-        # Setup C++ core
-        self.cpp_core._initialize_network(X_train.shape[1], len(unique_classes))
-
-        # Compute feature statistics
-        self.cpp_core.max_vals = torch.zeros(self.cpp_core.innodes + 1, device=self.device)
-        self.cpp_core.min_vals = torch.zeros(self.cpp_core.innodes + 1, device=self.device)
-
-        for i in range(1, self.cpp_core.innodes + 1):
-            self.cpp_core.max_vals[i] = torch.max(torch.from_numpy(X_train[:, i-1]).float()).item()
-            self.cpp_core.min_vals[i] = torch.min(torch.from_numpy(X_train[:, i-1]).float()).item()
-
-        # Create dmyclass array - use actual class values with small margin
-        self.cpp_core.dmyclass = [0.1]  # margin
-        self.cpp_core.dmyclass.extend(unique_classes.tolist())
-
-        # Compute feature resolutions
-        self.cpp_core._compute_feature_resolution(X_train)
-
-        # Create APF file
-        self.cpp_core._create_apf_file(X_train, y_train_float)
-
-        # Convert to tensors with optimizations
-        X_train_tensor = torch.from_numpy(X_train).float().to(self.device, non_blocking=True)
-        y_train_tensor = torch.from_numpy(y_train_float).float().to(self.device, non_blocking=True)
-
-        if X_test is not None:
-            X_test_tensor = torch.from_numpy(X_test).float().to(self.device, non_blocking=True)
-            y_test_tensor = torch.from_numpy(y_test_float).float().to(self.device, non_blocking=True)
-
-        # Setup visualization
-        if self.visualization_enabled and self.visualizer is not None:
-            class_names = [str(cls) for cls in self.label_encoder.classes_]
-            self.visualizer.set_data_context(
-                X_train=X_train,
-                y_train=y_train,
-                feature_names=[f'Feature_{i}' for i in range(X_train.shape[1])],
-                class_names=class_names
-            )
-
-        # Training loop with optimizations
-        best_epoch = 0
-        trials_without_improvement = 0
-        training_errors = []
-        test_errors = []
-        training_accuracies = []
-        test_accuracies = []
-
-        if not nokbd:
-            self._setup_keyboard_control()
-
-        progress_bar = trange(self.max_epochs, desc="Optimized Training")
-
-        try:
-            for epoch in progress_bar:
-                # Memory cleanup at strategic intervals
-                if epoch % 100 == 0:
-                    self._cleanup_memory()
-
-                # Train epoch using optimized C++ core
-                train_accuracy, train_confidence = self.cpp_core.train_epoch(X_train_tensor, y_train_tensor, epoch)
-                train_error = 1 - train_accuracy
-
-                training_errors.append(train_error)
-                training_accuracies.append(train_accuracy)
-
-                # Optimized visualization updates
-                test_accuracy = None
-                if not self.train_only and X_test is not None:
-                    # Use C++ core for prediction
-                    test_predictions = self.cpp_core.predict(X_test_tensor)
-
-                    # Convert dmyclass to tensor for comparison
-                    dmyclass_tensor = torch.tensor(self.cpp_core.dmyclass, device=self.device)
-                    margin = dmyclass_tensor[0]
-
-                    # Calculate accuracy
-                    correct_predictions = torch.abs(test_predictions.float() - y_test_tensor) <= margin
-                    test_accuracy = correct_predictions.float().mean().item()
-                    test_error = 1 - test_accuracy
-
-                    test_errors.append(test_error)
-                    test_accuracies.append(test_accuracy)
-
-                # Update visualization with optimized frequency
-                self._optimized_visualization_update(epoch, train_accuracy, test_accuracy)
-
-                # Test evaluation and early stopping
-                if not self.train_only and X_test is not None and test_accuracy is not None:
-                    if test_accuracy > self.best_accuracy:
-                        print(f"Test accuracy improved from {self.best_accuracy:.4f} to {test_accuracy:.4f}")
-                        self.best_error = 1 - test_accuracy
-                        self.best_accuracy = test_accuracy
-                        best_epoch = epoch
-                        trials_without_improvement = 0
-                        self._save_best_weights()
-                    else:
-                        trials_without_improvement += 1
-
-                    # Optimized early stopping check
-                    should_stop, trials_without_improvement = self._optimized_early_stopping_check(
-                        test_accuracy, epoch, trials_without_improvement)
-
-                    if should_stop:
-                        print(f"Early stopping at epoch {epoch}")
-                        break
-
-                    progress_bar.set_postfix({
-                        'Train Acc': f'{train_accuracy:.4f}',
-                        'Test Acc': f'{test_accuracy:.4f}',
-                        'Best Acc': f'{self.best_accuracy:.4f}',
-                        'No Improve': trials_without_improvement
-                    })
-                else:
-                    # Training-only mode
-                    if self.best_accuracy < train_accuracy:
-                        self.best_error = train_error
-                        self.best_accuracy = train_accuracy
-                        best_epoch = epoch
-                        trials_without_improvement = 0
-                        self._save_best_weights()
-                    else:
-                        trials_without_improvement += 1
-
-                    # Optimized early stopping check for training-only
-                    should_stop, trials_without_improvement = self._optimized_early_stopping_check(
-                        train_accuracy, epoch, trials_without_improvement)
-
-                    if should_stop:
-                        print(f"Early stopping at epoch {epoch}")
-                        break
-
-                    progress_bar.set_postfix({
-                        'Train Acc': f'{train_accuracy:.4f}',
-                        'Best Acc': f'{self.best_accuracy:.4f}',
-                        'No Improve': trials_without_improvement
-                    })
-
-                if not nokbd and hasattr(self, 'skip_training') and self.skip_training:
-                    print("Training interrupted by user")
-                    break
-
-        except KeyboardInterrupt:
-            print("Training interrupted by user")
-
-        finally:
-            if not nokbd:
-                self._cleanup_keyboard_control()
-            progress_bar.close()
-
-        print(f"Training completed. Best epoch: {best_epoch}")
-        print(f"Best Test error: {self.best_error:.4f}")
-        print(f"Best Test accuracy: {self.best_accuracy:.4f}")
-
-        # Finalize visualizations
-        if self.visualization_enabled and self.visualizer is not None:
-            weights_np = self.cpp_core.anti_wts.cpu().numpy()
-            self.visualizer.finalize_visualizations(
-                weights_np, training_errors, training_accuracies
-            )
-
-        self._save_categorical_encoders()
-
-        if not self.train_only:
-            self._plot_training_history(training_errors, test_errors, training_accuracies, test_accuracies)
-
-    def predict(self, X: np.ndarray = None, output_file: str = None) -> np.ndarray:
-        """Make predictions using enhanced C++ algorithm"""
-        if not self.predict_enabled:
-            print("Prediction is disabled in configuration")
-            return None
-
-        try:
-            if X is None:
-                # Load prediction dataset
-                df_pred = self._load_prediction_dataset()
-                X_scaled, df_valid = self._prepare_prediction_data(df_pred)
-
-                if len(X_scaled) == 0:
-                    print("❌ No valid samples after preprocessing")
-                    return None
-
-                # Use optimized C++ core for prediction
-                X_tensor = torch.from_numpy(X_scaled).float().to(self.device)
-                predictions_float = self.cpp_core.predict(X_tensor)
-
-                # Convert to original labels
-                predictions = self.label_encoder.inverse_transform(
-                    predictions_float.cpu().numpy().astype(int)
-                )
-
-                # Save results
-                if output_file is None:
-                    output_file = f'{self.dataset_name}_predictions.csv'
-
-                df_result = df_valid.copy()
-                df_result['predicted_class'] = predictions
-
-                # Calculate confidence (placeholder)
-                df_result['prediction_confidence'] = 0.9
-
-                df_result.to_csv(output_file, index=False)
-                print(f"✅ Predictions saved to {output_file}")
-
-                return predictions
-
-            else:
-                # Direct numpy array prediction
-                X_clean = self._handle_missing_values(pd.DataFrame(X))
-                X_scaled = self.scaler.transform(X_clean.values)
-                X_scaled, _ = self._filter_sentinel_samples(X_scaled, None)
-
-                X_tensor = torch.from_numpy(X_scaled).float().to(self.device)
-                predictions_float = self.cpp_core.predict(X_tensor)
-
-                predictions = self.label_encoder.inverse_transform(
-                    predictions_float.cpu().numpy().astype(int)
-                )
-
-                return predictions
-
-        except Exception as e:
-            print(f"❌ Error during prediction: {str(e)}")
+            print(f"Error saving model: {e}")
             import traceback
             traceback.print_exc()
+            return False
+
+    def load_model(self, model_path: str):
+        """Load model from file with robust error handling - supports both binary and JSON formats"""
+        try:
+            # Detect format and load accordingly
+            if model_path.endswith('.gz') or model_path.endswith('.bin'):
+                # Binary format
+                with gzip.open(model_path, 'rb') as f:
+                    model_data = pickle.load(f)
+                print(f"Loading binary model from: {model_path}")
+            else:
+                # JSON format
+                with open(model_path, 'r') as f:
+                    model_data = json.load(f)
+                print(f"Loading JSON model from: {model_path}")
+
+            print(f"Loading model from: {model_path}")
+
+            # Load basic configuration FIRST
+            self.config = model_data.get('config', {})
+
+            # Handle array loading based on format
+            if 'arrays_format' in model_data and model_data['arrays_format'] == 'numpy':
+                # Binary format with numpy arrays
+                array_mappings = [
+                    ('anti_net', np.int32),
+                    ('anti_wts', np.float64),
+                    ('binloc', np.float64),
+                    ('max_val', np.float64),
+                    ('min_val', np.float64),
+                    ('dmyclass', np.float64),
+                    ('resolution_arr', np.int32)
+                ]
+
+                for field_name, dtype in array_mappings:
+                    if field_name in model_data:
+                        loaded_array = model_data[field_name]
+                        if isinstance(loaded_array, list):
+                            # Convert list to numpy array if needed
+                            loaded_array = np.array(loaded_array, dtype=dtype)
+                        setattr(self, field_name, loaded_array)
+                        print(f"Loaded {field_name}: shape {loaded_array.shape}")
+            else:
+                # JSON format with lists - convert to numpy arrays
+                array_mappings = [
+                    ('anti_net', np.int32),
+                    ('anti_wts', np.float64),
+                    ('binloc', np.float64),
+                    ('max_val', np.float64),
+                    ('min_val', np.float64),
+                    ('dmyclass', np.float64),
+                    ('resolution_arr', np.int32)
+                ]
+
+                for field_name, dtype in array_mappings:
+                    if field_name in model_data and model_data[field_name]:
+                        try:
+                            loaded_array = np.array(model_data[field_name], dtype=dtype)
+                            setattr(self, field_name, loaded_array)
+                            print(f"Loaded {field_name}: shape {loaded_array.shape}")
+                        except Exception as e:
+                            print(f"Error loading {field_name}: {e}")
+
+            # FIX: Infer dimensions from ACTUAL loaded arrays, not from metadata
+            if hasattr(self, 'anti_net') and self.anti_net is not None:
+                # Infer from anti_net shape: (innodes+2, resol+2, innodes+2, resol+2, outnodes+2)
+                actual_innodes = self.anti_net.shape[0] - 2
+                actual_outnodes = self.anti_net.shape[4] - 2
+                self.innodes = actual_innodes
+                self.outnodes = actual_outnodes
+                print(f"✅ Inferred dimensions from arrays: {actual_innodes} inputs, {actual_outnodes} outputs")
+            else:
+                # Fallback to metadata
+                self.innodes = model_data.get('innodes', 0)
+                self.outnodes = model_data.get('outnodes', 0)
+                print(f"⚠️ Using metadata dimensions: {self.innodes} inputs, {self.outnodes} outputs")
+
+            # Now set other properties
+            self.is_trained = model_data.get('is_trained', False)
+
+            # Load best accuracy
+            if 'best_accuracy' in model_data:
+                self.best_accuracy = model_data['best_accuracy']
+
+            # NEW: Load feature information from model
+            self.feature_columns = model_data.get('feature_columns', [])
+            self.target_column = model_data.get('target_column', '')
+
+            if self.feature_columns:
+                print(f"✅ Loaded feature configuration: {len(self.feature_columns)} features - {self.feature_columns}")
+            else:
+                print("⚠️ No feature configuration found in model file")
+
+            if self.target_column:
+                print(f"✅ Target column: {self.target_column}")
+
+            print(f"Final model - is_trained: {self.is_trained}, innodes: {self.innodes}, outnodes: {self.outnodes}")
+
+            # FIX: Only reinitialize arrays if we have valid dimensions AND arrays aren't already loaded
+            resol = self.config.get('resol', 100)
+            if self.innodes > 0 and self.outnodes > 0 and not hasattr(self, 'anti_net'):
+                self.initialize_arrays(self.innodes, resol, self.outnodes)
+                print("Arrays initialized from dimensions")
+            elif hasattr(self, 'anti_net'):
+                print("✅ Arrays already loaded, no reinitialization needed")
+            else:
+                print("❌ Warning: Invalid model dimensions, cannot initialize arrays")
+                return
+
+            # FIX: Enhanced class encoder loading with better error recovery
+            class_encoder_mapping = model_data.get('class_encoder', {})
+            if class_encoder_mapping:
+                try:
+                    # Convert string keys back to floats for encoded_to_class
+                    encoded_to_class = {}
+                    class_to_encoded = {}
+
+                    # Handle encoded_to_class (string keys → float keys)
+                    encoded_to_class_data = class_encoder_mapping.get('encoded_to_class', {})
+                    if encoded_to_class_data:
+                        for str_key, class_name in encoded_to_class_data.items():
+                            try:
+                                float_key = float(str_key)
+                                encoded_to_class[float_key] = class_name
+                            except (ValueError, TypeError) as e:
+                                print(f"⚠️ Warning: Could not convert key {str_key} to float: {e}")
+                                # Fallback: try to keep as string if float conversion fails
+                                try:
+                                    encoded_to_class[float(str_key)] = class_name
+                                except:
+                                    print(f"❌ Failed to convert key {str_key}, skipping this entry")
+                    else:
+                        print("⚠️ No encoded_to_class data found in model")
+
+                    # Handle class_to_encoded (already string keys)
+                    class_to_encoded_data = class_encoder_mapping.get('class_to_encoded', {})
+                    if class_to_encoded_data:
+                        for class_name, encoded_val in class_to_encoded_data.items():
+                            try:
+                                class_to_encoded[class_name] = float(encoded_val)
+                            except (ValueError, TypeError) as e:
+                                print(f"⚠️ Warning: Could not convert value {encoded_val} to float: {e}")
+                                # Fallback: try to convert string representation
+                                try:
+                                    class_to_encoded[class_name] = float(str(encoded_val))
+                                except:
+                                    print(f"❌ Failed to convert value {encoded_val}, skipping this entry")
+                    else:
+                        print("⚠️ No class_to_encoded data found in model")
+
+                    # Set the encoder properties - CRITICAL: Always set is_fitted if we have any mappings
+                    self.class_encoder.encoded_to_class = encoded_to_class
+                    self.class_encoder.class_to_encoded = class_to_encoded
+
+                    # Determine if encoder should be considered fitted
+                    has_any_mappings = len(encoded_to_class) > 0 or len(class_to_encoded) > 0
+                    is_fitted_from_data = class_encoder_mapping.get('is_fitted', False)
+
+                    if has_any_mappings or is_fitted_from_data:
+                        self.class_encoder.is_fitted = True
+                        print(f"✅ Class encoder marked as fitted with {len(encoded_to_class)} encoded classes")
+                    else:
+                        self.class_encoder.is_fitted = False
+                        print("⚠️ Class encoder not marked as fitted - no valid mappings found")
+
+                    # Log encoder status
+                    if self.class_encoder.is_fitted:
+                        print(f"✅ Loaded class encoder with {len(self.class_encoder.encoded_to_class)} classes")
+                        if self.class_encoder.encoded_to_class:
+                            sample_classes = list(self.class_encoder.encoded_to_class.items())[:3]
+                            print(f"Sample class mappings: {sample_classes}")
+
+                            # Also verify dmyclass alignment
+                            if hasattr(self, 'dmyclass') and self.dmyclass is not None:
+                                print(f"dmyclass values: {[self.dmyclass[i] for i in range(min(5, len(self.dmyclass)))]}...")
+                    else:
+                        print("❌ Class encoder failed to load properly")
+
+                except Exception as e:
+                    print(f"❌ Error loading class encoder: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+                    # EMERGENCY RECOVERY: Try to create basic encoder from dmyclass if available
+                    if hasattr(self, 'dmyclass') and self.dmyclass is not None:
+                        print("🔄 Attempting emergency encoder recovery from dmyclass...")
+                        try:
+                            # Extract class values from dmyclass (skip margin at index 0)
+                            class_values = []
+                            for i in range(1, min(len(self.dmyclass), self.outnodes + 1)):
+                                if self.dmyclass[i] != 0:  # Skip zero values
+                                    class_values.append(self.dmyclass[i])
+
+                            if class_values:
+                                # Create basic encoder mapping
+                                encoded_to_class = {}
+                                class_to_encoded = {}
+                                for i, class_val in enumerate(class_values, 1):
+                                    encoded_to_class[float(i)] = f"Class_{class_val}"
+                                    class_to_encoded[f"Class_{class_val}"] = float(i)
+
+                                self.class_encoder.encoded_to_class = encoded_to_class
+                                self.class_encoder.class_to_encoded = class_to_encoded
+                                self.class_encoder.is_fitted = True
+                                print(f"✅ Emergency recovery: Created encoder with {len(class_values)} classes from dmyclass")
+                        except Exception as recovery_error:
+                            print(f"❌ Emergency recovery failed: {recovery_error}")
+            else:
+                print("❌ No class encoder data found in model file")
+
+                # Try to infer from dmyclass as last resort
+                if hasattr(self, 'dmyclass') and self.dmyclass is not None:
+                    print("🔄 Attempting to infer encoder from dmyclass...")
+                    try:
+                        class_values = []
+                        for i in range(1, min(len(self.dmyclass), self.outnodes + 1)):
+                            if self.dmyclass[i] != 0:
+                                class_values.append(self.dmyclass[i])
+
+                        if class_values:
+                            encoded_to_class = {}
+                            class_to_encoded = {}
+                            for i, class_val in enumerate(class_values, 1):
+                                encoded_to_class[float(i)] = str(class_val)
+                                class_to_encoded[str(class_val)] = float(i)
+
+                            self.class_encoder.encoded_to_class = encoded_to_class
+                            self.class_encoder.class_to_encoded = class_to_encoded
+                            self.class_encoder.is_fitted = True
+                            print(f"✅ Inferred encoder with {len(class_values)} classes from dmyclass")
+                    except Exception as infer_error:
+                        print(f"❌ Failed to infer encoder from dmyclass: {infer_error}")
+
+            # Final validation
+            print(f"✅ Model loaded successfully: {self.innodes} inputs, {self.outnodes} outputs")
+            print(f"✅ Model is_trained: {self.is_trained}")
+            print(f"✅ Class encoder is_fitted: {getattr(self.class_encoder, 'is_fitted', False)}")
+            print(f"✅ Config resolution: {self.config.get('resol', 'N/A')}")
+            if self.feature_columns:
+                print(f"✅ Feature columns: {len(self.feature_columns)} features loaded")
+            else:
+                print("⚠️ No feature columns information available")
+
+            # Test model functionality
+            if self.innodes > 0 and self.class_encoder.is_fitted:
+                try:
+                    test_sample = np.random.randn(self.innodes)
+                    predictions, probabilities = self.predict_batch(test_sample.reshape(1, -1))
+                    print(f"✅ Model test passed - Prediction: {predictions[0]}")
+                except Exception as test_error:
+                    print(f"⚠️ Model test warning: {test_error}")
+
+        except Exception as e:
+            print(f"❌ Load error: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def attach_visualizer(self, visualizer):
+        """Attach a visualizer for training monitoring"""
+        self.visualizer = visualizer
+        print("Visualizer attached to DBNN core")
+
+class DBNNVisualizer:
+    """
+    Standalone visualization class that can be imported and used with DBNNCore
+    Provides standardized protocols for visualization
+    """
+
+    def __init__(self):
+        self.training_history = []
+        self.visualization_data = {}
+
+    def capture_training_snapshot(self, features, targets, weights,
+                                 predictions, accuracy, round_num):
+        """Standardized protocol for capturing training state"""
+        snapshot = {
+            'round': round_num,
+            'features': features.copy() if hasattr(features, 'copy') else features,
+            'targets': targets.copy() if hasattr(targets, 'copy') else targets,
+            'weights': weights.copy() if hasattr(weights, 'copy') else weights,
+            'predictions': predictions.copy() if hasattr(predictions, 'copy') else predictions,
+            'accuracy': accuracy,
+            'timestamp': len(self.training_history)
+        }
+        self.training_history.append(snapshot)
+        return snapshot
+
+    def get_training_history(self):
+        """Standardized protocol for accessing training history"""
+        return self.training_history
+
+    def clear_history(self):
+        """Clear visualization history"""
+        self.training_history = []
+        self.visualization_data = {}
+
+    def generate_feature_space_plot(self, snapshot_idx: int, feature_indices: List[int] = [0, 1, 2]):
+        """Generate 3D feature space plot"""
+        try:
+            import plotly.graph_objects as go
+            import plotly.express as px
+            import pandas as pd
+        except ImportError:
+            print("Plotly not available for visualization")
             return None
 
-    # Maintain all original compatibility methods
-    def _load_prediction_dataset(self):
-        """Maintain original interface"""
-        return self._load_dataset()
+        if snapshot_idx >= len(self.training_history):
+            return None
 
-    def _prepare_prediction_data(self, df: pd.DataFrame):
-        """Maintain original interface"""
-        # Implementation similar to original but using C++ core
-        return self._prepare_data_single(df)
+        snapshot = self.training_history[snapshot_idx]
+        features = snapshot['features']
+        targets = snapshot['targets']
 
-    def _prepare_data_single(self, df: pd.DataFrame):
-        """Prepare single dataset for prediction"""
-        df_encoded = self._encode_categorical_features(df)
+        # Create DataFrame for plotting
+        df = pd.DataFrame({
+            f'Feature_{feature_indices[0]}': features[:, feature_indices[0]],
+            f'Feature_{feature_indices[1]}': features[:, feature_indices[1]],
+            f'Feature_{feature_indices[2]}': features[:, feature_indices[2]],
+            'Class': targets,
+            'Prediction': snapshot['predictions']
+        })
 
-        if isinstance(self.target_column, int) and self.target_column < len(df_encoded.columns):
-            X = df_encoded.drop(df_encoded.columns[self.target_column], axis=1).values
-        else:
-            X = df_encoded.values
+        fig = px.scatter_3d(
+            df,
+            x=f'Feature_{feature_indices[0]}',
+            y=f'Feature_{feature_indices[1]}',
+            z=f'Feature_{feature_indices[2]}',
+            color='Class',
+            title=f'Feature Space - Round {snapshot["round"]}<br>Accuracy: {snapshot["accuracy"]:.2f}%',
+            opacity=0.7
+        )
 
-        X = self._handle_missing_values(pd.DataFrame(X)).values
-        X_scaled = self.scaler.transform(X)
-        X_scaled, valid_mask = self._filter_sentinel_samples(X_scaled, None)
-        df_valid = df.iloc[valid_mask] if valid_mask is not None else df
+        return fig
 
-        return X_scaled, df_valid
-
-    def _save_best_weights(self):
-        """Save weights in compatible format"""
+    def generate_accuracy_plot(self):
+        """Generate accuracy progression plot"""
         try:
-            # Convert C++ weights to numpy for compatibility
-            weights_np = self.cpp_core.anti_wts.cpu().numpy()
-            self.best_W = weights_np
+            import plotly.graph_objects as go
+        except ImportError:
+            print("Plotly not available for visualization")
+            return None
 
-            weights_dict = {
-                'version': 7,
-                'weights': weights_np.tolist(),
-                'dataset_fingerprint': self._get_dataset_fingerprint(self.data),
-                'model_type': 'enhanced_cpp',
-                'best_accuracy': self.best_accuracy
+        if len(self.training_history) < 2:
+            return None
+
+        rounds = [s['round'] for s in self.training_history]
+        accuracies = [s['accuracy'] for s in self.training_history]
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=rounds, y=accuracies,
+            mode='lines+markers',
+            name='Accuracy'
+        ))
+
+        fig.update_layout(
+            title='Training Accuracy Progression',
+            xaxis_title='Training Round',
+            yaxis_title='Accuracy (%)'
+        )
+
+        return fig
+
+    def generate_weight_distribution_plot(self, snapshot_idx: int):
+        """Generate weight distribution histogram"""
+        try:
+            import plotly.graph_objects as go
+        except ImportError:
+            print("Plotly not available for visualization")
+            return None
+
+        if snapshot_idx >= len(self.training_history):
+            return None
+
+        snapshot = self.training_history[snapshot_idx]
+        weights = snapshot['weights']
+
+        # Flatten weights for histogram
+        flat_weights = weights.flatten()
+        # Remove zeros and extreme values for better visualization
+        flat_weights = flat_weights[(flat_weights != 0) & (np.abs(flat_weights) < 100)]
+
+        fig = go.Figure()
+        fig.add_trace(go.Histogram(
+            x=flat_weights,
+            nbinsx=50,
+            name='Weight Distribution'
+        ))
+
+        fig.update_layout(
+            title=f'Weight Distribution - Round {snapshot["round"]}',
+            xaxis_title='Weight Value',
+            yaxis_title='Frequency'
+        )
+
+        return fig
+
+    def create_training_dashboard(self, output_file: str = "training_dashboard.html"):
+        """Create comprehensive training dashboard"""
+        try:
+            from plotly.subplots import make_subplots
+            import plotly.graph_objects as go
+        except ImportError:
+            print("Plotly not available for dashboard creation")
+            return None
+
+        if len(self.training_history) < 2:
+            return None
+
+        # Create subplots
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=('Feature Space', 'Accuracy Progression',
+                          'Weight Distribution', 'Training Summary')
+        )
+
+        # Feature Space (latest snapshot)
+        feature_fig = self.generate_feature_space_plot(-1)
+        if feature_fig:
+            for trace in feature_fig.data:
+                fig.add_trace(trace, row=1, col=1)
+
+        # Accuracy Progression
+        rounds = [s['round'] for s in self.training_history]
+        accuracies = [s['accuracy'] for s in self.training_history]
+        fig.add_trace(go.Scatter(x=rounds, y=accuracies, mode='lines+markers',
+                               name='Accuracy'), row=1, col=2)
+
+        # Weight Distribution (latest snapshot)
+        weight_fig = self.generate_weight_distribution_plot(-1)
+        if weight_fig:
+            for trace in weight_fig.data:
+                fig.add_trace(trace, row=2, col=1)
+
+        # Training Summary
+        best_round = np.argmax(accuracies)
+        best_accuracy = accuracies[best_round]
+
+        summary_text = f"""
+        Training Summary:
+        - Total Rounds: {len(self.training_history)}
+        - Best Accuracy: {best_accuracy:.2f}%
+        - Best Round: {best_round}
+        - Final Accuracy: {accuracies[-1]:.2f}%
+        """
+
+        fig.add_trace(go.Scatter(
+            x=[0, 1], y=[0, 1],
+            mode='text',
+            text=[summary_text],
+            textposition="middle center",
+            showlegend=False
+        ), row=2, col=2)
+
+        fig.update_layout(height=800, title_text="DBNN Training Dashboard")
+        fig.write_html(output_file)
+        print(f"Training dashboard saved to: {output_file}")
+        return output_file
+
+# Example usage and integration
+class DBNNWorkflow:
+    """
+    Complete workflow manager that uses DBNNCore and DBNNVisualizer
+    """
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        self.core = DBNNCore(config)
+        self.visualizer = DBNNVisualizer()
+        self.core.attach_visualizer(self.visualizer)
+
+    def run_complete_workflow(self, train_file: str, test_file: Optional[str] = None,
+                             predict_file: Optional[str] = None, use_csv: bool = True,
+                             target_column: Optional[str] = None,
+                             feature_columns: Optional[List[str]] = None):
+        """Run complete training and evaluation workflow"""
+
+        print("Starting complete DBNN workflow...")
+
+        # Training
+        success = self.core.train_with_early_stopping(
+            train_file, test_file, use_csv, target_column, feature_columns
+        )
+
+        if not success:
+            print("Training failed")
+            return False
+
+        # Generate visualizations
+        if len(self.visualizer.training_history) > 0:
+            self.visualizer.create_training_dashboard("training_results.html")
+            print("Visualizations generated")
+
+        # Test if test file provided
+        if test_file and os.path.exists(test_file):
+            self.test_model(test_file, use_csv)
+
+        # Predict if predict file provided
+        if predict_file and os.path.exists(predict_file):
+            self.predict(predict_file, use_csv)
+
+        print("Workflow completed successfully!")
+        return True
+
+    def test_model(self, test_file: str, use_csv: bool = True):
+        """Test model on test data"""
+        print(f"Testing model on: {test_file}")
+
+        # Load test data
+        features_batches, targets_batches, _, original_targets_batches = self.core.load_data(test_file)
+
+        if not features_batches:
+            print("No test data loaded")
+            return
+
+        # Encode targets
+        encoded_targets_batches = []
+        for batch in original_targets_batches:
+            encoded_batch = self.core.class_encoder.transform(batch)
+            encoded_targets_batches.append(encoded_batch)
+
+        # Evaluate
+        accuracy, correct_predictions, predictions = self.core.evaluate(features_batches, encoded_targets_batches)
+        total_samples = sum(len(batch) for batch in features_batches)
+
+        print(f"Test Results: Accuracy = {accuracy:.2f}% ({correct_predictions}/{total_samples})")
+
+    def predict(self, data_file: str, use_csv: bool = True, output_file: Optional[str] = None):
+        """Generate predictions on new data"""
+        print(f"Generating predictions for: {data_file}")
+
+        features_batches, _, _, _ = self.core.load_data(data_file)
+
+        if not features_batches:
+            print("No prediction data loaded")
+            return
+
+        all_predictions = []
+        all_probabilities = []
+
+        for features_batch in features_batches:
+            predictions, probabilities = self.core.predict_batch(features_batch)
+            all_predictions.extend(predictions)
+            all_probabilities.extend(probabilities)
+
+        # Decode predictions
+        decoded_predictions = self.core.class_encoder.inverse_transform(all_predictions)
+
+        # Save results
+        if output_file is None:
+            output_file = data_file.replace('.csv', '_predictions.csv').replace('.dat', '_predictions.csv')
+
+        results_df = pd.DataFrame({
+            'prediction_encoded': all_predictions,
+            'prediction': decoded_predictions
+        })
+
+        # Add probability columns
+        for i, class_name in enumerate(self.core.class_encoder.encoded_to_class.values()):
+            probs = [prob.get(class_name, 0.0) for prob in all_probabilities]
+            results_df[f'prob_{class_name}'] = probs
+
+        results_df.to_csv(output_file, index=False)
+        print(f"Predictions saved to: {output_file}")
+
+        return decoded_predictions, all_probabilities
+
+class EnhancedDBNNInterface:
+    """
+    Enhanced interface with fixed early stopping and better feature selection
+    """
+
+    def __init__(self, root):
+        self.root = root
+        self.root.title("DBNN Enhanced Interface")
+        self.root.geometry("1200x800")
+
+        self.core = None
+        self.visualizer = None
+        self.current_file = None
+        self.file_type = None
+        self.processing_indicator = None
+        self.processing_frame = None
+        self.processing_animation_id = None
+        self.setup_ui()
+
+    def setup_ui(self):
+        """Setup enhanced UI with better feature selection"""
+        # Main frame with paned window for better layout
+        main_paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
+        main_paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Left frame for controls
+        left_frame = ttk.Frame(main_paned)
+        main_paned.add(left_frame, weight=1)
+
+        # Right frame for console
+        right_frame = ttk.Frame(main_paned)
+        main_paned.add(right_frame, weight=2)
+
+        # File selection
+        file_frame = ttk.LabelFrame(left_frame, text="Data File", padding="5")
+        file_frame.pack(fill='x', pady=5)
+
+        ttk.Label(file_frame, text="Select CSV/DAT file:").grid(row=0, column=0, sticky='w')
+        self.file_path = tk.StringVar()
+        ttk.Entry(file_frame, textvariable=self.file_path, width=50).grid(row=0, column=1, padx=5)
+        ttk.Button(file_frame, text="Browse", command=self.browse_file).grid(row=0, column=2)
+        ttk.Button(file_frame, text="Analyze", command=self.analyze_file).grid(row=0, column=3, padx=5)
+
+        # File info
+        self.file_info = scrolledtext.ScrolledText(file_frame, height=4, width=60)
+        self.file_info.grid(row=1, column=0, columnspan=4, pady=5, sticky='we')
+
+        # Configuration
+        config_frame = ttk.LabelFrame(left_frame, text="Configuration", padding="5")
+        config_frame.pack(fill='x', pady=5)
+
+        # Model name
+        ttk.Label(config_frame, text="Model Name:").grid(row=0, column=0, sticky='w')
+        self.model_name = tk.StringVar(value="my_model")
+        ttk.Entry(config_frame, textvariable=self.model_name, width=20).grid(row=0, column=1, sticky='w', padx=5)
+
+        # Training params in a grid
+        params = [
+            ("Resolution:", "resol", "50"),
+            ("Epochs:", "epochs", "50"),
+            ("Gain:", "gain", "2.0"),
+            ("Margin:", "margin", "0.2"),
+            ("Patience:", "patience", "10")
+        ]
+
+        for i, (label, name, default) in enumerate(params):
+            ttk.Label(config_frame, text=label).grid(row=1, column=i*2, sticky='w', padx=5)
+            var = tk.StringVar(value=default)
+            setattr(self, name, var)
+            ttk.Entry(config_frame, textvariable=var, width=8).grid(row=1, column=i*2+1, sticky='w', padx=5)
+
+        # Enhanced feature selection
+        self.feature_frame = ttk.LabelFrame(left_frame, text="Feature Selection", padding="5")
+
+        # Target selection
+        ttk.Label(self.feature_frame, text="Target Column:").grid(row=0, column=0, sticky='w')
+        self.target_col = tk.StringVar()
+        self.target_combo = ttk.Combobox(self.feature_frame, textvariable=self.target_col, width=20)
+        self.target_combo.grid(row=0, column=1, padx=5, pady=2)
+
+        # Feature selection with checkboxes
+        ttk.Label(self.feature_frame, text="Feature Columns:").grid(row=1, column=0, sticky='nw')
+
+        # Frame for feature checkboxes with scrollbar
+        feature_check_frame = ttk.Frame(self.feature_frame)
+        feature_check_frame.grid(row=1, column=1, padx=5, pady=2, sticky='we')
+
+        # Create a canvas with scrollbar for feature selection
+        self.feature_canvas = tk.Canvas(feature_check_frame, height=120)
+        scrollbar = ttk.Scrollbar(feature_check_frame, orient="vertical", command=self.feature_canvas.yview)
+        self.feature_scroll_frame = ttk.Frame(self.feature_canvas)
+
+        self.feature_scroll_frame.bind(
+            "<Configure>",
+            lambda e: self.feature_canvas.configure(scrollregion=self.feature_canvas.bbox("all"))
+        )
+
+        self.feature_canvas.create_window((0, 0), window=self.feature_scroll_frame, anchor="nw")
+        self.feature_canvas.configure(yscrollcommand=scrollbar.set)
+
+        self.feature_canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        self.feature_vars = {}  # Dictionary to store checkbox variables
+
+        # Selection controls
+        selection_frame = ttk.Frame(self.feature_frame)
+        selection_frame.grid(row=2, column=0, columnspan=2, pady=5)
+
+        ttk.Button(selection_frame, text="Select All", command=self.select_all_features).pack(side='left', padx=2)
+        ttk.Button(selection_frame, text="Deselect All", command=self.deselect_all_features).pack(side='left', padx=2)
+        ttk.Button(selection_frame, text="Invert Selection", command=self.invert_feature_selection).pack(side='left', padx=2)
+
+        # Control buttons
+        button_frame = ttk.Frame(left_frame)
+        button_frame.pack(fill='x', pady=10)
+
+        # Row 1 buttons
+        row1_frame = ttk.Frame(button_frame)
+        row1_frame.pack(fill='x', pady=2)
+
+        ttk.Button(row1_frame, text="Initialize Core", command=self.initialize_core).pack(side='left', padx=2)
+        ttk.Button(row1_frame, text="Train Model", command=self.train_model).pack(side='left', padx=2)
+        ttk.Button(row1_frame, text="Test Model", command=self.test_model).pack(side='left', padx=2)
+
+        # Row 2 buttons
+        row2_frame = ttk.Frame(button_frame)
+        row2_frame.pack(fill='x', pady=2)
+
+        ttk.Button(row2_frame, text="Predict", command=self.predict).pack(side='left', padx=2)
+        ttk.Button(row2_frame, text="Save Model", command=self.save_model).pack(side='left', padx=2)
+        ttk.Button(row2_frame, text="Save Model (JSON)", command=self.save_model_json).pack(side='left', padx=2)
+        ttk.Button(row2_frame, text="Load Model", command=self.load_model).pack(side='left', padx=2)
+        ttk.Button(row2_frame, text="Visualize", command=self.visualize).pack(side='left', padx=2)
+
+        # Debug controls
+        debug_frame = ttk.LabelFrame(left_frame, text="Debug Controls", padding="5")
+        debug_frame.pack(fill='x', pady=5)
+
+        ttk.Button(debug_frame, text="Test Data Load", command=self.test_data_load).pack(side='left', padx=2)
+        ttk.Button(debug_frame, text="Test Encoder", command=self.test_encoder).pack(side='left', padx=2)
+        ttk.Button(debug_frame, text="Test Prediction", command=self.test_single_prediction).pack(side='left', padx=2)
+
+        # Console output on the right
+        console_frame = ttk.LabelFrame(right_frame, text="Training Output", padding="5")
+        console_frame.pack(fill='both', expand=True, pady=5)
+
+        self.console = scrolledtext.ScrolledText(console_frame, height=30, width=80)
+        self.console.pack(fill='both', expand=True)
+
+    def select_all_features(self):
+        """Select all feature checkboxes"""
+        for var in self.feature_vars.values():
+            var.set(True)
+
+    def deselect_all_features(self):
+        """Deselect all feature checkboxes"""
+        for var in self.feature_vars.values():
+            var.set(False)
+
+    def invert_feature_selection(self):
+        """Invert feature selection"""
+        for var in self.feature_vars.values():
+            var.set(not var.get())
+
+    def get_selected_features(self):
+        """Get list of selected feature columns"""
+        return [col for col, var in self.feature_vars.items() if var.get()]
+
+    def log(self, message):
+        """Add message to console"""
+        self.console.insert(tk.END, f"{message}\n")
+        self.console.see(tk.END)
+        self.root.update()
+
+    def browse_file(self):
+        """Browse for data file"""
+        filename = filedialog.askopenfilename(
+            filetypes=[("CSV files", "*.csv"), ("DAT files", "*.dat"), ("All files", "*.*")]
+        )
+        if filename:
+            self.file_path.set(filename)
+
+    def analyze_file(self):
+        """Analyze the selected file"""
+        filename = self.file_path.get()
+        if not filename:
+            messagebox.showerror("Error", "Please select a file first")
+            return
+
+        try:
+            self.show_processing_indicator("Analyzing file...")
+            self.log(f"Analyzing file: {filename}")
+
+            if filename.endswith('.csv'):
+                self.file_type = 'csv'
+                df = pd.read_csv(filename, nrows=100)
+                columns = df.columns.tolist()
+
+                self.file_info.delete(1.0, tk.END)
+                self.file_info.insert(tk.END, f"CSV File: {filename}\n")
+                self.file_info.insert(tk.END, f"Columns ({len(columns)}): {', '.join(columns)}\n")
+                self.file_info.insert(tk.END, f"Sample data: {len(df)} rows\n")
+                self.file_info.insert(tk.END, f"First row sample: {df.iloc[0].tolist()}\n")
+
+                # Setup target selection - ADD "None" OPTION FOR PREDICTION
+                target_options = ['None'] + columns  # Add "None" as first option
+                self.target_combo['values'] = target_options
+                self.target_col.set('None')  # Default to no target for prediction
+
+                # Clear previous feature checkboxes
+                for widget in self.feature_scroll_frame.winfo_children():
+                    widget.destroy()
+                self.feature_vars.clear()
+
+                # Create checkboxes for ALL columns as potential features
+                # User can decide which to include/exclude
+                for i, col in enumerate(columns):
+                    var = tk.BooleanVar(value=True)  # Default all to selected
+                    self.feature_vars[col] = var
+                    cb = ttk.Checkbutton(self.feature_scroll_frame, text=col, variable=var)
+                    cb.grid(row=i, column=0, sticky='w', padx=2, pady=1)
+
+                # Update canvas scrollregion
+                self.feature_scroll_frame.update_idletasks()
+                self.feature_canvas.configure(scrollregion=self.feature_canvas.bbox("all"))
+
+                self.feature_frame.pack(fill='x', pady=5)
+
+            elif filename.endswith('.dat'):
+                self.file_type = 'dat'
+                with open(filename, 'r') as f:
+                    lines = [line.strip() for line in f.readlines() if line.strip()][:100]
+
+                self.file_info.delete(1.0, tk.END)
+                self.file_info.insert(tk.END, f"DAT File: {filename}\n")
+                self.file_info.insert(tk.END, f"Total lines: {len(lines)}\n")
+                if lines:
+                    values = lines[0].split()
+                    self.file_info.insert(tk.END, f"Columns: {len(values)} (assuming all are features for prediction)\n")
+
+                # Don't show feature selection for DAT files in prediction mode
+                if self.feature_frame.winfo_ismapped():
+                    self.feature_frame.pack_forget()
+
+            else:
+                messagebox.showerror("Error", "Unsupported file format")
+                self.hide_processing_indicator()
+                return
+
+            self.current_file = filename
+            self.log("File analysis completed")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to analyze file: {e}")
+            self.log(f"Error: {e}")
+            import traceback
+            self.log(traceback.format_exc())
+        finally:
+            self.hide_processing_indicator()
+
+    def show_processing_indicator(self, message="Processing..."):
+        """Show a spinning color wheel processing indicator"""
+        # If already showing, just update the message
+        if self.processing_frame and self.processing_frame.winfo_exists():
+            for widget in self.processing_frame.winfo_children():
+                if isinstance(widget, ttk.Label):
+                    widget.config(text=message)
+            self.processing_frame.deiconify()
+            self.start_animation()
+            return
+
+        # Create new processing window
+        self.processing_frame = tk.Toplevel(self.root)
+        self.processing_frame.title("Processing")
+        self.processing_frame.geometry("300x150")
+        self.processing_frame.transient(self.root)
+        self.processing_frame.grab_set()
+
+        # Make it modal
+        self.processing_frame.focus_set()
+        self.processing_frame.grab_set()
+
+        # Center the window
+        self.processing_frame.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - 300) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - 150) // 2
+        self.processing_frame.geometry(f"+{x}+{y}")
+
+        # Processing message
+        msg_label = ttk.Label(self.processing_frame, text=message, font=('Arial', 10))
+        msg_label.pack(pady=10)
+
+        # Canvas for spinning wheel
+        canvas_size = 60
+        self.processing_indicator = tk.Canvas(
+            self.processing_frame,
+            width=canvas_size,
+            height=canvas_size,
+            bg=self.processing_frame.cget('bg'),
+            highlightthickness=0
+        )
+        self.processing_indicator.pack(pady=10)
+
+        # Draw initial wheel
+        self.animation_angle = 0
+        self.colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7']
+        self.draw_spinning_wheel()
+
+        # Start animation
+        self.start_animation()
+
+        # Force update
+        self.processing_frame.update()
+
+    def hide_processing_indicator(self):
+        """Hide the processing indicator"""
+        self.stop_animation()
+
+        if self.processing_frame and self.processing_frame.winfo_exists():
+            try:
+                self.processing_frame.grab_release()
+                self.processing_frame.destroy()
+            except tk.TclError:
+                pass  # Window already destroyed
+
+        self.processing_frame = None
+        self.processing_indicator = None
+
+        # Ensure main window gets focus back
+        self.root.focus_set()
+
+    def draw_spinning_wheel(self):
+        """Draw the spinning color wheel"""
+        if not self.processing_indicator:
+            return
+
+        self.processing_indicator.delete("all")
+        canvas_size = 60
+        center = canvas_size // 2
+        radius = 20
+
+        # Draw spinning wheel with multiple colored segments
+        segment_angle = 360 / len(self.colors)
+        for i, color in enumerate(self.colors):
+            start_angle = self.animation_angle + (i * segment_angle)
+            end_angle = start_angle + segment_angle
+
+            self.processing_indicator.create_arc(
+                center - radius, center - radius,
+                center + radius, center + radius,
+                start=start_angle, extent=segment_angle - 5,  # Small gap between segments
+                fill=color, outline="", width=0
+            )
+
+    def start_animation(self):
+        """Start the spinning animation"""
+        if self.processing_frame and self.processing_frame.winfo_exists():
+            self.animation_angle = (self.animation_angle + 15) % 360
+            self.draw_spinning_wheel()
+            self.processing_animation_id = self.root.after(50, self.start_animation)
+        else:
+            self.stop_animation()
+
+    def stop_animation(self):
+        """Stop the spinning animation"""
+        if self.processing_animation_id:
+            self.root.after_cancel(self.processing_animation_id)
+            self.processing_animation_id = None
+
+    def test_data_load(self):
+        """Test data loading functionality"""
+        if not self.current_file:
+            messagebox.showerror("Error", "Please select a file first")
+            return
+
+        try:
+            self.log("=== Testing Data Load ===")
+
+            if self.file_type == 'csv':
+                target_column = self.target_col.get()
+                feature_columns = self.get_selected_features()
+
+                features_batches, targets_batches, feature_columns_used, original_targets_batches = self.core.load_data(
+                    self.current_file, target_column, feature_columns, batch_size=1000
+                )
+            else:
+                features_batches, targets_batches, feature_columns_used, original_targets_batches = self.core.load_data(
+                    self.current_file, batch_size=1000
+                )
+
+            total_samples = sum(len(batch) for batch in features_batches)
+            self.log(f"Loaded {total_samples} samples in {len(features_batches)} batches")
+            self.log(f"Feature columns: {feature_columns_used}")
+
+            if features_batches:
+                first_batch = features_batches[0]
+                self.log(f"First batch shape: {first_batch.shape}")
+                self.log(f"First sample features: {first_batch[0][:5]}...")
+                self.log(f"First sample target: {original_targets_batches[0][0]}")
+
+            self.log("=== Data Load Test Completed ===")
+
+        except Exception as e:
+            self.log(f"Data load test failed: {e}")
+            self.log(traceback.format_exc())
+
+    def test_encoder(self):
+        """Test class encoder functionality"""
+        if not self.current_file:
+            messagebox.showerror("Error", "Please select a file first")
+            return
+
+        try:
+            self.log("=== Testing Encoder ===")
+
+            if self.file_type == 'csv':
+                target_column = self.target_col.get()
+                feature_columns = self.get_selected_features()
+
+                features_batches, targets_batches, _, original_targets_batches = self.core.load_data(
+                    self.current_file, target_column, feature_columns, batch_size=1000
+                )
+            else:
+                features_batches, targets_batches, _, original_targets_batches = self.core.load_data(
+                    self.current_file, batch_size=1000
+                )
+
+            all_original_targets = np.concatenate(original_targets_batches) if original_targets_batches else np.array([])
+            self.core.class_encoder.fit(all_original_targets)
+
+            self.log(f"Encoder fitted with {len(self.core.class_encoder.get_encoded_classes())} classes")
+
+            if len(all_original_targets) > 0:
+                sample_targets = all_original_targets[:5]
+                encoded = self.core.class_encoder.transform(sample_targets)
+                decoded = self.core.class_encoder.inverse_transform(encoded)
+
+                self.log("Encoding test:")
+                for orig, enc, dec in zip(sample_targets, encoded, decoded):
+                    self.log(f"  {orig} -> {enc} -> {dec}")
+
+            self.log("=== Encoder Test Completed ===")
+
+        except Exception as e:
+            self.log(f"Encoder test failed: {e}")
+            self.log(traceback.format_exc())
+
+    def test_single_prediction(self):
+        """Test single prediction"""
+        if not self.core or not hasattr(self.core, 'is_trained') or not self.core.is_trained:
+            messagebox.showerror("Error", "Please train a model first")
+            return
+
+        try:
+            self.log("=== Testing Single Prediction ===")
+
+            if hasattr(self.core, 'innodes') and self.core.innodes > 0:
+                test_sample = np.random.randn(self.core.innodes)
+                self.log(f"Test sample shape: {test_sample.shape}")
+
+                predictions, probabilities = self.core.predict_batch(test_sample.reshape(1, -1))
+
+                self.log(f"Prediction: {predictions[0]}")
+                self.log(f"Probabilities: {probabilities[0]}")
+            else:
+                self.log("No network architecture information available")
+
+            self.log("=== Single Prediction Test Completed ===")
+
+        except Exception as e:
+            self.log(f"Single prediction test failed: {e}")
+            self.log(traceback.format_exc())
+
+    def initialize_core(self):
+        """Initialize DBNN core"""
+        try:
+            config = {
+                'resol': int(self.resol.get()),
+                'epochs': int(self.epochs.get()),
+                'gain': float(self.gain.get()),
+                'margin': float(self.margin.get()),
+                'patience': int(self.patience.get())
             }
 
-            with open(self._get_weights_filename(), 'w') as f:
-                json.dump(weights_dict, f, indent=4)
+            self.core = DBNNCore(config)
+            self.visualizer = DBNNVisualizer()
+            self.core.attach_visualizer(self.visualizer)
+
+            self.log("DBNN core initialized successfully")
+            self.log(f"Config: {config}")
 
         except Exception as e:
-            print(f"Warning: Could not save weights: {e}")
+            messagebox.showerror("Error", f"Failed to initialize core: {e}")
+            self.log(f"Error: {e}")
+            self.log(traceback.format_exc())
 
-    def _load_best_weights(self):
-        """Load weights in compatible format"""
-        weights_file = self._get_weights_filename()
+    def train_model(self):
+        """Train model with fixed early stopping and automatic model saving"""
+        if not self.core:
+            messagebox.showerror("Error", "Please initialize core first")
+            return
 
-        if os.path.exists(weights_file):
-            try:
-                with open(weights_file, 'r') as f:
-                    weights_dict = json.load(f)
+        if not self.current_file:
+            messagebox.showerror("Error", "Please select a training file first")
+            return
 
-                if weights_dict.get('version', 1) >= 7:
-                    self.best_W = np.array(weights_dict['weights'])
-                    self.best_accuracy = weights_dict.get('best_accuracy', 0.0)
-                    print("✅ Loaded enhanced weights")
-                else:
-                    print("⚠️ Old weights format, starting fresh")
-
-            except Exception as e:
-                print(f"Warning: Could not load weights: {e}")
-
-    def _save_categorical_encoders(self):
-        """Save categorical encoders"""
-        encoders_file = self._get_encoders_filename()
         try:
-            with open(encoders_file, 'wb') as f:
-                pickle.dump(self.categorical_encoders, f)
-        except Exception as e:
-            print(f"Error saving encoders: {e}")
+            self.show_processing_indicator("Starting training process...")
+            self.log("=== Starting Training ===")
 
-    def _load_categorical_encoders(self):
-        """Load categorical encoders"""
-        encoders_file = self._get_encoders_filename()
-        if os.path.exists(encoders_file):
-            try:
-                with open(encoders_file, 'rb') as f:
-                    self.categorical_encoders = pickle.load(f)
-            except Exception as e:
-                print(f"Error loading encoders: {e}")
+            # Load data
+            if self.file_type == 'csv':
+                target_column = self.target_col.get()
+                feature_columns = self.get_selected_features()
 
-    def _get_dataset_fingerprint(self, df: pd.DataFrame) -> str:
-        """Generate dataset fingerprint"""
-        import hashlib
-        col_info = [(col, str(df[col].dtype)) for col in df.columns if col != self.target_column]
-        col_info.sort()
-        fingerprint_str = ''.join([f"{col}_{dtype}" for col, dtype in col_info]
-        return hashlib.md5(fingerprint_str.encode()).hexdigest()
+                # VALIDATION: Check if target is selected for training
+                if target_column == 'None' or not target_column:
+                    messagebox.showerror("Error",
+                        "For training, you must select a target column.\n"
+                        "Please select a target column from the dropdown (not 'None').")
+                    self.hide_processing_indicator()
+                    return False
 
-    def _validate_feature_consistency(self, df: pd.DataFrame) -> bool:
-        """Validate feature consistency"""
-        return True  # Simplified for compatibility
+                if not feature_columns:
+                    messagebox.showerror("Error", "Please select at least one feature column")
+                    self.hide_processing_indicator()
+                    return False
 
-    def _setup_keyboard_control(self):
-        """Setup keyboard listener"""
-        self.skip_training = False
-        # Implementation similar to original
+                # Check if target column is in feature columns (common mistake)
+                if target_column in feature_columns:
+                    messagebox.showerror("Error",
+                        f"Target column '{target_column}' cannot be in feature columns.\n"
+                        f"Please deselect it from the feature checkboxes.")
+                    self.hide_processing_indicator()
+                    return False
 
-    def _cleanup_keyboard_control(self):
-        """Cleanup keyboard listener"""
-        if hasattr(self, 'listener'):
-            self.listener.stop()
-
-    def _plot_training_history(self, training_errors, test_errors, training_accuracies, test_accuracies):
-        """Plot training history"""
-        plt.figure(figsize=(12, 5))
-
-        plt.subplot(1, 2, 1)
-        plt.plot(training_errors, label='Training Error')
-        if test_errors:
-            plt.plot(test_errors, label='Test Error')
-        plt.xlabel('Epoch')
-        plt.ylabel('Error')
-        plt.title('Training and Test Error')
-        plt.legend()
-        plt.grid(True)
-
-        plt.subplot(1, 2, 2)
-        plt.plot(training_accuracies, label='Training Accuracy')
-        if test_accuracies:
-            plt.plot(test_accuracies, label='Test Accuracy')
-        plt.xlabel('Epoch')
-        plt.ylabel('Accuracy')
-        plt.title('Training and Test Accuracy')
-        plt.legend()
-        plt.grid(True)
-
-        plt.tight_layout()
-        plt.savefig(f'{self.dataset_name}_training_history.png')
-        plt.close()
-
-    def generate_samples(self, n_samples: int = 100, class_id: int = None):
-        """Generate samples - maintain interface"""
-        print("Sample generation not implemented in enhanced version")
-        return None, None
-
-
-def main():
-    """Main function to run the GPUDBNN model - EXACTLY THE SAME AS ORIGINAL"""
-    available_datasets = DatasetConfig.get_available_datasets()
-
-    if available_datasets:
-        print("Available datasets:")
-        for i, dataset in enumerate(available_datasets, 1):
-            print(f"{i}. {dataset}")
-
-        choice = input(f"\nSelect a dataset (1-{len(available_datasets)}): ").strip()
-        try:
-            choice_idx = int(choice) - 1
-            if 0 <= choice_idx < len(available_datasets):
-                dataset_name = available_datasets[choice_idx]
+                self.log(f"Training with: target={target_column}, features={feature_columns}")
+                features_batches, targets_batches, feature_columns_used, original_targets_batches = self.core.load_data(
+                    self.current_file, target_column, feature_columns, batch_size=5000
+                )
             else:
-                print("Invalid selection, using default dataset name")
-                dataset_name = input("Enter dataset name: ").strip()
-        except ValueError:
-            print("Invalid input, using default dataset name")
-            dataset_name = input("Enter dataset name: ").strip()
-    else:
-        print("No existing dataset configurations found.")
-        dataset_name = input("Enter dataset name: ").strip()
+                self.log("Training with DAT file")
+                features_batches, targets_batches, feature_columns_used, original_targets_batches = self.core.load_data(
+                    self.current_file, batch_size=5000
+                )
+                # For DAT files, set default feature and target info
+                target_column = "last_column"
+                feature_columns = feature_columns_used
 
-    repair_choice = input("Repair configuration file before proceeding? (y/N): ").strip().lower()
-    if repair_choice in ['y', 'yes']:
-        if DatasetConfig.repair_config(dataset_name):
-            print("✅ Configuration repaired successfully")
-        else:
-            print("❌ Configuration repair failed")
+            if not features_batches:
+                self.log("ERROR: No data loaded!")
+                self.hide_processing_indicator()
+                return False
 
-    model = GPUDBNN(dataset_name)
-    print(f"Train only: {model.train_only}")
-    print(f"Train enabled: {model.train_enabled}")
-    print(f"Predict enabled: {model.predict_enabled}")
+            total_samples = sum(len(batch) for batch in features_batches)
+            self.log(f"Loaded {total_samples} samples")
 
-    if model.train_enabled:
-        model.train()
+            # Fit encoder and setup network
+            all_original_targets = np.concatenate(original_targets_batches) if original_targets_batches else np.array([])
+            self.core.class_encoder.fit(all_original_targets)
 
-    if model.predict_enabled:
-        output_file = input("Enter output filename for predictions (or press Enter for default): ").strip()
+            encoded_classes = self.core.class_encoder.get_encoded_classes()
+            self.log(f"Network: {len(feature_columns_used)} inputs, {len(encoded_classes)} outputs")
+            self.log(f"Feature columns used: {feature_columns_used}")
+            self.log(f"Encoded classes: {encoded_classes}")
+
+            # Initialize arrays
+            innodes = len(feature_columns_used)
+            outnodes = len(encoded_classes)
+            resol = int(self.resol.get())
+
+            # Validate dimensions before initializing arrays
+            if innodes <= 0:
+                self.log("ERROR: No input features detected!")
+                self.hide_processing_indicator()
+                return False
+            if outnodes <= 0:
+                self.log("ERROR: No output classes detected!")
+                self.hide_processing_indicator()
+                return False
+
+            self.core.initialize_arrays(innodes, resol, outnodes)
+
+            # Setup dmyclass
+            self.core.dmyclass[0] = float(self.margin.get())
+            for i, encoded_val in enumerate(encoded_classes, 1):
+                self.core.dmyclass[i] = float(encoded_val)
+
+            # Encode targets
+            encoded_targets_batches = []
+            for batch in original_targets_batches:
+                encoded_batch = self.core.class_encoder.transform(batch)
+                encoded_targets_batches.append(encoded_batch)
+
+            # Initialize training
+            self.log("Initializing training parameters...")
+            omax, omin = self.core.initialize_training(features_batches, encoded_targets_batches, resol)
+
+            # Build initial network
+            self.log("Building initial network...")
+            total_processed = 0
+            for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
+                processed = self.core.process_training_batch(features_batch, targets_batch)
+                total_processed += processed
+                if batch_idx % 10 == 0:
+                    self.log(f"  Processed {total_processed}/{total_samples} samples")
+                    # Update the processing indicator to show progress
+                    self.show_processing_indicator(f"Building network... {total_processed}/{total_samples}")
+
+            self.log(f"✅ Initial network built with {total_processed} samples")
+
+            # Training with FIXED early stopping
+            gain = float(self.gain.get())
+            max_epochs = int(self.epochs.get())
+            patience = int(self.patience.get())
+
+            self.log(f"Training: {max_epochs} epochs, gain={gain}, patience={patience}")
+
+            best_accuracy = 0.0
+            best_weights = None
+            best_round = 0
+            patience_counter = 0
+
+            for rnd in range(max_epochs + 1):
+                if rnd == 0:
+                    # Initial evaluation
+                    current_accuracy, correct, _ = self.core.evaluate(features_batches, encoded_targets_batches)
+                    self.log(f"Epoch {rnd:3d}: Initial Accuracy = {current_accuracy:.2f}% ({correct}/{total_samples})")
+                    best_accuracy = current_accuracy
+                    best_weights = self.core.anti_wts.copy()
+                    best_round = rnd
+                    continue
+
+                # Update processing indicator for training progress
+                if rnd % 5 == 0:
+                    self.show_processing_indicator(f"Training... Epoch {rnd}/{max_epochs}")
+
+                # Training epoch
+                self.core.train_epoch(features_batches, encoded_targets_batches, gain)
+
+                # Evaluate
+                current_accuracy, correct, predictions = self.core.evaluate(features_batches, encoded_targets_batches)
+
+                # FIXED: Always update best weights when we get a new best accuracy
+                if current_accuracy > best_accuracy:
+                    best_accuracy = current_accuracy
+                    best_weights = self.core.anti_wts.copy()
+                    best_round = rnd
+                    patience_counter = 0
+                    self.log(f"Epoch {rnd:3d}: Accuracy = {current_accuracy:.2f}% → NEW BEST")
+                else:
+                    patience_counter += 1
+                    improvement = current_accuracy - best_accuracy
+                    if improvement > 0:
+                        self.log(f"Epoch {rnd:3d}: Accuracy = {current_accuracy:.2f}% (+{improvement:.2f}%)")
+                    else:
+                        self.log(f"Epoch {rnd:3d}: Accuracy = {current_accuracy:.2f}%")
+
+                # Visualization
+                if self.visualizer and rnd % 5 == 0:
+                    sample_size = min(1000, total_samples)
+                    sample_features = np.vstack([batch[:100] for batch in features_batches])[:sample_size]
+                    sample_targets = np.concatenate([batch[:100] for batch in encoded_targets_batches])[:sample_size]
+                    sample_predictions, _ = self.core.predict_batch(sample_features)
+                    self.visualizer.capture_training_snapshot(
+                        sample_features, sample_targets, self.core.anti_wts,
+                        sample_predictions, current_accuracy, rnd
+                    )
+
+                # Early stopping
+                if patience_counter >= patience:
+                    self.log(f"Early stopping at epoch {rnd} (no improvement for {patience} epochs)")
+                    break
+
+            # Restore best weights
+            if best_weights is not None:
+                self.core.anti_wts = best_weights
+                self.log(f"Restored best weights from epoch {best_round}")
+
+            self.core.is_trained = True
+            self.core.best_accuracy = best_accuracy  # Store best accuracy in core
+
+            # AUTOMATIC MODEL SAVING AFTER TRAINING
+            self.log("=== Saving Trained Model ===")
+            self.show_processing_indicator("Saving trained model...")
+            model_file = f"{self.model_name.get()}.bin"  # Default to binary format
+
+            # Ensure model directory exists
+            model_dir = os.path.dirname(os.path.abspath(model_file))
+            if model_dir and not os.path.exists(model_dir):
+                os.makedirs(model_dir, exist_ok=True)
+                self.log(f"Created model directory: {model_dir}")
+
+            # Save the model using core's save method WITH FEATURE INFORMATION
+            if self.file_type == 'csv':
+                # Pass feature information for CSV files
+                save_success = self.core.save_model(model_file, feature_columns, target_column, use_json=False)
+                self.log(f"✅ Saved model with feature configuration: {len(feature_columns)} features, target: {target_column}")
+            else:
+                # For DAT files, save without specific feature info
+                save_success = self.core.save_model(model_file, use_json=False)
+                self.log("✅ Saved model (DAT file - no specific feature configuration)")
+
+            if save_success:
+                self.log(f"✅ Model successfully saved to: {model_file}")
+            else:
+                self.log("❌ Failed to save model!")
+
+            # Test the model immediately after training
+            self.log("Testing trained model...")
+            try:
+                if hasattr(self.core, 'innodes') and self.core.innodes > 0:
+                    test_sample = np.random.randn(self.core.innodes)
+                    predictions, probabilities = self.core.predict_batch(test_sample.reshape(1, -1))
+                    self.log(f"✅ Post-training test - Prediction: {predictions[0]}")
+                    self.log("✅ Model is ready for predictions")
+            except Exception as e:
+                self.log(f"❌ Post-training test failed: {e}")
+
+            self.log(f"=== Training Completed ===")
+            self.hide_processing_indicator()
+            self.log(f"Best accuracy: {best_accuracy:.2f}% at epoch {best_round}")
+            self.log(f"Final model: {self.core.innodes} inputs, {self.core.outnodes} outputs")
+            self.log(f"Feature columns used: {feature_columns_used}")
+            self.log(f"Target column: {target_column if self.file_type == 'csv' else 'last column (DAT)'}")
+            self.log(f"Classes: {len(encoded_classes)} - {encoded_classes}")
+
+            return True
+
+        except Exception as e:
+            self.hide_processing_indicator()
+            messagebox.showerror("Error", f"Training failed: {e}")
+            self.log(f"Error: {e}")
+            self.log(traceback.format_exc())
+            return False
+
+    def test_model(self):
+        """Test the model on separate data"""
+        if not self.core or not getattr(self.core, 'is_trained', False):
+            messagebox.showerror("Error", "No trained model available")
+            return
+
+        test_file = filedialog.askopenfilename(
+            title="Select Test File",
+            filetypes=[("CSV files", "*.csv"), ("DAT files", "*.dat")]
+        )
+
+        if test_file:
+            try:
+                self.log(f"=== Testing Model on: {test_file} ===")
+
+                # Load test data
+                if test_file.endswith('.csv') and hasattr(self, 'target_col') and self.target_col.get():
+                    target_column = self.target_col.get()
+                    feature_columns = self.get_selected_features()
+                    features_batches, targets_batches, _, original_targets_batches = self.core.load_data(
+                        test_file, target_column, feature_columns
+                    )
+                else:
+                    features_batches, targets_batches, _, original_targets_batches = self.core.load_data(test_file)
+
+                if not features_batches:
+                    self.log("No test data loaded")
+                    return
+
+                # Encode targets
+                encoded_targets_batches = []
+                for batch in original_targets_batches:
+                    encoded_batch = self.core.class_encoder.transform(batch)
+                    encoded_targets_batches.append(encoded_batch)
+
+                # Evaluate
+                accuracy, correct_predictions, predictions = self.core.evaluate(features_batches, encoded_targets_batches)
+                total_samples = sum(len(batch) for batch in features_batches)
+
+                self.log(f"Test Results:")
+                self.log(f"  Accuracy: {accuracy:.2f}%")
+                self.log(f"  Correct: {correct_predictions}/{total_samples}")
+                self.log(f"  Error Rate: {100-accuracy:.2f}%")
+
+                # Show confusion matrix-like summary
+                unique_preds = np.unique(predictions)
+                self.log(f"  Prediction distribution: {len(unique_preds)} unique values")
+
+                self.log("=== Testing Completed ===")
+
+            except Exception as e:
+                self.log(f"Test error: {e}")
+                self.log(traceback.format_exc())
+
+    def predict(self):
+        """Make predictions using resource-aware optimization"""
+        if not self.core or not getattr(self.core, 'is_trained', False):
+            messagebox.showerror("Error", "No trained model available")
+            return
+
+        predict_file = filedialog.askopenfilename(
+            title="Select Prediction File",
+            filetypes=[("CSV files", "*.csv"), ("DAT files", "*.dat"), ("All files", "*.*")]
+        )
+
+        if not predict_file:
+            return
+
+        output_file = filedialog.asksaveasfilename(
+            title="Save Predictions As",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")]
+        )
+
         if not output_file:
-            output_file = f'{dataset_name}_predictions.csv'
+            return
 
-        predictions = model.predict(output_file=output_file)
-        if predictions is not None:
-            print(f"✅ Successfully generated {len(predictions)} predictions")
+        try:
+            self.show_processing_indicator("Analyzing system resources...")
 
-    if model.gen_samples_enabled:
-        samples, class_ids = model.generate_samples(n_samples=100)
-        if samples is not None:
-            print(f"Generated {len(samples)} synthetic samples")
-            samples_df = pd.DataFrame(samples)
-            samples_df['class'] = class_ids
-            samples_df.to_csv(f'{dataset_name}_synthetic_samples.csv', index=False)
-            print(f"Samples saved to {dataset_name}_synthetic_samples.csv")
+            # Detect resources and calculate optimal parameters
+            resources = self.core.detect_system_resources()
+            opt_params = self.core.calculate_optimal_parameters(resources, "prediction")
 
+            self.log("=== RESOURCE-AWARE PREDICTION ===")
+            self.log(f"System: {resources['cpu_cores']} CPU cores, {resources['system_memory_gb']:.1f}GB RAM")
+            if resources['has_gpu']:
+                self.log(f"GPU: {resources.get('gpu_name', 'Unknown')} with {resources['gpu_memory_gb']:.1f}GB")
+            self.log(f"Optimization: {opt_params['optimization_level']} mode")
+            self.log(f"Batch size: {opt_params['batch_size']}, Concurrent: {opt_params['max_concurrent_batches']}")
 
+            # Get training feature columns
+            if hasattr(self.core, 'feature_columns') and self.core.feature_columns:
+                training_features = self.core.feature_columns
+                self.log(f"Using feature columns: {training_features}")
+            else:
+                self.log("❌ No feature configuration found")
+                self.hide_processing_indicator()
+                return
+
+            # Load data with optimized batch size
+            self.show_processing_indicator("Loading data with optimized parameters...")
+
+            if predict_file.endswith('.csv'):
+                features_batches, _, feature_columns_used, _ = self.core.load_data(
+                    predict_file, None, training_features, batch_size=opt_params['batch_size']
+                )
+            else:
+                features_batches, _, feature_columns_used, _ = self.core.load_data(
+                    predict_file, batch_size=opt_params['batch_size']
+                )
+
+            if not features_batches:
+                self.log("❌ No prediction data loaded")
+                self.hide_processing_indicator()
+                return
+
+            total_batches = len(features_batches)
+            total_samples = sum(len(batch) for batch in features_batches)
+            self.log(f"Loaded {total_samples} samples in {total_batches} batches")
+
+            # Initialize output file
+            self._initialize_output_file(output_file, predict_file)
+
+            # Initialize performance monitoring
+            import time
+            start_time = time.time()
+            performance_stats = {
+                'batch_times': [],
+                'memory_usage': [],
+                'samples_processed': 0
+            }
+
+            # Process batches with resource-aware optimization
+            all_predictions = []
+            all_probabilities = []
+            batch_prediction_times = []
+
+            for batch_idx, features_batch in enumerate(features_batches):
+                batch_start = time.time()
+
+                # Adaptive progress updates based on system load
+                if self._should_update_progress(batch_idx, total_batches, performance_stats):
+                    memory_usage = self._get_memory_usage()
+                    elapsed = time.time() - start_time
+                    rate = performance_stats['samples_processed'] / elapsed if elapsed > 0 else 0
+
+                    self.show_processing_indicator(
+                        f"Batch {batch_idx+1}/{total_batches}\n"
+                        f"Samples: {performance_stats['samples_processed']}/{total_samples}\n"
+                        f"Rate: {rate:.1f} samples/sec\n"
+                        f"Memory: {memory_usage}\n"
+                        f"Mode: {opt_params['optimization_level']}"
+                    )
+
+                # Process batch
+                predictions, probabilities = self.core.predict_batch_optimized(
+                    features_batch,
+                    clear_cache_every=opt_params['clear_cache_every']
+                )
+
+                batch_size = len(predictions)
+                all_predictions.extend(predictions)
+                all_probabilities.extend(probabilities)
+                performance_stats['samples_processed'] += batch_size
+
+                # Monitor batch performance
+                batch_time = time.time() - batch_start
+                batch_prediction_times.append(batch_time)
+                performance_stats['batch_times'].append(batch_time)
+
+                # Adaptive resource management
+                self._adaptive_resource_management(
+                    batch_idx, batch_prediction_times, performance_stats, opt_params
+                )
+
+                # Periodic disk writing and memory cleanup
+                if (batch_idx % opt_params['write_to_disk_every'] == 0 or
+                    batch_idx == total_batches - 1):
+
+                    if all_predictions:
+                        self._write_predictions_batch(
+                            output_file, all_predictions, all_probabilities,
+                            performance_stats['samples_processed'] - len(all_predictions)
+                        )
+                        # Clear memory
+                        all_predictions.clear()
+                        all_probabilities.clear()
+
+                        # Adaptive garbage collection
+                        if self._should_collect_garbage(batch_idx, performance_stats):
+                            import gc
+                            gc.collect()
+
+            # Final processing and summary
+            total_time = time.time() - start_time
+            self._print_performance_summary(performance_stats, total_samples, total_time)
+
+            self.log(f"✅ Predictions saved to: {output_file}")
+            self.hide_processing_indicator()
+
+        except Exception as e:
+            self.hide_processing_indicator()
+            self.log(f"❌ Prediction error: {e}")
+            self.log(traceback.format_exc())
+
+    def _clean_console_memory(self):
+        """Clean console memory to prevent buildup"""
+        try:
+            current_text = self.console.get(1.0, tk.END)
+            lines = current_text.split('\n')
+
+            # Keep only last 1000 lines to prevent memory issues
+            if len(lines) > 1000:
+                cleaned_text = '\n'.join(lines[-1000:])
+                self.console.delete(1.0, tk.END)
+                self.console.insert(tk.END, cleaned_text)
+
+            # Force Tkinter to update and free memory
+            self.console.update_idletasks()
+
+        except Exception as e:
+            print(f"Console cleanup warning: {e}")
+
+    def _initialize_output_file(self, output_file, predict_file):
+        """Initialize the output file with proper headers"""
+        try:
+            import pandas as pd
+
+            # Try to preserve original CSV structure if it's a CSV file
+            if predict_file.endswith('.csv'):
+                try:
+                    # Read just the header from the original file
+                    original_df = pd.read_csv(predict_file, nrows=0)
+                    original_columns = original_df.columns.tolist()
+
+                    # Create output dataframe with original columns + prediction columns
+                    output_columns = original_columns + [
+                        'prediction',
+                        'prediction_encoded',
+                        'confidence'
+                    ]
+
+                    # Create empty dataframe with the correct structure
+                    output_df = pd.DataFrame(columns=output_columns)
+
+                    # Write header to file
+                    output_df.to_csv(output_file, index=False)
+                    self.log(f"✅ Output file initialized with {len(original_columns)} original columns")
+
+                except Exception as e:
+                    self.log(f"⚠️ Could not preserve original CSV structure: {e}")
+                    # Fallback: create basic output structure
+                    self._create_basic_output_file(output_file)
+            else:
+                # For DAT files or when CSV loading fails, use basic structure
+                self._create_basic_output_file(output_file)
+
+        except Exception as e:
+            self.log(f"⚠️ Error initializing output file: {e}")
+            # Final fallback
+            self._create_basic_output_file(output_file)
+
+    def _create_basic_output_file(self, output_file):
+        """Create a basic output file structure"""
+        try:
+            import pandas as pd
+
+            # Basic columns for prediction output
+            basic_columns = [
+                'prediction',
+                'prediction_encoded',
+                'confidence'
+            ]
+
+            # Create empty dataframe
+            output_df = pd.DataFrame(columns=basic_columns)
+
+            # Write to file
+            output_df.to_csv(output_file, index=False)
+            self.log("✅ Created basic output file structure")
+
+        except Exception as e:
+            self.log(f"❌ Failed to create output file: {e}")
+            raise
+
+    def _write_predictions_batch(self, output_file, predictions, probabilities, start_index):
+        """Write a batch of predictions to file efficiently"""
+        try:
+            if not predictions:
+                return
+
+            # Decode predictions
+            decoded_predictions = self.core.class_encoder.inverse_transform(predictions)
+
+            # Create batch dataframe
+            batch_data = {
+                'prediction': decoded_predictions,
+                'prediction_encoded': predictions,
+                'confidence': [max(prob.values()) if prob else 0.0 for prob in probabilities]
+            }
+
+            # Add probability columns
+            if probabilities and len(probabilities) > 0:
+                class_names = list(probabilities[0].keys())
+                for class_name in class_names:
+                    batch_data[f'prob_{class_name}'] = [prob.get(class_name, 0.0) for prob in probabilities]
+
+            import pandas as pd
+            batch_df = pd.DataFrame(batch_data)
+
+            # Append to file
+            with open(output_file, 'a', newline='') as f:
+                batch_df.to_csv(f, header=False, index=False)
+
+            # Store last predictions for summary (limited size)
+            self._last_predictions = predictions[-1000:]  # Keep only last 1000 for summary
+
+        except Exception as e:
+            self.log(f"⚠️ Error writing prediction batch: {e}")
+
+    def _get_memory_usage(self):
+        """Get current memory usage"""
+        try:
+            import psutil
+            import os
+            process = psutil.Process(os.getpid())
+            memory_mb = process.memory_info().rss / 1024 / 1024
+            return f"{memory_mb:.1f}MB"
+        except ImportError:
+            return "N/A"
+
+    def _should_update_progress(self, batch_idx, total_batches, stats):
+        """Determine when to update progress based on system load"""
+        if batch_idx == 0:
+            return True
+
+        # Update more frequently at start, less frequently as we progress
+        if batch_idx < 10:
+            return batch_idx % 2 == 0
+        elif batch_idx < 50:
+            return batch_idx % 5 == 0
+        else:
+            return batch_idx % 10 == 0
+
+    def _adaptive_resource_management(self, batch_idx, batch_times, stats, opt_params):
+        """Adaptively manage resources based on performance"""
+        if len(batch_times) < 5:
+            return
+
+        # Detect performance degradation
+        recent_times = batch_times[-5:]
+        avg_recent = sum(recent_times) / len(recent_times)
+        avg_previous = sum(batch_times[:-5]) / len(batch_times[:-5]) if len(batch_times) > 5 else avg_recent
+
+        if avg_recent > avg_previous * 1.3:  # 30% slowdown
+            self.log(f"⚠️ Performance degradation detected at batch {batch_idx}")
+            self.log(f"   Recent: {avg_recent:.3f}s, Previous: {avg_previous:.3f}s")
+
+            # Suggest resource adjustment
+            memory_usage = self._get_memory_usage()
+            self.log(f"   Current memory: {memory_usage}")
+
+    def _should_collect_garbage(self, batch_idx, stats):
+        """Determine when to run garbage collection"""
+        if batch_idx < 10:
+            return batch_idx % 5 == 0
+        else:
+            return batch_idx % 20 == 0
+
+    def _print_performance_summary(self, stats, total_samples, total_time):
+        """Print detailed performance summary"""
+        samples_per_second = total_samples / total_time if total_time > 0 else 0
+
+        self.log("\n" + "="*50)
+        self.log("PERFORMANCE SUMMARY")
+        self.log("="*50)
+        self.log(f"Total samples: {total_samples:,}")
+        self.log(f"Total time: {total_time:.2f} seconds")
+        self.log(f"Processing rate: {samples_per_second:.1f} samples/second")
+
+        if stats['batch_times']:
+            avg_batch_time = sum(stats['batch_times']) / len(stats['batch_times'])
+            self.log(f"Average batch time: {avg_batch_time:.3f} seconds")
+
+            # Show performance distribution
+            fast_batches = len([t for t in stats['batch_times'] if t < avg_batch_time * 0.8])
+            slow_batches = len([t for t in stats['batch_times'] if t > avg_batch_time * 1.2])
+            self.log(f"Fast batches: {fast_batches}, Slow batches: {slow_batches}")
+
+        self.log("="*50)
+
+    def predict_batch_optimized(self, features_batch, clear_cache_every=100):
+        """Optimized batch prediction with periodic cache clearing"""
+        predictions = []
+        probabilities = []
+
+        # Use static arrays to avoid repeated allocations
+        if not hasattr(self, '_prediction_vects'):
+            self._prediction_vects = np.zeros(self.innodes + self.outnodes + 2)
+
+        for sample_idx in range(len(features_batch)):
+            # Reuse the same vector to avoid memory allocation
+            vects = self._prediction_vects
+            vects.fill(0)  # Reset vector
+
+            for i in range(1, self.innodes + 1):
+                vects[i] = features_batch[sample_idx, i-1]
+
+            # Compute class probabilities
+            classval = compute_class_probabilities_numba(
+                vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
+                self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes
+            )
+
+            # Find predicted class
+            kmax = 1
+            cmax = 0.0
+            for k in range(1, self.outnodes + 1):
+                if classval[k] > cmax:
+                    cmax = classval[k]
+                    kmax = k
+
+            predicted = self.dmyclass[kmax]
+            predictions.append(predicted)
+
+            # Store probabilities
+            prob_dict = {}
+            for k in range(1, self.outnodes + 1):
+                class_val = self.dmyclass[k]
+                if self.class_encoder.is_fitted:
+                    class_name = self.class_encoder.encoded_to_class.get(class_val, f"Class_{k}")
+                else:
+                    class_name = f"Class_{k}"
+                prob_dict[class_name] = float(classval[k])
+
+            probabilities.append(prob_dict)
+
+            # Clear cache periodically to prevent memory buildup
+            if sample_idx % clear_cache_every == 0:
+                import gc
+                gc.collect()
+
+        return predictions, probabilities
+
+    def save_model(self, model_path=None):
+        """Save the current model to file in binary format by default"""
+        if not self.core or not getattr(self.core, 'is_trained', False):
+            messagebox.showerror("Error", "No trained model to save")
+            return
+
+        # If no model_path provided, ask the user
+        if model_path is None:
+            model_path = filedialog.asksaveasfilename(
+                title="Save Model As Binary",
+                defaultextension=".bin",
+                filetypes=[("Binary files", "*.bin"), ("Gzip files", "*.gz"), ("All files", "*.*")]
+            )
+
+        if not model_path:
+            return  # User cancelled
+
+        try:
+            # Ensure .bin extension for binary format
+            if not (model_path.endswith('.bin') or model_path.endswith('.gz')):
+                model_path += '.bin'
+
+            # Get feature information from UI
+            feature_columns = []
+            target_column = ""
+
+            if hasattr(self, 'get_selected_features'):
+                feature_columns = self.get_selected_features()
+            if hasattr(self, 'target_col'):
+                target_column = self.target_col.get()
+
+            success = self.core.save_model(
+                model_path,
+                feature_columns=feature_columns,
+                target_column=target_column,
+                use_json=False  # Binary format by default
+            )
+
+            if success:
+                self.log(f"✅ Model saved in binary format: {model_path}")
+                self.log(f"Model info: {self.core.innodes} inputs, {self.core.outnodes} outputs")
+                self.log(f"Best accuracy: {getattr(self.core, 'best_accuracy', 0.0):.2f}%")
+            else:
+                self.log("❌ Failed to save model")
+
+        except Exception as e:
+            self.log(f"Save error: {e}")
+            self.log(traceback.format_exc())
+
+    def save_model_json(self):
+        """Save model in JSON format"""
+        if not self.core or not getattr(self.core, 'is_trained', False):
+            messagebox.showerror("Error", "No trained model to save")
+            return
+
+        model_path = filedialog.asksaveasfilename(
+            title="Save Model As JSON",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+
+        if not model_path:
+            return  # User cancelled
+
+        try:
+            # Ensure .json extension
+            if not model_path.endswith('.json'):
+                model_path += '.json'
+
+            # Get feature information from UI
+            feature_columns = []
+            target_column = ""
+
+            if hasattr(self, 'get_selected_features'):
+                feature_columns = self.get_selected_features()
+            if hasattr(self, 'target_col'):
+                target_column = self.target_col.get()
+
+            success = self.core.save_model(
+                model_path,
+                feature_columns=feature_columns,
+                target_column=target_column,
+                use_json=True
+            )
+
+            if success:
+                self.log(f"✅ Model saved in JSON format: {model_path}")
+                messagebox.showinfo("Success", f"Model saved in JSON format:\n{model_path}")
+            else:
+                self.log("❌ Failed to save model in JSON format")
+                messagebox.showerror("Error", "Failed to save model in JSON format")
+
+        except Exception as e:
+            self.log(f"JSON save error: {e}")
+            messagebox.showerror("Error", f"Failed to save JSON model: {e}")
+
+    def load_model(self, model_path=None):
+        """Load a previously saved model with proper error handling"""
+        # If no model_path provided, ask the user to select one
+        if model_path is None:
+            model_path = filedialog.askopenfilename(
+                title="Select Model File",
+                filetypes=[("Model files", "*.json *.bin *.gz"), ("JSON files", "*.json"), ("Binary files", "*.bin *.gz"), ("All files", "*.*")]
+            )
+
+        if model_path:
+            try:
+                self.show_processing_indicator("Loading model...")
+                if not self.core:
+                    self.initialize_core()
+
+                self.core.load_model(model_path)
+                self.model_name.set(os.path.splitext(os.path.basename(model_path))[0])
+
+                # Verify the model was loaded correctly
+                if hasattr(self.core, 'innodes') and self.core.innodes > 0:
+                    self.log(f"Model loaded successfully")
+                    self.log(f"Model architecture: {self.core.innodes} inputs, {self.core.outnodes} outputs")
+                    self.log(f"Configuration: resolution={self.core.config.get('resol', 'N/A')}")
+
+                    # Update UI with loaded model info
+                    if hasattr(self.core, 'class_encoder') and self.core.class_encoder.is_fitted:
+                        classes = list(self.core.class_encoder.encoded_to_class.values())
+                        self.log(f"Classes: {len(classes)} - {classes[:5]}{'...' if len(classes) > 5 else ''}")
+
+                    # Test if model is functional
+                    self.log("Testing model functionality...")
+                    try:
+                        if self.core.innodes > 0:
+                            test_sample = np.random.randn(self.core.innodes)
+                            predictions, probabilities = self.core.predict_batch(test_sample.reshape(1, -1))
+                            self.log(f"Model test: Prediction = {predictions[0]}")
+                    except Exception as e:
+                        self.log(f"Model test failed: {e}")
+                else:
+                    self.log("ERROR: Model failed to load properly - invalid dimensions")
+
+                self.log("=== Model Loading Completed ===")
+                self.hide_processing_indicator()
+
+            except Exception as e:
+                self.log(f"Load error: {e}")
+                self.log(traceback.format_exc())
+                self.hide_processing_indicator()
+
+    def visualize(self):
+        """Generate visualizations"""
+        if not self.visualizer or not hasattr(self.visualizer, 'training_history') or not self.visualizer.training_history:
+            messagebox.showerror("Error", "No training history available for visualization")
+            return
+
+        try:
+            self.log("=== Generating Visualizations ===")
+
+            base_name = self.model_name.get()
+            viz_count = 0
+
+            # Generate accuracy plot
+            try:
+                accuracy_fig = self.visualizer.generate_accuracy_plot()
+                if accuracy_fig:
+                    accuracy_file = f"{base_name}_accuracy.html"
+                    accuracy_fig.write_html(accuracy_file)
+                    self.log(f"✓ Accuracy plot: {accuracy_file}")
+                    viz_count += 1
+            except Exception as e:
+                self.log(f"✗ Accuracy plot failed: {e}")
+
+            # Generate feature space plot
+            try:
+                if len(self.visualizer.training_history) > 0:
+                    feature_fig = self.visualizer.generate_feature_space_plot(-1)
+                    if feature_fig:
+                        feature_file = f"{base_name}_features.html"
+                        feature_fig.write_html(feature_file)
+                        self.log(f"✓ Feature space: {feature_file}")
+                        viz_count += 1
+            except Exception as e:
+                self.log(f"✗ Feature space failed: {e}")
+
+            # Generate weight distribution plot
+            try:
+                weight_fig = self.visualizer.generate_weight_distribution_plot(-1)
+                if weight_fig:
+                    weight_file = f"{base_name}_weights.html"
+                    weight_fig.write_html(weight_file)
+                    self.log(f"✓ Weight distribution: {weight_file}")
+                    viz_count += 1
+            except Exception as e:
+                self.log(f"✗ Weight distribution failed: {e}")
+
+            # Generate dashboard
+            try:
+                dashboard_file = self.visualizer.create_training_dashboard(f"{base_name}_dashboard.html")
+                if dashboard_file:
+                    self.log(f"✓ Training dashboard: {dashboard_file}")
+                    viz_count += 1
+            except Exception as e:
+                self.log(f"✗ Dashboard failed: {e}")
+
+            if viz_count > 0:
+                self.log(f"=== Visualization Completed ===")
+                self.log(f"Generated {viz_count} visualization files")
+                self.log("Open the .html files in your web browser to view interactive plots")
+            else:
+                self.log("No visualizations could be generated")
+
+        except Exception as e:
+            self.log(f"Visualization error: {e}")
+            self.log(traceback.format_exc())
+
+class DBNNCommandLine:
+    """Command Line Interface for DBNN with binary format support"""
+
+    def __init__(self):
+        self.core = DBNNCore()
+        self.core.set_log_callback(self._log_message)
+        self.current_model_path = None
+        self.visualizer = DBNNVisualizer()
+        self.core.attach_visualizer(self.visualizer)
+
+    def _log_message(self, message: str):
+        """Log message to console"""
+        print(f"[DBNN] {message}")
+
+    def show_detailed_help(self):
+        """Display comprehensive help information"""
+        help_text = """
+DBNN (Difference Boosting Bayesian Neural Network) - Command Line Interface
+================================================================================
+
+DBNN is a powerful neural network implementation with Bayesian learning and
+difference boosting capabilities. This interface provides full access to all
+DBNN features through command line operations.
+
+USAGE PATTERNS:
+===============
+
+1. TRAINING A NEW MODEL:
+   python runDBNN_cmd.py --train <training_file> [options]
+
+2. USING EXISTING MODEL:
+   python runDBNN_cmd.py --model <model_file> --predict <data_file>
+
+3. EVALUATION:
+   python runDBNN_cmd.py --model <model_file> --evaluate <test_file>
+
+4. INTERACTIVE MODE:
+   python runDBNN_cmd.py --interactive
+
+DETAILED OPTIONS:
+=================
+
+DATA INPUT OPTIONS:
+  --train FILE           Training data file (CSV or DAT format)
+  --test FILE            Test data file for validation during training
+  --predict FILE         Data file for making predictions
+  --evaluate FILE        Data file for model evaluation
+
+CSV-SPECIFIC OPTIONS (required for CSV files):
+  --target COLUMN        Target column name for CSV files
+  --features COL1 COL2   Feature column names (space-separated)
+  --format FORMAT        Input file format: csv or dat (default: csv)
+
+MODEL OPTIONS:
+  --model FILE           Load existing model file (.json, .bin, or .gz)
+  --save-model FILE      Save trained model to specified path
+  --model-format FORMAT  Model save format: binary or json (default: binary)
+  --model-dir DIR        Model directory (default: Model/)
+
+TRAINING PARAMETERS:
+  --resol INTEGER        Resolution parameter (default: 100)
+  --gain FLOAT           Gain parameter for weight updates (default: 2.0)
+  --margin FLOAT         Classification margin (default: 0.2)
+  --patience INTEGER     Early stopping patience (default: 10)
+  --epochs INTEGER       Maximum training epochs (default: 100)
+  --min-improvement FLOAT Minimum accuracy improvement for early stopping (default: 0.1)
+
+OUTPUT OPTIONS:
+  --output FILE          Output file for predictions
+  --verbose, -v          Verbose output with detailed progress
+  --quiet, -q            Quiet mode (minimal output)
+
+OTHER OPTIONS:
+  --interactive, -i      Start interactive mode
+  --help, -h             Show this help message
+
+FILE FORMATS SUPPORTED:
+=======================
+
+CSV FILES:
+  - First row must contain column headers
+  - Specify target column with --target
+  - Specify feature columns with --features (or uses all except target)
+  - Example: --train data.csv --target class --features feature1 feature2 feature3
+
+DAT FILES (Legacy Format):
+  - Space-separated values, no headers
+  - Last column is assumed to be target
+  - All other columns are features
+  - Example: --train data.dat --format dat
+
+MODEL FORMATS:
+==============
+
+BINARY FORMAT (Default - Recommended):
+  - File extensions: .bin or .gz
+  - Smaller file size
+  - Faster save/load operations
+  - Better performance for large models
+  - Example: --save-model my_model.bin --model-format binary
+
+JSON FORMAT (Optional):
+  - File extension: .json
+  - Human-readable
+  - Good for debugging and inspection
+  - Example: --save-model my_model.json --model-format json
+
+DETAILED EXAMPLES:
+==================
+
+1. BASIC TRAINING WITH CSV:
+   python runDBNN_cmd.py --train data/train.csv --test data/test.csv
+                         --target species
+                         --features sepal_length sepal_width petal_length petal_width
+                         --resol 150 --gain 2.5 --epochs 200
+
+2. TRAINING WITH DAT FILE:
+   python runDBNN_cmd.py --train data/train.dat --format dat
+                         --resol 100 --patience 15
+
+3. PREDICTIONS WITH EXISTING MODEL:
+   python runDBNN_cmd.py --model Model/iris_model.bin
+                         --predict data/new_data.csv
+                         --target species
+                         --output predictions.csv
+
+4. EVALUATE MODEL PERFORMANCE:
+   python runDBNN_cmd.py --model Model/iris_model.bin
+                         --evaluate data/test_set.csv
+                         --target species
+
+5. TRAINING WITH CUSTOM PARAMETERS:
+   python runDBNN_cmd.py --train data/train.csv --target outcome
+                         --resol 200 --gain 3.0 --margin 0.3
+                         --patience 20 --epochs 300
+                         --min-improvement 0.05
+                         --save-model my_custom_model.bin
+
+6. VERBOSE TRAINING WITH PROGRESS UPDATES:
+   python runDBNN_cmd.py --train large_dataset.csv --target label
+                         --features f1 f2 f3 f4 f5
+                         --verbose --epochs 500
+
+7. QUIET MODE FOR BATCH PROCESSING:
+   python runDBNN_cmd.py --model production_model.bin
+                         --predict batch_data.csv
+                         --output batch_predictions.csv
+                         --quiet
+
+PERFORMANCE TIPS:
+=================
+
+- Use binary format (.bin) for production models (faster and smaller)
+- For large datasets, use --quiet mode to reduce output overhead
+- Adjust --resol based on dataset complexity (higher = more precise but slower)
+- Use --patience to prevent overfitting with early stopping
+- Start with default parameters and tune based on validation results
+
+TROUBLESHOOTING:
+================
+
+Common Issues and Solutions:
+
+1. "Target column not found":
+   - Check column names with: head -1 your_file.csv
+   - Ensure --target matches exactly (case-sensitive)
+
+2. "No training data loaded":
+   - Verify file path is correct
+   - Check file format matches --format option
+   - Ensure CSV files have proper headers
+
+3. "Model failed to load":
+   - Check file exists and is readable
+   - Verify model format (binary vs JSON)
+   - Ensure model was saved with same DBNN version
+
+4. "Feature count mismatch":
+   - Training and prediction must use same features
+   - Use --features to explicitly specify feature columns
+
+5. "Memory issues with large datasets":
+   - Reduce --resol parameter
+   - Use smaller batch sizes in interactive mode
+   - Process data in chunks
+
+For additional help or to report issues, please check the documentation
+or contact support.
+
+INTERACTIVE MODE FEATURES:
+==========================
+
+Interactive mode provides a menu-driven interface with:
+- Step-by-step model training
+- Real-time configuration
+- Immediate prediction testing
+- Model inspection and saving
+- No need to remember command syntax
+
+Start interactive mode with: python runDBNN_cmd.py --interactive
+"""
+        print(help_text)
+
+    def parse_arguments(self):
+        """Parse command line arguments"""
+        import argparse
+
+        parser = argparse.ArgumentParser(
+            description='DBNN (Difference Boosting Bayesian Neural Network) - Command Line Interface',
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            add_help=False
+        )
+
+        # Data input options
+        data_group = parser.add_argument_group('Data Input Options')
+        data_group.add_argument('--train', type=str, help='Training data file (CSV or DAT)')
+        data_group.add_argument('--test', type=str, help='Test data file (CSV or DAT)')
+        data_group.add_argument('--predict', type=str, help='Data file for prediction')
+        data_group.add_argument('--evaluate', type=str, help='Data file for model evaluation')
+
+        # CSV-specific options
+        csv_group = parser.add_argument_group('CSV Options')
+        csv_group.add_argument('--target', type=str, help='Target column name for CSV files')
+        csv_group.add_argument('--features', nargs='+', help='Feature column names for CSV files')
+        csv_group.add_argument('--format', choices=['csv', 'dat'], default='csv',
+                              help='Input file format (default: csv)')
+
+        # Model options
+        model_group = parser.add_argument_group('Model Options')
+        model_group.add_argument('--model', type=str, help='Load existing model file')
+        model_group.add_argument('--save-model', type=str, help='Save model to specified path')
+        model_group.add_argument('--model-format', choices=['binary', 'json'], default='binary',
+                               help='Model save format (default: binary)')
+        model_group.add_argument('--model-dir', type=str, default='Model',
+                               help='Model directory (default: Model)')
+
+        # Training parameters
+        param_group = parser.add_argument_group('Training Parameters')
+        param_group.add_argument('--resol', type=int, default=100,
+                                help='Resolution parameter (default: 100)')
+        param_group.add_argument('--gain', type=float, default=2.0,
+                                help='Gain parameter (default: 2.0)')
+        param_group.add_argument('--margin', type=float, default=0.2,
+                                help='Classification margin (default: 0.2)')
+        param_group.add_argument('--patience', type=int, default=10,
+                                help='Early stopping patience (default: 10)')
+        param_group.add_argument('--epochs', type=int, default=100,
+                                help='Maximum training epochs (default: 100)')
+        param_group.add_argument('--min-improvement', type=float, default=0.1,
+                                help='Minimum improvement for early stopping (default: 0.1)')
+
+        # Output options
+        output_group = parser.add_argument_group('Output Options')
+        output_group.add_argument('--output', type=str, help='Output file for predictions')
+        output_group.add_argument('--verbose', '-v', action='store_true',
+                                 help='Verbose output')
+        output_group.add_argument('--quiet', '-q', action='store_true',
+                                 help='Quiet mode (minimal output)')
+
+        # Interactive mode and help
+        other_group = parser.add_argument_group('Other Options')
+        other_group.add_argument('--interactive', '-i', action='store_true',
+                          help='Start interactive mode')
+        other_group.add_argument('--help', '-h', action='store_true',
+                          help='Show detailed help message')
+
+        return parser.parse_args()
+
+    def validate_arguments(self, args):
+        """Validate command line arguments and provide helpful error messages"""
+        import sys
+
+        errors = []
+        warnings = []
+
+        # Check for no arguments or help request
+        if len(sys.argv) == 1 or args.help:
+            self.show_detailed_help()
+            return False, []
+
+        # Check for interactive mode
+        if args.interactive:
+            return True, []  # Interactive mode doesn't need validation
+
+        # Validate training arguments
+        if args.train:
+            if not os.path.exists(args.train):
+                errors.append(f"Training file not found: {args.train}")
+
+            if args.format == 'csv' and not args.target:
+                errors.append("--target parameter required for CSV training files")
+
+        # Validate prediction/evaluation arguments
+        if (args.predict or args.evaluate) and not args.model and not args.train:
+            errors.append("For prediction or evaluation, either --model or --train must be specified")
+
+        if args.predict and not os.path.exists(args.predict):
+            errors.append(f"Prediction file not found: {args.predict}")
+
+        if args.evaluate and not os.path.exists(args.evaluate):
+            errors.append(f"Evaluation file not found: {args.evaluate}")
+
+        # Validate model arguments
+        if args.model and not os.path.exists(args.model):
+            errors.append(f"Model file not found: {args.model}")
+
+        # Check for incompatible options
+        if args.verbose and args.quiet:
+            warnings.append("Both --verbose and --quiet specified, using --verbose")
+            args.quiet = False
+
+        # Check for missing required combinations
+        if args.train and args.format == 'csv' and not args.target:
+            errors.append("CSV training requires --target parameter")
+
+        if (args.predict or args.evaluate) and args.format == 'csv' and not args.target:
+            warnings.append("CSV prediction/evaluation without --target: assuming no target column")
+
+        # Show warnings
+        for warning in warnings:
+            print(f"⚠️  Warning: {warning}")
+
+        # Show errors and return
+        if errors:
+            print("❌ Argument errors:")
+            for error in errors:
+                print(f"   - {error}")
+            print("\n💡 Use --help for detailed usage information")
+            return False, errors
+
+        return True, []
+
+    def setup_model_config(self, args):
+        """Setup model configuration from command line arguments"""
+        config = {
+            'resol': args.resol,
+            'gain': args.gain,
+            'margin': args.margin,
+            'patience': args.patience,
+            'epochs': args.epochs,
+            'min_improvement': args.min_improvement
+        }
+        self.core.config.update(config)
+
+    def load_model(self, model_path: str):
+        """Load model from file (auto-detects format)"""
+        print(f"Loading model from: {model_path}")
+        if self.core.load_model(model_path):
+            self.current_model_path = model_path
+            print("✅ Model loaded successfully")
+            return True
+        else:
+            print("❌ Failed to load model")
+            return False
+
+    def save_model(self, model_path: str, use_json=False):
+        """Save model to file in specified format"""
+        # Ensure model directory exists
+        model_dir = os.path.dirname(os.path.abspath(model_path))
+        if model_dir and not os.path.exists(model_dir):
+            os.makedirs(model_dir, exist_ok=True)
+
+        # Add appropriate extension if not present
+        if use_json and not model_path.endswith('.json'):
+            model_path += '.json'
+        elif not use_json and not (model_path.endswith('.bin') or model_path.endswith('.gz')):
+            model_path += '.bin'
+
+        print(f"Saving model to: {model_path}")
+        if self.core.save_model(model_path, use_json=use_json):
+            self.current_model_path = model_path
+            format_name = "JSON" if use_json else "binary"
+            print(f"✅ Model saved successfully in {format_name} format")
+            return True
+        else:
+            print("❌ Failed to save model")
+            return False
+
+    def train_model(self, args):
+        """Train model with specified parameters"""
+        print("🚀 Starting DBNN Training...")
+        print(f"Training file: {args.train}")
+        if args.test:
+            print(f"Test file: {args.test}")
+        print(f"Parameters: resol={args.resol}, gain={args.gain}, margin={args.margin}")
+        print(f"Early stopping: patience={args.patience}, min_improvement={args.min_improvement}%")
+
+        use_csv = (args.format == 'csv')
+        if use_csv and not args.target:
+            print("❌ Error: --target parameter required for CSV format")
+            return False
+
+        import time
+        start_time = time.time()
+
+        try:
+            success = self.core.train_with_early_stopping(
+                train_file=args.train,
+                test_file=args.test,
+                use_csv=use_csv,
+                target_column=args.target,
+                feature_columns=args.features
+            )
+
+            training_time = time.time() - start_time
+            print(f"⏱️  Training completed in {training_time:.2f} seconds")
+
+            if success and args.save_model:
+                use_json = (args.model_format == 'json')
+                self.save_model(args.save_model, use_json=use_json)
+
+            return success
+
+        except Exception as e:
+            print(f"❌ Training failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def predict_data(self, args):
+        """Make predictions on data - enhanced for prediction mode"""
+        if not self.core.is_trained and not args.model:
+            print("❌ Error: No trained model available. Use --train to train a model or --model to load one.")
+            return False
+
+        print(f"🔮 Making predictions on: {args.predict}")
+
+        try:
+            # Get training feature columns
+            if hasattr(self.core, 'feature_columns') and self.core.feature_columns:
+                training_features = self.core.feature_columns
+                print(f"Using feature columns from trained model: {training_features}")
+            else:
+                print("❌ No feature configuration found in trained model")
+                return False
+
+            # For prediction mode, use None for target and training features
+            target_column = None  # No target in prediction mode
+            feature_columns = training_features  # Use training features
+
+            # Load prediction data
+            features_batches, _, feature_columns_used, _ = self.core.load_data(
+                args.predict,
+                target_column=target_column,
+                feature_columns=feature_columns,
+                batch_size=10000
+            )
+
+            if not features_batches:
+                print("❌ No data loaded for prediction")
+                return False
+
+            # Verify feature dimensions
+            if features_batches and len(features_batches[0]) > 0:
+                actual_feature_count = features_batches[0].shape[1]
+                expected_feature_count = len(training_features)
+
+                if actual_feature_count != expected_feature_count:
+                    print(f"❌ Feature dimension mismatch!")
+                    print(f"   Expected: {expected_feature_count} features")
+                    print(f"   Got: {actual_feature_count} features")
+                    return False
+                else:
+                    print(f"✅ Feature dimensions match: {actual_feature_count} features")
+
+            all_predictions = []
+            all_probabilities = []
+
+            for batch_idx, features_batch in enumerate(features_batches):
+                if args.verbose:
+                    print(f"Processing batch {batch_idx + 1}/{len(features_batches)}...")
+                predictions, probabilities = self.core.predict_batch(features_batch)
+                all_predictions.extend(predictions)
+                all_probabilities.extend(probabilities)
+
+            # Decode predictions
+            decoded_predictions = self.core.class_encoder.inverse_transform(all_predictions)
+
+            # Save predictions to file if requested
+            if args.output:
+                self.save_predictions(args.output, features_batches, decoded_predictions, all_predictions, all_probabilities)
+
+            # Print summary
+            print(f"✅ Made {len(all_predictions)} predictions")
+
+            # Show prediction distribution
+            from collections import Counter
+            prediction_counts = Counter(decoded_predictions)
+            print("\nPrediction distribution:")
+            for pred, count in prediction_counts.most_common():
+                percentage = (count / len(decoded_predictions)) * 100
+                print(f"  {pred}: {count} ({percentage:.1f}%)")
+
+            return True
+
+        except Exception as e:
+            print(f"❌ Prediction failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def save_predictions(self, output_file: str, features_batches, decoded_predictions, encoded_predictions, probabilities):
+        """Save predictions to output file"""
+        try:
+            with open(output_file, 'w', newline='') as f:
+                writer = csv.writer(f)
+
+                # Write header
+                headers = ['Prediction', 'Prediction_Encoded', 'Confidence']
+
+                # Add probability columns for each class
+                if probabilities and len(probabilities) > 0:
+                    class_names = list(probabilities[0].keys())
+                    headers.extend([f'Prob_{cls}' for cls in class_names])
+
+                writer.writerow(headers)
+
+                # Write data
+                sample_idx = 0
+                for batch_idx, features_batch in enumerate(features_batches):
+                    for i in range(len(features_batch)):
+                        if sample_idx >= len(decoded_predictions):
+                            break
+
+                        row = [
+                            decoded_predictions[sample_idx],
+                            encoded_predictions[sample_idx],
+                            max(probabilities[sample_idx].values()) if probabilities[sample_idx] else 0.0
+                        ]
+
+                        # Add probabilities for each class
+                        if probabilities and sample_idx < len(probabilities):
+                            for class_name in list(probabilities[sample_idx].keys()):
+                                row.append(probabilities[sample_idx].get(class_name, 0.0))
+
+                        writer.writerow(row)
+                        sample_idx += 1
+
+            print(f"✅ Predictions saved to: {output_file}")
+
+        except Exception as e:
+            print(f"❌ Error saving predictions: {e}")
+
+    def evaluate_model(self, args):
+        """Evaluate model on test data"""
+        if not self.core.is_trained and not args.model:
+            print("❌ Error: No trained model available. Use --train to train a model or --model to load one.")
+            return False
+
+        print(f"📊 Evaluating model on: {args.evaluate}")
+
+        try:
+            # Load test data
+            features_batches, targets_batches, feature_columns, original_targets_batches = self.core.load_data(
+                args.evaluate,
+                target_column=args.target if args.format == 'csv' else None,
+                feature_columns=args.features,
+                batch_size=10000
+            )
+
+            if not features_batches:
+                print("❌ No test data loaded")
+                return False
+
+            # Encode targets
+            encoded_targets_batches = []
+            for batch in original_targets_batches:
+                encoded_batch = self.core.class_encoder.transform(batch)
+                encoded_targets_batches.append(encoded_batch)
+
+            # Evaluate
+            accuracy, correct_predictions, predictions = self.core.evaluate(features_batches, encoded_targets_batches)
+            total_samples = sum(len(batch) for batch in features_batches)
+
+            print(f"✅ Evaluation completed:")
+            print(f"   Accuracy: {accuracy:.2f}%")
+            print(f"   Correct: {correct_predictions}/{total_samples}")
+            print(f"   Error Rate: {100-accuracy:.2f}%")
+
+            return True
+
+        except Exception as e:
+            print(f"❌ Evaluation failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def show_configuration(self):
+        """Display current configuration"""
+        config = self.core.config
+
+        print("\nCurrent Configuration:")
+        print("-" * 30)
+
+        for key, value in config.items():
+            print(f"{key:20}: {value}")
+
+        if self.core.is_trained:
+            print(f"{'Model trained':20}: Yes")
+            if hasattr(self.core, 'innodes'):
+                print(f"{'Input nodes':20}: {self.core.innodes}")
+            if hasattr(self.core, 'outnodes'):
+                print(f"{'Output nodes':20}: {self.core.outnodes}")
+            if hasattr(self.core, 'best_accuracy'):
+                print(f"{'Best accuracy':20}: {self.core.best_accuracy:.2f}%")
+        else:
+            print(f"{'Model trained':20}: No")
+
+    def interactive_mode(self):
+        """Start interactive mode"""
+        print("\n" + "="*60)
+        print("DBNN Interactive Mode")
+        print("="*60)
+        print("Available commands:")
+        print("  train    - Train a new model")
+        print("  load     - Load existing model")
+        print("  save     - Save current model")
+        print("  predict  - Make predictions")
+        print("  evaluate - Evaluate model")
+        print("  config   - Show configuration")
+        print("  quit     - Exit interactive mode")
+        print("="*60)
+
+        while True:
+            try:
+                command = input("\nDBNN> ").strip().lower()
+
+                if command == 'quit' or command == 'exit':
+                    break
+                elif command == 'train':
+                    self.interactive_train()
+                elif command == 'load':
+                    self.interactive_load()
+                elif command == 'save':
+                    self.interactive_save()
+                elif command == 'predict':
+                    self.interactive_predict()
+                elif command == 'evaluate':
+                    self.interactive_evaluate()
+                elif command == 'config':
+                    self.show_configuration()
+                elif command == '':
+                    continue
+                else:
+                    print("❌ Unknown command. Type 'quit' to exit.")
+
+            except KeyboardInterrupt:
+                print("\n👋 Goodbye!")
+                break
+            except Exception as e:
+                print(f"❌ Error: {e}")
+
+    def interactive_train(self):
+        """Interactive training mode"""
+        print("\n🎯 Training Mode")
+
+        train_file = input("Training file path: ").strip()
+        if not train_file or not os.path.exists(train_file):
+            print("❌ Invalid file path")
+            return
+
+        test_file = input("Test file path (optional): ").strip()
+        if test_file and not os.path.exists(test_file):
+            print("❌ Invalid test file path")
+            return
+
+        file_format = input("File format (csv/dat) [csv]: ").strip().lower()
+        if not file_format:
+            file_format = 'csv'
+
+        target_col = ""
+        feature_cols = []
+
+        if file_format == 'csv':
+            target_col = input("Target column name: ").strip()
+            if not target_col:
+                print("❌ Target column required for CSV")
+                return
+
+            features_input = input("Feature columns (comma-separated, empty for auto): ").strip()
+            if features_input:
+                feature_cols = [col.strip() for col in features_input.split(',')]
+
+        # Get training parameters
+        resol = input(f"Resolution [100]: ").strip()
+        resol = int(resol) if resol else 100
+
+        gain = input(f"Gain [2.0]: ").strip()
+        gain = float(gain) if gain else 2.0
+
+        margin = input(f"Margin [0.2]: ").strip()
+        margin = float(margin) if margin else 0.2
+
+        patience = input(f"Patience [10]: ").strip()
+        patience = int(patience) if patience else 10
+
+        epochs = input(f"Epochs [100]: ").strip()
+        epochs = int(epochs) if epochs else 100
+
+        # Create args-like object
+        class Args:
+            pass
+
+        args = Args()
+        args.train = train_file
+        args.test = test_file if test_file else None
+        args.format = file_format
+        args.target = target_col
+        args.features = feature_cols
+        args.resol = resol
+        args.gain = gain
+        args.margin = margin
+        args.patience = patience
+        args.epochs = epochs
+        args.min_improvement = 0.1
+        args.save_model = None
+        args.model_format = 'binary'
+        args.verbose = True
+
+        self.setup_model_config(args)
+        self.train_model(args)
+
+    def interactive_load(self):
+        """Interactive model loading"""
+        print("\n📥 Load Model")
+
+        model_path = input("Model file path: ").strip()
+        if not model_path:
+            print("❌ No path provided")
+            return
+
+        self.load_model(model_path)
+
+    def interactive_save(self):
+        """Interactive model saving"""
+        if not self.core.is_trained:
+            print("❌ No trained model to save")
+            return
+
+        print("\n💾 Save Model")
+
+        format_choice = input("Save format (binary/json) [binary]: ").strip().lower()
+        use_json = (format_choice == 'json')
+
+        default_ext = '.json' if use_json else '.bin'
+        model_path = input(f"Model file path [default: Model/model{default_ext}]: ").strip()
+        if not model_path:
+            model_path = os.path.join('Model', f'model{default_ext}')
+
+        self.save_model(model_path, use_json=use_json)
+
+    def interactive_predict(self):
+        """Interactive prediction"""
+        if not self.core.is_trained:
+            print("❌ No trained model available")
+            return
+
+        print("\n🔮 Prediction Mode")
+
+        predict_file = input("Prediction file path: ").strip()
+        if not predict_file or not os.path.exists(predict_file):
+            print("❌ Invalid file path")
+            return
+
+        file_format = input("File format (csv/dat) [csv]: ").strip().lower()
+        if not file_format:
+            file_format = 'csv'
+
+        target_col = ""
+        feature_cols = []
+
+        if file_format == 'csv':
+            target_col = input("Target column name (optional): ").strip()
+            features_input = input("Feature columns (comma-separated, empty for auto): ").strip()
+            if features_input:
+                feature_cols = [col.strip() for col in features_input.split(',')]
+
+        output_file = input("Output file (optional): ").strip()
+
+        # Create args-like object
+        class Args:
+            pass
+
+        args = Args()
+        args.predict = predict_file
+        args.format = file_format
+        args.target = target_col
+        args.features = feature_cols
+        args.output = output_file
+        args.model = self.current_model_path
+        args.verbose = True
+
+        self.predict_data(args)
+
+    def interactive_evaluate(self):
+        """Interactive evaluation"""
+        if not self.core.is_trained:
+            print("❌ No trained model available")
+            return
+
+        print("\n📊 Evaluation Mode")
+
+        eval_file = input("Evaluation file path: ").strip()
+        if not eval_file or not os.path.exists(eval_file):
+            print("❌ Invalid file path")
+            return
+
+        file_format = input("File format (csv/dat) [csv]: ").strip().lower()
+        if not file_format:
+            file_format = 'csv'
+
+        target_col = ""
+        feature_cols = []
+
+        if file_format == 'csv':
+            target_col = input("Target column name: ").strip()
+            if not target_col:
+                print("❌ Target column required for CSV evaluation")
+                return
+
+            features_input = input("Feature columns (comma-separated, empty for auto): ").strip()
+            if features_input:
+                feature_cols = [col.strip() for col in features_input.split(',')]
+
+        # Create args-like object
+        class Args:
+            pass
+
+        args = Args()
+        args.evaluate = eval_file
+        args.format = file_format
+        args.target = target_col
+        args.features = feature_cols
+
+        self.evaluate_model(args)
+
+    def run(self):
+        """Main execution function"""
+        import sys
+        import time
+
+        args = self.parse_arguments()
+
+        # Validate arguments
+        is_valid, errors = self.validate_arguments(args)
+        if not is_valid:
+            if errors:
+                sys.exit(1)
+            else:
+                sys.exit(0)  # Help was shown, exit normally
+
+        # Set up model configuration
+        self.setup_model_config(args)
+
+        # Handle different modes
+        if args.interactive:
+            self.interactive_mode()
+            return
+
+        # Load model if specified
+        if args.model:
+            if not self.load_model(args.model):
+                sys.exit(1)
+
+        # Perform requested actions
+        success = True
+
+        if args.train:
+            success = self.train_model(args)
+
+        if success and args.predict:
+            success = self.predict_data(args)
+
+        if success and args.evaluate:
+            success = self.evaluate_model(args)
+
+        # Save model if trained and no specific save path provided
+        if success and self.core.is_trained and not args.save_model and args.train:
+            default_model_name = f"dbnn_model_{int(time.time())}"
+            use_json = (args.model_format == 'json')
+            model_dir = getattr(args, 'model_dir', 'Model')
+            model_path = os.path.join(model_dir, default_model_name)
+            self.save_model(model_path, use_json=use_json)
+
+# Example usage
 if __name__ == "__main__":
-    main()
-[file content end]
+    # Example configuration
+    config = {
+        'resol': 100,
+        'gain': 2.0,
+        'epochs': 50,
+        'patience': 5,
+        'margin': 0.2
+    }
+
+    # Create workflow
+    workflow = DBNNWorkflow(config)
+
+    # Example usage (uncomment to run)
+    # workflow.run_complete_workflow(
+    #     train_file="data/train.csv",
+    #     test_file="data/test.csv",
+    #     use_csv=True,
+    #     target_column="target",
+    #     feature_columns=["feature1", "feature2", "feature3"]
+    # )
+
+    print("DBNN class structure ready for use!")

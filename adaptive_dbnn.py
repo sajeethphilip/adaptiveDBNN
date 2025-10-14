@@ -6,7 +6,7 @@ from collections import defaultdict
 import os
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
-from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import LabelEncoder, StandardScaler
 import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime
@@ -26,8 +26,9 @@ from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.colors import ListedColormap
 import imageio
 from scipy.spatial import ConvexHull
-# Import the optimized DBNN implementation
-import dbnn_optimised
+
+# Import the DBNN implementation from dbnn.py
+import dbnn
 
 class DatasetConfig:
     """Dataset configuration handler"""
@@ -50,6 +51,151 @@ class DatasetConfig:
             except:
                 return {}
         return {}
+
+class DataPreprocessor:
+    """Comprehensive data preprocessing for DBNN"""
+
+    def __init__(self, target_column: str = 'target', sentinel_value: float = -99999.0):
+        self.target_column = target_column
+        self.sentinel_value = sentinel_value
+        self.feature_encoders = {}  # For encoding categorical features
+        self.target_encoder = LabelEncoder()
+        self.scaler = StandardScaler()
+        self.feature_columns = []
+        self.missing_value_indicators = {}
+
+    def preprocess_features(self, X: pd.DataFrame) -> Tuple[np.ndarray, List[str]]:
+        """Preprocess feature columns - handle mixed types, missing values, etc."""
+        processed_features = []
+        feature_names = []
+
+        for col in X.columns:
+            if col == self.target_column:
+                continue
+
+            feature_data = X[col].copy()
+
+            # Handle missing values
+            missing_mask = self._detect_missing_values(feature_data)
+
+            # Convert to numeric, handling errors
+            numeric_data = self._convert_to_numeric(feature_data, col)
+
+            # Store missing value information
+            self.missing_value_indicators[col] = {
+                'missing_mask': missing_mask,
+                'has_missing': np.any(missing_mask)
+            }
+
+            processed_features.append(numeric_data)
+            feature_names.append(col)
+
+        # Stack all features
+        if processed_features:
+            X_processed = np.column_stack(processed_features)
+        else:
+            X_processed = np.empty((len(X), 0))
+
+        return X_processed, feature_names
+
+    def _detect_missing_values(self, data: pd.Series) -> np.ndarray:
+        """Detect various types of missing values"""
+        # Standard missing values
+        missing_mask = data.isna()
+
+        # String representations of missing values
+        if data.dtype == 'object':
+            missing_strings = ['', 'NA', 'N/A', 'null', 'NULL', 'None', 'NaN', 'nan', 'ERROR', 'error', 'MISSING', 'missing']
+            missing_mask = missing_mask | data.isin(missing_strings)
+
+        return missing_mask.values
+
+    def _convert_to_numeric(self, data: pd.Series, col_name: str) -> np.ndarray:
+        """Convert data to numeric, handling various data types"""
+        # If already numeric, return as is
+        if pd.api.types.is_numeric_dtype(data):
+            numeric_data = data.values.astype(float)
+            # Replace any remaining NaN with sentinel value
+            numeric_data = np.where(np.isnan(numeric_data), self.sentinel_value, numeric_data)
+            return numeric_data
+
+        # For categorical/string data
+        if data.dtype == 'object':
+            try:
+                # Try direct conversion to numeric first
+                numeric_data = pd.to_numeric(data, errors='coerce').values
+                # Replace NaN with sentinel value
+                numeric_data = np.where(np.isnan(numeric_data), self.sentinel_value, numeric_data)
+                return numeric_data
+            except:
+                # Use label encoding for categorical data
+                if col_name not in self.feature_encoders:
+                    self.feature_encoders[col_name] = LabelEncoder()
+
+                # Handle missing values before encoding
+                clean_data = data.fillna('MISSING')
+                encoded_data = self.feature_encoders[col_name].fit_transform(clean_data)
+                return encoded_data.astype(float)
+
+        # Fallback: convert to string then label encode
+        str_data = data.astype(str)
+        if col_name not in self.feature_encoders:
+            self.feature_encoders[col_name] = LabelEncoder()
+        encoded_data = self.feature_encoders[col_name].fit_transform(str_data)
+        return encoded_data.astype(float)
+
+    def preprocess_target(self, y: pd.Series) -> np.ndarray:
+        """Preprocess target column"""
+        # Handle missing target values
+        if y.isna().any():
+            print(f"⚠️  Warning: Found {y.isna().sum()} missing target values. They will be removed.")
+            # We'll handle this at the dataset level by removing these samples
+
+        # Convert to numeric if needed
+        if not pd.api.types.is_numeric_dtype(y):
+            try:
+                y_processed = pd.to_numeric(y, errors='coerce')
+                if y_processed.isna().any():
+                    print(f"⚠️  Some target values couldn't be converted to numeric. Using label encoding.")
+                    y_processed = self.target_encoder.fit_transform(y.fillna('MISSING'))
+                else:
+                    y_processed = y_processed.values
+            except:
+                y_processed = self.target_encoder.fit_transform(y.fillna('MISSING'))
+        else:
+            y_processed = y.values
+
+        return y_processed.astype(int)
+
+    def preprocess_dataset(self, data: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+        """Preprocess entire dataset"""
+        print("🔧 Preprocessing dataset...")
+
+        # Separate features and target
+        if self.target_column not in data.columns:
+            raise ValueError(f"Target column '{self.target_column}' not found in dataset")
+
+        # Create a copy to avoid modifying original data
+        data_clean = data.copy()
+
+        # Preprocess features
+        X_processed, feature_names = self.preprocess_features(data_clean)
+
+        # Preprocess target
+        y_processed = self.preprocess_target(data_clean[self.target_column])
+
+        # Remove samples with missing target values
+        valid_mask = ~np.isnan(y_processed)
+        if not np.all(valid_mask):
+            removed_count = len(y_processed) - np.sum(valid_mask)
+            print(f"⚠️  Removed {removed_count} samples with invalid target values")
+            X_processed = X_processed[valid_mask]
+            y_processed = y_processed[valid_mask]
+
+        print(f"✅ Preprocessing complete: {X_processed.shape[0]} samples, {X_processed.shape[1]} features")
+        print(f"📊 Feature types: {len(feature_names)} numeric/categorical features")
+
+        return X_processed, y_processed, feature_names
 
 class DBNNVisualizer:
     """Visualization system for DBNN"""
@@ -76,8 +222,613 @@ class DBNNVisualizer:
         plt.savefig(f'{self.output_dir}/class_distribution.png')
         plt.close()
 
+class DBNNWrapper:
+    """
+    Wrapper for dbnn.py module that implements the exact adaptive learning requirements
+    """
+
+    def __init__(self, dataset_name: str = None, config: Dict = None):
+        self.dataset_name = dataset_name
+        self.config = config or {}
+
+        # Initialize the core DBNN
+        dbnn_config = {
+            'resol': self.config.get('resol', 100),
+            'gain': self.config.get('gain', 2.0),
+            'margin': self.config.get('margin', 0.2),
+            'patience': self.config.get('patience', 10),
+            'epochs': self.config.get('max_epochs', 100),
+            'min_improvement': self.config.get('min_improvement', 0.1)
+        }
+        self.core = dbnn.DBNNCore(dbnn_config)
+
+        # Store architectural components separately for freezing
+        self.architecture_frozen = False
+        self.frozen_components = {}
+
+        # Store data and preprocessing
+        self.data = None
+        self.target_column = self.config.get('target_column', 'target')
+        self.preprocessor = DataPreprocessor(target_column=self.target_column)
+        self.scaler = StandardScaler()
+        self.label_encoder = LabelEncoder()
+
+        # Training state
+        self.train_enabled = True
+        self.max_epochs = self.config.get('max_epochs', 100)
+        self.test_size = self.config.get('test_size', 0.2)
+        self.random_state = self.config.get('random_state', 42)
+
+        # Feature information
+        self.feature_names = []
+        self.initialized_with_full_data = False
+
+    def load_data(self, file_path: str = None):
+        """Load data from file with robust preprocessing"""
+        if file_path is None:
+            # Try to find dataset file - prioritize original data files
+            possible_files = [
+                f"{self.dataset_name}.csv",
+                f"{self.dataset_name}.data",
+                f"wine.data",
+                f"wine.csv",
+                "data.csv",
+                "train.csv"
+            ]
+            for file in possible_files:
+                if os.path.exists(file):
+                    file_path = file
+                    print(f"📁 Found data file: {file_path}")
+                    break
+
+        if file_path is None:
+            # Try to find any CSV or DAT file in current directory
+            csv_files = glob.glob("*.csv")
+            dat_files = glob.glob("*.dat")
+            all_files = csv_files + dat_files
+
+            if all_files:
+                file_path = all_files[0]
+                print(f"📁 Auto-selected data file: {file_path}")
+            else:
+                raise ValueError("No data file found. Please provide a CSV or DAT file.")
+
+        if file_path.endswith('.csv'):
+            self.data = pd.read_csv(file_path)
+            print(f"✅ Loaded CSV data: {self.data.shape[0]} samples, {self.data.shape[1]} columns")
+        else:
+            # For .dat files, use simple loading
+            print(f"📊 Loading DAT file: {file_path}")
+            try:
+                data = np.loadtxt(file_path)
+                n_features = data.shape[1] - 1
+                columns = [f'feature_{i}' for i in range(n_features)] + [self.target_column]
+                self.data = pd.DataFrame(data, columns=columns)
+                print(f"✅ Loaded DAT data: {self.data.shape[0]} samples, {self.data.shape[1]} columns")
+            except Exception as e:
+                print(f"❌ Error loading DAT file: {e}")
+                raise
+
+        return self.data
+
+    def preprocess_data(self) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+        """Preprocess the loaded data"""
+        if self.data is None:
+            raise ValueError("No data loaded. Call load_data() first.")
+
+        return self.preprocessor.preprocess_dataset(self.data)
+
+    def initialize_with_full_data(self, X: np.ndarray, y: np.ndarray):
+        """Step 1: Initialize DBNN architecture with full dataset"""
+        print("🏗️ Initializing DBNN architecture with full dataset...")
+
+        # Create temporary file with full data
+        temp_file = f"temp_full_init_{int(time.time())}.csv"
+        feature_cols = [f'feature_{i}' for i in range(X.shape[1])]
+        full_df = pd.DataFrame(X, columns=feature_cols)
+        full_df[self.target_column] = y
+        full_df.to_csv(temp_file, index=False)
+
+        try:
+            # First, manually initialize the DBNN core architecture
+            self._initialize_dbnn_architecture(X, y, feature_cols)
+
+            # Then train with full data to initialize architecture
+            success = self._train_with_initialized_architecture(temp_file, feature_cols)
+
+            if success:
+                print("✅ DBNN architecture initialized with full dataset")
+                self.initialized_with_full_data = True
+
+                # Freeze the architecture
+                self.freeze_architecture()
+            else:
+                print("❌ Failed to initialize DBNN architecture")
+
+        except Exception as e:
+            print(f"❌ Initialization error: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+
+    def _initialize_dbnn_architecture(self, X: np.ndarray, y: np.ndarray, feature_cols: List[str]):
+        """Manually initialize DBNN architecture to avoid the dmyclass error"""
+        print("🔧 Manually initializing DBNN architecture...")
+
+        # Create temporary file for initialization
+        temp_file = f"temp_init_{int(time.time())}.csv"
+        init_df = pd.DataFrame(X, columns=feature_cols)
+        init_df[self.target_column] = y
+        init_df.to_csv(temp_file, index=False)
+
+        try:
+            # Load data to get feature information
+            features_batches, targets_batches, feature_columns_used, original_targets_batches = self.core.load_data(
+                temp_file, self.target_column, feature_cols
+            )
+
+            if not features_batches:
+                raise ValueError("No data loaded for initialization")
+
+            # Fit encoder first
+            all_original_targets = np.concatenate(original_targets_batches) if original_targets_batches else np.array([])
+            self.core.class_encoder.fit(all_original_targets)
+
+            # Get encoded classes
+            encoded_classes = self.core.class_encoder.get_encoded_classes()
+            self.core.outnodes = len(encoded_classes)
+            self.core.innodes = len(feature_cols)
+
+            # Initialize arrays with proper dimensions
+            resol = self.core.config.get('resol', 100)
+            self.core.initialize_arrays(self.core.innodes, resol, self.core.outnodes)
+
+            # Now set dmyclass values safely
+            self.core.dmyclass[0] = self.core.config.get('margin', 0.2)
+            for i, encoded_val in enumerate(encoded_classes, 1):
+                if i < len(self.core.dmyclass):
+                    self.core.dmyclass[i] = float(encoded_val)
+
+            print(f"✅ Manual initialization complete: {self.core.innodes} inputs, {self.core.outnodes} outputs")
+
+        except Exception as e:
+            print(f"❌ Manual initialization failed: {e}")
+            raise
+        finally:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+
+    def _train_with_initialized_architecture(self, train_file: str, feature_cols: List[str]):
+        """Train with already initialized architecture (no re-initialization)"""
+        try:
+            # Load data without re-initializing
+            features_batches, targets_batches, feature_columns_used, original_targets_batches = self.core.load_data(
+                train_file, self.target_column, feature_cols
+            )
+
+            if not features_batches:
+                return False
+
+            # Encode targets using existing encoder
+            encoded_targets_batches = []
+            for batch in original_targets_batches:
+                encoded_batch = self.core.class_encoder.transform(batch)
+                encoded_targets_batches.append(encoded_batch)
+
+            # Initialize training parameters
+            resol = self.core.config.get('resol', 100)
+            omax, omin = self._initialize_training_params(features_batches, encoded_targets_batches, resol)
+
+            # Process training data for initial APF
+            total_samples = sum(len(batch) for batch in features_batches)
+            total_processed = 0
+
+            for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
+                processed = self._process_training_batch(features_batch, targets_batch)
+                total_processed += processed
+                if total_processed % 1000 == 0:
+                    print(f"Processed {total_processed}/{total_samples} samples")
+
+            # Training with early stopping
+            gain = self.core.config.get('gain', 2.0)
+            max_epochs = self.core.config.get('epochs', 100)
+            patience = self.core.config.get('patience', 10)
+            min_improvement = self.core.config.get('min_improvement', 0.1)
+
+            print(f"Starting weight training with early stopping...")
+            best_accuracy = 0.0
+            best_round = 0
+            patience_counter = 0
+
+            for rnd in range(max_epochs + 1):
+                if rnd == 0:
+                    # Initial evaluation
+                    current_accuracy, correct_predictions, _ = self._evaluate_model(features_batches, encoded_targets_batches)
+                    print(f"Round {rnd:3d}: Initial Accuracy = {current_accuracy:.2f}% ({correct_predictions}/{total_samples})")
+                    best_accuracy = current_accuracy
+                    continue
+
+                # Training pass
+                self._train_epoch(features_batches, encoded_targets_batches, gain)
+
+                # Evaluation after training round
+                current_accuracy, correct_predictions, _ = self._evaluate_model(features_batches, encoded_targets_batches)
+                print(f"Round {rnd:3d}: Accuracy = {current_accuracy:.2f}% ({correct_predictions}/{total_samples})")
+
+                # Early stopping logic
+                if current_accuracy > best_accuracy + min_improvement:
+                    best_accuracy = current_accuracy
+                    best_round = rnd
+                    patience_counter = 0
+                    print(f"  → New best accuracy! (Improved by {current_accuracy - best_accuracy:.2f}%)")
+                else:
+                    patience_counter += 1
+                    print(f"  → No improvement (Patience: {patience_counter}/{patience})")
+
+                if patience_counter >= patience:
+                    print(f"\nEarly stopping triggered after {rnd} rounds.")
+                    print(f"Best accuracy {best_accuracy:.2f}% achieved at round {best_round}")
+                    break
+
+            self.core.is_trained = True
+            return True
+
+        except Exception as e:
+            print(f"❌ Training error: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def _initialize_training_params(self, features_batches, encoded_targets_batches, resol: int):
+        """Initialize training parameters without re-initializing arrays"""
+        # Find min/max values
+        omax = -400.0
+        omin = 400.0
+
+        for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
+            for i in range(1, self.core.innodes + 1):
+                batch_max = np.max(features_batch[:, i-1])
+                batch_min = np.min(features_batch[:, i-1])
+                if batch_max > self.core.max_val[i]:
+                    self.core.max_val[i] = batch_max
+                if batch_min < self.core.min_val[i]:
+                    self.core.min_val[i] = batch_min
+
+            # Update omax/omin from targets
+            batch_omax = np.max(targets_batch)
+            batch_omin = np.min(targets_batch)
+            if batch_omax > omax:
+                omax = batch_omax
+            if batch_omin < omin:
+                omin = batch_omin
+
+        # Set resolutions
+        for i in range(1, self.core.innodes + 1):
+            self.core.resolution_arr[i] = resol
+            for j in range(self.core.resolution_arr[i] + 1):
+                self.core.binloc[i][j+1] = j * 1.0
+
+        # Initialize network counts
+        self.core.anti_wts.fill(1.0)
+        for k in range(1, self.core.outnodes + 1):
+            for i in range(1, self.core.innodes + 1):
+                for j in range(self.core.resolution_arr[i] + 1):
+                    for l in range(1, self.core.innodes + 1):
+                        for m in range(self.core.resolution_arr[l] + 1):
+                            self.core.anti_net[i, j, l, m, k] = 1
+
+        return omax, omin
+
+    def _process_training_batch(self, features_batch, targets_batch):
+        """Process a single batch of training data"""
+        batch_size = len(features_batch)
+        processed_count = 0
+
+        for sample_idx in range(batch_size):
+            vects = np.zeros(self.core.innodes + self.core.outnodes + 2)
+            for i in range(1, self.core.innodes + 1):
+                vects[i] = features_batch[sample_idx, i-1]
+            tmpv = targets_batch[sample_idx]
+
+            # Use the core's processing function
+            self.core.anti_net = dbnn.process_training_sample(
+                vects, tmpv, self.core.anti_net, self.core.anti_wts, self.core.binloc,
+                self.core.resolution_arr, self.core.dmyclass, self.core.min_val, self.core.max_val,
+                self.core.innodes, self.core.outnodes
+            )
+
+            processed_count += 1
+
+        return processed_count
+
+    def _train_epoch(self, features_batches, encoded_targets_batches, gain: float):
+        """Train for one epoch"""
+        for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
+            batch_size = len(features_batch)
+
+            for sample_idx in range(batch_size):
+                vects = np.zeros(self.core.innodes + self.core.outnodes + 2)
+                for i in range(1, self.core.innodes + 1):
+                    vects[i] = features_batch[sample_idx, i-1]
+                tmpv = targets_batch[sample_idx]
+
+                # Compute probabilities
+                classval = dbnn.compute_class_probabilities_numba(
+                    vects, self.core.anti_net, self.core.anti_wts, self.core.binloc, self.core.resolution_arr,
+                    self.core.dmyclass, self.core.min_val, self.core.max_val, self.core.innodes, self.core.outnodes
+                )
+
+                # Find predicted class
+                kmax = 1
+                cmax = 0.0
+                for k in range(1, self.core.outnodes + 1):
+                    if classval[k] > cmax:
+                        cmax = classval[k]
+                        kmax = k
+
+                # Update weights if wrong classification
+                if abs(self.core.dmyclass[kmax] - tmpv) > self.core.dmyclass[0]:
+                    self.core.anti_wts = dbnn.update_weights_numba(
+                        vects, tmpv, classval, self.core.anti_wts, self.core.binloc, self.core.resolution_arr,
+                        self.core.dmyclass, self.core.min_val, self.core.max_val, self.core.innodes, self.core.outnodes, gain
+                    )
+
+    def _evaluate_model(self, features_batches, encoded_targets_batches):
+        """Evaluate model accuracy"""
+        correct_predictions = 0
+        total_samples = 0
+        all_predictions = []
+
+        for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
+            batch_size = len(features_batch)
+            total_samples += batch_size
+
+            for sample_idx in range(batch_size):
+                vects = np.zeros(self.core.innodes + self.core.outnodes + 2)
+                for i in range(1, self.core.innodes + 1):
+                    vects[i] = features_batch[sample_idx, i-1]
+                actual = targets_batch[sample_idx]
+
+                # Compute class probabilities
+                classval = dbnn.compute_class_probabilities_numba(
+                    vects, self.core.anti_net, self.core.anti_wts, self.core.binloc, self.core.resolution_arr,
+                    self.core.dmyclass, self.core.min_val, self.core.max_val, self.core.innodes, self.core.outnodes
+                )
+
+                # Find predicted class
+                kmax = 1
+                cmax = 0.0
+                for k in range(1, self.core.outnodes + 1):
+                    if classval[k] > cmax:
+                        cmax = classval[k]
+                        kmax = k
+
+                predicted = self.core.dmyclass[kmax]
+                all_predictions.append(predicted)
+
+                # Check if prediction is correct
+                if abs(actual - predicted) <= self.core.dmyclass[0]:
+                    correct_predictions += 1
+
+        accuracy = (correct_predictions / total_samples) * 100 if total_samples > 0 else 0
+        return accuracy, correct_predictions, all_predictions
+
+    def train_with_data(self, X_train: np.ndarray, y_train: np.ndarray, reset_weights: bool = True):
+        """Step 2: Train with given data (no train/test split)"""
+        if not self.initialized_with_full_data:
+            # Try to initialize if not already done
+            print("⚠️  DBNN not initialized, attempting initialization...")
+            self.initialize_with_full_data(X_train, y_train)
+            if not self.initialized_with_full_data:
+                raise ValueError("DBNN must be initialized with full data first")
+
+        if reset_weights:
+            print("🔄 Resetting weights for new training...")
+            self._reset_weights()
+
+        print(f"🎯 Training with {len(X_train)} samples...")
+
+        # Create temporary file with training data
+        temp_file = f"temp_train_{int(time.time())}.csv"
+        feature_cols = [f'feature_{i}' for i in range(X_train.shape[1])]
+        train_df = pd.DataFrame(X_train, columns=feature_cols)
+        train_df[self.target_column] = y_train
+        train_df.to_csv(temp_file, index=False)
+
+        try:
+            # Train using our custom training method that preserves architecture
+            success = self._train_with_initialized_architecture(temp_file, feature_cols)
+
+            if success:
+                train_accuracy = self._compute_accuracy(X_train, y_train)
+                print(f"✅ Training completed - Accuracy on training data: {train_accuracy:.4f}")
+                return True
+            else:
+                print("❌ Training failed")
+                return False
+
+        except Exception as e:
+            print(f"❌ Training error: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+        finally:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+
+    def _reset_weights(self):
+        """Reset weights while preserving architecture"""
+        # Instead of creating a new core, just reset the weights arrays
+        if hasattr(self.core, 'anti_wts'):
+            self.core.anti_wts.fill(1.0)  # Reset to uniform weights
+            print("✅ Weights reset to uniform distribution")
+        else:
+            print("⚠️  Cannot reset weights - architecture not initialized")
+
+    def _compute_accuracy(self, X: np.ndarray, y: np.ndarray) -> float:
+        """Compute accuracy on given data"""
+        try:
+            predictions = self.predict(X)
+            # Ensure both arrays have the same data type for comparison
+            predictions = predictions.astype(y.dtype)
+            accuracy = accuracy_score(y, predictions)
+            return accuracy
+        except Exception as e:
+            print(f"❌ Accuracy computation error: {e}")
+            return 0.0
+
+    def predict(self, X: np.ndarray):
+        """Predict classes for input data"""
+        if not hasattr(self.core, 'is_trained') or not self.core.is_trained:
+            # If not trained, return random predictions based on class distribution
+            unique_classes = np.unique(self.y_full) if hasattr(self, 'y_full') else [1, 2, 3]
+            return np.random.choice(unique_classes, size=len(X))
+
+        try:
+            # Create temporary file for prediction
+            temp_file = f"temp_predict_{int(time.time())}.csv"
+            feature_cols = [f'feature_{i}' for i in range(X.shape[1])]
+            predict_df = pd.DataFrame(X, columns=feature_cols)
+            predict_df.to_csv(temp_file, index=False)
+
+            # Load data for prediction
+            features_batches, _, _, _ = self.core.load_data(
+                temp_file,
+                target_column=None,
+                feature_columns=feature_cols
+            )
+
+            all_predictions = []
+
+            for features_batch in features_batches:
+                predictions, _ = self.core.predict_batch(features_batch)
+                # Convert predictions to proper numeric type
+                numeric_predictions = []
+                for pred in predictions:
+                    try:
+                        numeric_predictions.append(float(pred))
+                    except (ValueError, TypeError):
+                        # If conversion fails, use the first class as fallback
+                        numeric_predictions.append(1.0)
+                all_predictions.extend(numeric_predictions)
+
+            # Convert encoded predictions back to original labels
+            decoded_predictions = []
+            for pred in all_predictions:
+                try:
+                    # Try to decode using class encoder
+                    if hasattr(self.core, 'class_encoder') and self.core.class_encoder.is_fitted:
+                        decoded = self.core.class_encoder.inverse_transform([pred])[0]
+                        decoded_predictions.append(decoded)
+                    else:
+                        # Fallback: use direct conversion
+                        decoded_predictions.append(int(pred))
+                except:
+                    # Final fallback
+                    decoded_predictions.append(1)
+
+            # Convert to numpy array and ensure correct data type
+            decoded_predictions = np.array(decoded_predictions, dtype=np.int64)
+
+            # Ensure we have valid predictions
+            if len(decoded_predictions) == 0:
+                unique_classes = np.unique(self.y_full) if hasattr(self, 'y_full') else [1, 2, 3]
+                decoded_predictions = np.array([unique_classes[0]] * len(X))
+
+            return decoded_predictions
+
+        except Exception as e:
+            print(f"❌ Prediction error: {e}")
+            import traceback
+            traceback.print_exc()
+            # Fallback: return random predictions
+            unique_classes = np.unique(self.y_full) if hasattr(self, 'y_full') else [1, 2, 3]
+            return np.random.choice(unique_classes, size=len(X))
+        finally:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+
+    def _compute_batch_posterior(self, X: np.ndarray):
+        """Compute posterior probabilities for a batch of samples"""
+        if not hasattr(self.core, 'is_trained') or not self.core.is_trained:
+            # Return uniform probabilities if not trained
+            n_classes = len(np.unique(self.y_full)) if hasattr(self, 'y_full') else 3
+            return np.ones((len(X), n_classes)) / n_classes
+
+        try:
+            temp_file = f"temp_posterior_{int(time.time())}.csv"
+            feature_cols = [f'feature_{i}' for i in range(X.shape[1])]
+            predict_df = pd.DataFrame(X, columns=feature_cols)
+            predict_df.to_csv(temp_file, index=False)
+
+            features_batches, _, _, _ = self.core.load_data(
+                temp_file,
+                target_column=None,
+                feature_columns=feature_cols
+            )
+
+            all_probabilities = []
+
+            for features_batch in features_batches:
+                _, probabilities = self.core.predict_batch(features_batch)
+                all_probabilities.extend(probabilities)
+
+            # Convert probability dictionaries to numpy array
+            n_classes = len(self.core.class_encoder.get_encoded_classes()) if hasattr(self.core.class_encoder, 'is_fitted') else 3
+
+            # Ensure we have valid probabilities
+            if not all_probabilities:
+                return np.ones((len(X), n_classes)) / n_classes
+
+            posteriors = np.zeros((len(all_probabilities), n_classes))
+
+            for i, prob_dict in enumerate(all_probabilities):
+                # If we don't have a proper probability dictionary, use uniform distribution
+                if not prob_dict or not isinstance(prob_dict, dict):
+                    posteriors[i] = np.ones(n_classes) / n_classes
+                    continue
+
+                # Extract probabilities in the correct order
+                for j, class_val in enumerate(self.core.class_encoder.get_encoded_classes()):
+                    class_name = self.core.class_encoder.encoded_to_class.get(class_val, f"Class_{j+1}")
+                    posteriors[i, j] = prob_dict.get(class_name, 1.0/n_classes)
+
+            return posteriors
+
+        except Exception as e:
+            print(f"❌ Posterior computation error: {e}")
+            n_classes = len(np.unique(self.y_full)) if hasattr(self, 'y_full') else 3
+            return np.ones((len(X), n_classes)) / n_classes
+        finally:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+
+    def freeze_architecture(self):
+        """Freeze architectural components"""
+        self.architecture_frozen = True
+        self.frozen_components = {
+            'config': self.core.config.copy(),
+            'feature_names': self.feature_names.copy() if hasattr(self, 'feature_names') else [],
+            'target_column': self.target_column,
+            'innodes': getattr(self.core, 'innodes', 0),
+            'outnodes': getattr(self.core, 'outnodes', 0),
+            'dmyclass': self.core.dmyclass.copy() if hasattr(self.core, 'dmyclass') else None,
+        }
+        print("✅ DBNN architecture frozen")
+
+    def _save_best_weights(self):
+        """Save current weights as best weights - not applicable for core DBNN"""
+        pass
+
+    def reset_weights(self):
+        """Reset weights - for core DBNN, we need to retrain"""
+        print("🔄 Weights reset requires retraining with core DBNN")
+
 class AdaptiveDBNN:
     """Wrapper for DBNN that implements sophisticated adaptive learning with comprehensive analysis"""
+
     def __init__(self, dataset_name: str = None, config: Dict = None):
         # Handle dataset selection if not provided
         if dataset_name is None:
@@ -88,7 +839,9 @@ class AdaptiveDBNN:
 
         # Ensure config has required fields by using DatasetConfig
         if 'target_column' not in self.config:
-            self.config = DatasetConfig.load_config(dataset_name)
+            dataset_config = DatasetConfig.load_config(dataset_name)
+            if dataset_config:
+                self.config.update(dataset_config)
 
         # Enhanced adaptive learning configuration with proper defaults
         self.adaptive_config = self.config.get('adaptive_learning', {})
@@ -109,7 +862,7 @@ class AdaptiveDBNN:
             "max_divergence_samples_per_class": 5,
             "exhaust_all_failed": True,
             "min_failed_threshold": 10,
-            "enable_kl_divergence": True,     # Switch this False to disable multiple sample selection for train as in original DBNN
+            "enable_kl_divergence": True,
             "max_samples_per_class_fallback": 2,
             "enable_3d_visualization": True,
             "3d_snapshot_interval": 10,
@@ -117,10 +870,10 @@ class AdaptiveDBNN:
             "enable_acid_test": True,
             "min_training_percentage_for_stopping": 10.0,
             "max_training_percentage": 90.0,
-            "margin_tolerance": 0.15,  # Percentage tolerance for margin range
-            "kl_divergence_threshold": 0.1,  # Minimum KL divergence to consider
-            "max_kl_samples_per_class": 5,  # Maximum KL-based samples per class per round
-
+            "margin_tolerance": 0.15,
+            "kl_divergence_threshold": 0.1,
+            "max_kl_samples_per_class": 5,
+            "disable_sample_limit": False,
         }
         for key, default_value in default_config.items():
             if key not in self.adaptive_config:
@@ -145,26 +898,16 @@ class AdaptiveDBNN:
             'create_3d_visualizations': True
         })
 
-        # Initialize the base DBNN model with proper config using the imported optimized version
-        self.model = dbnn_optimised.GPUDBNN(dataset_name, config=self.config)
+        # Initialize the base DBNN model using our wrapper
+        self.model = DBNNWrapper(dataset_name, config=self.config)
 
         # Adaptive learning state
         self.training_indices = []
-        self.test_indices = []
         self.best_accuracy = 0.0
         self.best_training_indices = []
-        self.best_test_indices = []
         self.best_round = 0
         self.adaptive_round = 0
         self.patience_counter = 0
-        self.best_weights = None
-
-        # Global best tracking for initialize-and-freeze strategy
-        self.global_best_accuracy = 0.0
-        self.global_best_round = 0
-        self.global_best_training_indices = []
-        self.global_best_test_indices = []
-        self.global_best_weights = None
 
         # Statistics tracking
         self.round_stats = []
@@ -199,319 +942,6 @@ class AdaptiveDBNN:
         # Add 3D visualization initialization
         self._initialize_3d_visualization()
 
-    def _initialize_3d_visualization(self):
-        """Initialize 3D visualization system"""
-        self.visualization_output_dir = self.viz_config.get('output_dir', 'adaptive_visualizations')
-        os.makedirs(f'{self.visualization_output_dir}/3d_animations', exist_ok=True)
-        self.feature_grid_history = []
-        self.epoch_timestamps = []
-
-        print("🎨 3D Visualization system initialized")
-
-    def _track_feature_grids_3d(self, epoch: int, X_train: np.ndarray = None, y_train: np.ndarray = None):
-        """
-        Track the position and characteristics of feature grids in 3D space
-        """
-        if not hasattr(self, 'feature_grid_history'):
-            self._initialize_3d_visualization()
-
-        try:
-            # Get current model state for visualization
-            grid_info = {
-                'epoch': epoch,
-                'timestamp': datetime.now(),
-                'weights': self.model.current_W.copy() if hasattr(self.model, 'current_W') and self.model.current_W is not None else None,
-                'training_accuracy': None,
-                'feature_importance': None
-            }
-
-            # Calculate feature importance based on weights
-            if grid_info['weights'] is not None:
-                if self.model.model_type == 'histogram':
-                    # For histogram model, use weight magnitudes
-                    feature_importance = np.mean(np.abs(grid_info['weights']), axis=(0, 2))
-                else:
-                    # For Gaussian model, use weight magnitudes
-                    feature_importance = np.mean(np.abs(grid_info['weights']), axis=0)
-
-                grid_info['feature_importance'] = feature_importance
-
-            # Store training accuracy if available
-            if X_train is not None and y_train is not None:
-                predictions = self._predict_with_current_model(X_train)
-                grid_info['training_accuracy'] = accuracy_score(y_train, predictions)
-
-            self.feature_grid_history.append(grid_info)
-            self.epoch_timestamps.append(epoch)
-
-            # Create snapshot every 10 epochs or at important milestones
-            if epoch % 10 == 0 or epoch in [1, 5, 10, 25, 50, 100] or epoch == self.adaptive_round:
-                self._create_3d_feature_space_snapshot(epoch, X_train, y_train)
-
-        except Exception as e:
-            print(f"⚠️ Could not track feature grids: {e}")
-
-    def _create_3d_feature_space_snapshot(self, epoch: int, X_train: np.ndarray = None, y_train: np.ndarray = None):
-        """
-        Create a 3D snapshot of the feature space with drifting grids
-        """
-        try:
-            if len(self.feature_grid_history) < 2:
-                return
-
-            fig = plt.figure(figsize=(16, 12))
-
-            # Create 2x2 subplot grid
-            ax1 = fig.add_subplot(221, projection='3d')  # Feature space with grids
-            ax2 = fig.add_subplot(222, projection='3d')  # Weight evolution
-            ax3 = fig.add_subplot(223)  # Feature importance over time
-            ax4 = fig.add_subplot(224)  # Grid drift trajectory
-
-            current_grid = self.feature_grid_history[-1]
-
-            # Plot 1: 3D Feature Space with Grids
-            self._plot_3d_feature_space(ax1, epoch, X_train, y_train)
-
-            # Plot 2: 3D Weight Evolution
-            self._plot_3d_weight_evolution(ax2, epoch)
-
-            # Plot 3: Feature Importance Over Time
-            self._plot_feature_importance_evolution(ax3)
-
-            # Plot 4: Grid Drift Trajectory
-            self._plot_grid_drift_trajectory(ax4, epoch)
-
-            plt.suptitle(f'Adaptive Learning - Epoch {epoch}\n'
-                        f'Training Accuracy: {current_grid.get("training_accuracy", "N/A"):.3f}',
-                        fontsize=16, fontweight='bold')
-
-            plt.tight_layout()
-            plt.savefig(f'{self.visualization_output_dir}/3d_animations/epoch_{epoch:04d}.png',
-                       dpi=150, bbox_inches='tight')
-            plt.close()
-
-        except Exception as e:
-            print(f"⚠️ Could not create 3D snapshot: {e}")
-
-    def _plot_3d_feature_space(self, ax, epoch: int, X_train: np.ndarray = None, y_train: np.ndarray = None):
-        """Plot 3D feature space with drifting grids"""
-        if X_train is None or y_train is None:
-            return
-
-        # Use PCA to project to 3D for visualization
-        pca = PCA(n_components=3)
-        X_3d = pca.fit_transform(X_train)
-
-        # Plot training samples
-        scatter = ax.scatter(X_3d[:, 0], X_3d[:, 1], X_3d[:, 2],
-                            c=y_train, cmap='tab10', alpha=0.6, s=10)
-
-        # Plot feature grids if we have weight information
-        if hasattr(self.model, 'current_W') and self.model.current_W is not None:
-            self._plot_feature_grids_3d(ax, X_3d, pca)
-
-        ax.set_xlabel('PC1')
-        ax.set_ylabel('PC2')
-        ax.set_zlabel('PC3')
-        ax.set_title('3D Feature Space with Grids')
-
-        # Add legend for classes
-        if hasattr(self, 'label_encoder'):
-            unique_classes = np.unique(y_train)
-            legend_elements = [plt.Line2D([0], [0], marker='o', color='w',
-                              markerfacecolor=plt.cm.tab10(i/len(unique_classes)),
-                              markersize=8, label=f'Class {cls}')
-                             for i, cls in enumerate(unique_classes)]
-            ax.legend(handles=legend_elements, loc='upper right')
-
-    def _plot_feature_grids_3d(self, ax, X_3d: np.ndarray, pca: PCA):
-        """Plot feature grids in 3D space"""
-        try:
-            if self.model.model_type == 'histogram':
-                self._plot_histogram_grids_3d(ax, X_3d)
-            else:
-                self._plot_gaussian_grids_3d(ax, X_3d, pca)
-        except Exception as e:
-            print(f"⚠️ Could not plot feature grids: {e}")
-
-    def _plot_histogram_grids_3d(self, ax, X_3d: np.ndarray):
-        """Plot histogram model grids in 3D"""
-        # For histogram model, visualize bin centers with weights
-        if hasattr(self.model, 'histograms') and self.model.histograms is not None:
-            n_features = self.model.histograms.shape[0]
-            n_bins = self.model.histogram_bins
-
-            # Select top 3 most important features
-            if hasattr(self.model, 'current_W') and self.model.current_W is not None:
-                feature_importance = np.mean(np.abs(self.model.current_W), axis=(0, 2))
-                top_features = np.argsort(feature_importance)[-3:][::-1]
-            else:
-                top_features = [0, 1, 2]  # Default to first 3 features
-
-            # Plot bin centers for top features
-            for i, feat_idx in enumerate(top_features):
-                if feat_idx < n_features:
-                    bin_centers = (self.model.bin_edges[feat_idx, :-1] +
-                                  self.model.bin_edges[feat_idx, 1:]) / 2
-
-                    # Create grid points
-                    for j, center in enumerate(bin_centers):
-                        if j < len(X_3d):  # Safety check
-                            # Use feature importance to determine size and color
-                            weight_magnitude = np.mean(np.abs(self.model.current_W[:, feat_idx, j]))
-                            size = 50 + weight_magnitude * 500
-                            color = plt.cm.viridis(weight_magnitude / (weight_magnitude + 0.1))
-
-                            ax.scatter([X_3d[j, 0]], [X_3d[j, 1]], [X_3d[j, 2]],
-                                      s=size, c=[color], alpha=0.7, marker='s')
-
-    def _plot_gaussian_grids_3d(self, ax, X_3d: np.ndarray, pca: PCA):
-        """Plot Gaussian model feature pairs in 3D"""
-        if (hasattr(self.model, 'likelihood_params') and
-            self.model.likelihood_params is not None and
-            hasattr(self.model, 'feature_pairs') and
-            self.model.feature_pairs is not None):
-
-            means = self.model.likelihood_params['means']
-            n_classes, n_pairs, _ = means.shape
-
-            # Plot a subset of feature pairs to avoid clutter
-            pairs_to_plot = min(20, n_pairs)
-            selected_pairs = np.random.choice(n_pairs, pairs_to_plot, replace=False)
-
-            for pair_idx in selected_pairs:
-                for class_idx in range(n_classes):
-                    mean_2d = means[class_idx, pair_idx]
-
-                    # Project mean to 3D PCA space (approximation)
-                    # This is a simplified projection for visualization
-                    if len(mean_2d) >= 2:
-                        # Create a synthetic point and project it
-                        synthetic_point = np.zeros(X_3d.shape[1])
-                        feature_pair = self.model.feature_pairs[pair_idx]
-
-                        for i, feat_idx in enumerate(feature_pair):
-                            if feat_idx < len(synthetic_point):
-                                synthetic_point[feat_idx] = mean_2d[i]
-
-                        # Project using PCA (approximate)
-                        projected_point = pca.transform([synthetic_point])[0]
-
-                        # Plot the grid center
-                        color = plt.cm.tab10(class_idx)
-                        weight = np.mean(np.abs(self.model.current_W[class_idx, pair_idx]))
-                        size = 30 + weight * 200
-
-                        ax.scatter([projected_point[0]], [projected_point[1]], [projected_point[2]],
-                                  s=size, c=[color], alpha=0.6, marker='o')
-
-    def _plot_3d_weight_evolution(self, ax, epoch: int):
-        """Plot 3D evolution of weights over time"""
-        if len(self.feature_grid_history) < 3:
-            return
-
-        # Extract weight evolution for top 3 features
-        weights_3d = []
-        for grid_info in self.feature_grid_history[-10:]:  # Last 10 epochs
-            if grid_info['feature_importance'] is not None:
-                top_features = np.argsort(grid_info['feature_importance'])[-3:][::-1]
-                weights_3d.append(grid_info['feature_importance'][top_features])
-
-        if len(weights_3d) > 2:
-            weights_3d = np.array(weights_3d)
-
-            # Create trajectory plot
-            ax.plot(weights_3d[:, 0], weights_3d[:, 1], weights_3d[:, 2],
-                   'b-o', linewidth=2, markersize=4, alpha=0.7)
-
-            # Mark current position
-            ax.scatter([weights_3d[-1, 0]], [weights_3d[-1, 1]], [weights_3d[-1, 2]],
-                      s=100, c='red', marker='*', label='Current')
-
-            ax.set_xlabel('Feature 1 Importance')
-            ax.set_ylabel('Feature 2 Importance')
-            ax.set_zlabel('Feature 3 Importance')
-            ax.set_title('Weight Evolution in 3D')
-            ax.legend()
-
-    def _plot_feature_importance_evolution(self, ax):
-        """Plot feature importance evolution over time"""
-        if len(self.feature_grid_history) < 2:
-            return
-
-        epochs = [grid['epoch'] for grid in self.feature_grid_history if grid['feature_importance'] is not None]
-        importances = [grid['feature_importance'] for grid in self.feature_grid_history if grid['feature_importance'] is not None]
-
-        if len(importances) > 1:
-            importances = np.array(importances)
-
-            # Plot top 5 features
-            n_features = min(5, importances.shape[1])
-            for i in range(n_features):
-                ax.plot(epochs, importances[:, i], linewidth=2, label=f'Feature {i+1}')
-
-            ax.set_xlabel('Epoch')
-            ax.set_ylabel('Feature Importance')
-            ax.set_title('Feature Importance Evolution')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-
-    def _plot_grid_drift_trajectory(self, ax, epoch: int):
-        """Plot the trajectory of grid drift over time"""
-        if len(self.feature_grid_history) < 3:
-            return
-
-        # Calculate overall grid movement (weight changes)
-        movements = []
-        for i in range(1, len(self.feature_grid_history)):
-            if (self.feature_grid_history[i]['weights'] is not None and
-                self.feature_grid_history[i-1]['weights'] is not None):
-                movement = np.mean(np.abs(
-                    self.feature_grid_history[i]['weights'] -
-                    self.feature_grid_history[i-1]['weights']
-                ))
-                movements.append(movement)
-
-        if movements:
-            ax.plot(range(len(movements)), movements, 'g-o', linewidth=2)
-            ax.set_xlabel('Epoch Transition')
-            ax.set_ylabel('Average Weight Change')
-            ax.set_title('Grid Drift Trajectory')
-            ax.grid(True, alpha=0.3)
-
-    def _create_3d_animation_gif(self):
-        """Create GIF animation of the 3D feature space evolution"""
-        try:
-            print("🎬 Creating 3D animation GIF...")
-
-            image_files = sorted([f for f in os.listdir(f'{self.visualization_output_dir}/3d_animations')
-                                if f.startswith('epoch_') and f.endswith('.png')])
-
-            if not image_files:
-                print("⚠️ No 3D snapshots found for animation")
-                return
-
-            # Create GIF
-            images = []
-            for image_file in image_files:
-                image_path = f'{self.visualization_output_dir}/3d_animations/{image_file}'
-                images.append(imageio.imread(image_path))
-
-            gif_path = f'{self.visualization_output_dir}/feature_space_evolution.gif'
-            imageio.mimsave(gif_path, images, duration=0.5)  # 0.5 seconds per frame
-
-            print(f"✅ 3D animation saved: {gif_path}")
-
-            # Also create a faster summary animation with fewer frames
-            if len(images) > 20:
-                summary_images = images[::len(images)//10]  # 10 frames summary
-                summary_gif_path = f'{self.visualization_output_dir}/feature_space_evolution_summary.gif'
-                imageio.mimsave(summary_gif_path, summary_images, duration=1.0)
-                print(f"✅ Summary animation saved: {summary_gif_path}")
-
-        except Exception as e:
-            print(f"⚠️ Could not create 3D animation: {e}")
-
     def _load_config(self, dataset_name: str) -> Dict:
         """Load configuration from file"""
         config_path = f"{dataset_name}.conf"
@@ -524,28 +954,55 @@ class AdaptiveDBNN:
         return {}
 
     def _select_dataset(self) -> str:
-        """Select dataset from available configuration files"""
+        """Select dataset from available configuration files or data files"""
         available_datasets = DatasetConfig.get_available_datasets()
 
-        if available_datasets:
-            print("Available datasets:")
-            for i, dataset in enumerate(available_datasets, 1):
-                print(f"{i}. {dataset}")
+        # Also look for data files
+        csv_files = glob.glob("*.csv")
+        dat_files = glob.glob("*.dat")
+        data_files = csv_files + dat_files
 
-            choice = input(f"\nSelect a dataset (1-{len(available_datasets)}): ").strip()
+        if available_datasets or data_files:
+            print("📁 Available datasets and data files:")
+
+            # Show configuration-based datasets
+            if available_datasets:
+                print("\n🎯 Configured datasets:")
+                for i, dataset in enumerate(available_datasets, 1):
+                    print(f"  {i}. {dataset} (configuration)")
+
+            # Show data files
+            if data_files:
+                print("\n📊 Data files:")
+                for i, data_file in enumerate(data_files, len(available_datasets) + 1):
+                    print(f"  {i}. {data_file}")
+
             try:
+                choice = input(f"\nSelect a dataset (1-{len(available_datasets) + len(data_files)}): ").strip()
                 choice_idx = int(choice) - 1
+
                 if 0 <= choice_idx < len(available_datasets):
-                    return available_datasets[choice_idx]
+                    selected_dataset = available_datasets[choice_idx]
+                    print(f"🎯 Selected configured dataset: {selected_dataset}")
+                    return selected_dataset
+                elif len(available_datasets) <= choice_idx < len(available_datasets) + len(data_files):
+                    data_file_idx = choice_idx - len(available_datasets)
+                    selected_file = data_files[data_file_idx]
+                    dataset_name = selected_file.replace('.csv', '').replace('.dat', '')
+                    print(f"📁 Selected data file: {selected_file}")
+                    return dataset_name
                 else:
-                    print("Invalid selection, using default dataset name")
+                    print("❌ Invalid selection")
                     return input("Enter dataset name: ").strip()
             except ValueError:
-                print("Invalid input, using default dataset name")
+                print("❌ Invalid input")
                 return input("Enter dataset name: ").strip()
         else:
-            print("No existing dataset configurations found.")
-            return input("Enter dataset name: ").strip()
+            print("❌ No dataset configurations or data files found.")
+            dataset_name = input("Enter dataset name: ").strip()
+            if not dataset_name:
+                dataset_name = "default_dataset"
+            return dataset_name
 
     def _get_device_type(self) -> str:
         """Get the device type (CPU/GPU)"""
@@ -576,129 +1033,6 @@ class AdaptiveDBNN:
         # Create output directory
         os.makedirs(self.viz_config.get('output_dir', 'adaptive_visualizations'), exist_ok=True)
 
-    def show_adaptive_settings(self):
-        """Display the current adaptive learning settings including KL divergence"""
-        print("\n🔧 Advanced Adaptive Learning Settings:")
-        print("=" * 60)
-        for key, value in self.adaptive_config.items():
-            if key in ['margin_tolerance', 'kl_divergence_threshold', 'max_kl_samples_per_class']:
-                print(f"  {key:40}: {value} (KL Divergence)")
-            else:
-                print(f"  {key:40}: {value}")
-        print(f"\n💻 Device: {self.device_type}")
-        print(f"🎯 Selection Mode: {'KL Divergence' if self.adaptive_config.get('enable_kl_divergence', False) else 'Margin-Based'}")
-        print()
-
-    def configure_adaptive_learning(self):
-        """Interactively configure adaptive learning settings"""
-        print("\n🎛️  Configure Advanced Adaptive Learning Settings")
-        print("=" * 60)
-
-        try:
-            initial_samples = int(input(f"Initial samples per class [{self.adaptive_config['initial_samples_per_class']}]: ")
-                                or self.adaptive_config['initial_samples_per_class'])
-            max_margin_samples = int(input(f"Max margin samples per class [{self.adaptive_config['max_margin_samples_per_class']}]: ")
-                                   or self.adaptive_config['max_margin_samples_per_class'])
-            min_samples_to_add = int(input(f"Min samples to add per class [{self.adaptive_config['min_samples_to_add_per_class']}]: ")
-                                   or self.adaptive_config['min_samples_to_add_per_class'])
-            margin_tol = float(input(f"Margin tolerance [{self.adaptive_config['margin_tolerance']}]: ")
-                            or self.adaptive_config['margin_tolerance'])
-            max_rounds = int(input(f"Maximum adaptive rounds [{self.adaptive_config['max_adaptive_rounds']}]: ")
-                            or self.adaptive_config['max_adaptive_rounds'])
-            patience = int(input(f"Patience for early stopping [{self.adaptive_config['patience']}]: ")
-                         or self.adaptive_config['patience'])
-            convergence_epochs = int(input(f"Training convergence epochs [{self.adaptive_config['training_convergence_epochs']}]: ")
-                                   or self.adaptive_config['training_convergence_epochs'])
-            learning_rate = float(input(f"Learning rate (0.5-2.0) [{self.adaptive_config.get('learning_rate', 1.0)}]: ")
-                                or self.adaptive_config.get('learning_rate', 1.0))
-
-            # Early stopping relaxation parameters
-            min_stopping_percentage = float(input(
-                f"Min training data % for early stopping [{self.adaptive_config.get('min_training_percentage_for_stopping', 10.0)}]: "
-            ) or self.adaptive_config.get('min_training_percentage_for_stopping', 10.0))
-
-            max_training_percentage = float(input(
-                f"Max training data % allowed [{self.adaptive_config.get('max_training_percentage', 90.0)}]: "
-            ) or self.adaptive_config.get('max_training_percentage', 90.0))
-
-            enable_kl = input(f"Enable KL divergence selection? (y/N) [{'y' if self.adaptive_config.get('enable_kl_divergence', True) else 'n'}]: ").strip().lower()
-            enable_kl_divergence = enable_kl == 'y' if enable_kl else self.adaptive_config.get('enable_kl_divergence', True)
-
-            if enable_kl_divergence:
-                print("\n🔧 KL Divergence Configuration:")
-                margin_tol = float(input(f"Margin tolerance (0.1-0.5) [{self.adaptive_config.get('margin_tolerance', 0.15)}]: ")
-                                or self.adaptive_config.get('margin_tolerance', 0.15))
-                kl_threshold = float(input(f"KL divergence threshold (0.05-0.3) [{self.adaptive_config.get('kl_divergence_threshold', 0.1)}]: ")
-                                   or self.adaptive_config.get('kl_divergence_threshold', 0.1))
-                max_kl_samples = int(input(f"Max KL samples per class (2-10) [{self.adaptive_config.get('max_kl_samples_per_class', 5)}]: ")
-                                   or self.adaptive_config.get('max_kl_samples_per_class', 5))
-
-                # Validate ranges
-                margin_tol = max(0.05, min(0.5, margin_tol))
-                kl_threshold = max(0.01, min(0.5, kl_threshold))
-                max_kl_samples = max(1, min(20, max_kl_samples))
-
-                self.adaptive_config.update({
-                    'margin_tolerance': margin_tol,
-                    'kl_divergence_threshold': kl_threshold,
-                    'max_kl_samples_per_class': max_kl_samples,
-                    'enable_kl_divergence': enable_kl_divergence
-                })
-
-                print(f"✅ KL divergence configured:")
-                print(f"   - Margin tolerance: {margin_tol}")
-                print(f"   - KL threshold: {kl_threshold}")
-                print(f"   - Max samples per class: {max_kl_samples}")
-
-
-            # Validate percentages
-            min_stopping_percentage = max(5.0, min(50.0, min_stopping_percentage))  # Limit to 5-50%
-            max_training_percentage = max(50.0, min(95.0, max_training_percentage))  # Limit to 50-95%
-
-            # Validate learning rate for probability-based models
-            if learning_rate < 0.5:
-                print("⚠️  Learning rate too low for probability-based updates. Setting to 0.5")
-                learning_rate = 0.5
-            elif learning_rate > 2.0:
-                print("⚠️  Learning rate too high. Setting to 2.0")
-                learning_rate = 2.0
-
-            print(f"✅ Learning rate set to: {learning_rate}")
-
-            enable_kl = input(f"Enable KL divergence selection? (y/N) [{'y' if self.adaptive_config.get('enable_kl_divergence', False) else 'n'}]: ").strip().lower()
-            enable_kl_divergence = enable_kl == 'y' if enable_kl else self.adaptive_config.get('enable_kl_divergence', False)
-
-            # Exhaust all failed examples option
-            exhaust_all = input(f"Exhaust all failed examples? (y/N) [{ 'y' if self.adaptive_config['exhaust_all_failed'] else 'n' }]: ").strip().lower()
-            exhaust_all_failed = exhaust_all == 'y' if exhaust_all else self.adaptive_config['exhaust_all_failed']
-
-            min_failed_threshold = int(input(f"Min failed threshold to stop [{self.adaptive_config['min_failed_threshold']}]: ")
-                                     or self.adaptive_config['min_failed_threshold'])
-
-            # Update settings
-            self.adaptive_config.update({
-                'initial_samples_per_class': initial_samples,
-                'max_margin_samples_per_class': max_margin_samples,
-                'min_samples_to_add_per_class': min_samples_to_add,
-                'margin_tolerance': margin_tol,
-                'max_adaptive_rounds': max_rounds,
-                'patience': patience,
-                'training_convergence_epochs': convergence_epochs,
-                'exhaust_all_failed': exhaust_all_failed,
-                'enable_kl_divergence': enable_kl_divergence,
-                'learning_rate': learning_rate,
-                'min_training_percentage_for_stopping': min_stopping_percentage,
-                'max_training_percentage': max_training_percentage,
-                'min_failed_threshold': min_failed_threshold
-            })
-
-            self._update_config_file()
-            print("✅ Advanced settings updated successfully!")
-            self.show_adaptive_settings()
-
-        except ValueError:
-            print("❌ Invalid input. Settings not changed.")
-
     def _update_config_file(self):
         """Update the dataset configuration file with adaptive learning settings"""
         config_path = f"{self.dataset_name}.conf"
@@ -721,183 +1055,253 @@ class AdaptiveDBNN:
         except Exception as e:
             print(f"⚠️  Warning: Could not update config file: {str(e)}")
 
-    def _train_until_convergence(self, X_train: np.ndarray, y_train: np.ndarray) -> bool:
-        """
-        Train the model until training accuracy converges
-        Returns True if training was successful
-        """
-        print("🎯 Training model with current training set...")
+    def show_adaptive_settings(self):
+        """Display the current adaptive learning settings"""
+        print("\n🔧 Advanced Adaptive Learning Settings:")
+        print("=" * 60)
+        for key, value in self.adaptive_config.items():
+            if key in ['margin_tolerance', 'kl_divergence_threshold', 'max_kl_samples_per_class']:
+                print(f"  {key:40}: {value} (KL Divergence)")
+            elif key == 'disable_sample_limit':
+                status = "DISABLED 🚫" if value else "ENABLED ✅"
+                print(f"  {key:40}: {value} ({status})")
+            else:
+                print(f"  {key:40}: {value}")
+        print(f"\n💻 Device: {self.device_type}")
+        mode = "KL Divergence" if self.adaptive_config.get('enable_kl_divergence', False) else "Margin-Based"
+        limit_status = "UNLIMITED" if self.adaptive_config.get('disable_sample_limit', False) else "LIMITED"
+        print(f"🎯 Selection Mode: {mode} ({limit_status})")
+        print()
 
-        try:
-            # Store original training configuration
-            original_max_epochs = self.model.max_epochs
-            original_trials = self.model.trials
+    def _initialize_3d_visualization(self):
+        """Initialize 3D visualization system"""
+        self.visualization_output_dir = self.viz_config.get('output_dir', 'adaptive_visualizations')
+        os.makedirs(f'{self.visualization_output_dir}/3d_animations', exist_ok=True)
+        self.feature_grid_history = []
+        self.epoch_timestamps = []
 
-            # Set convergence parameters
-            self.model.max_epochs = 1000
-            self.model.trials = self.adaptive_config['training_convergence_epochs']
+        print("🎨 3D Visualization system initialized")
 
-            # Train with custom data
-            self._train_with_custom_data(X_train, y_train)
+    def _debug_predictions(self, y_remaining: np.ndarray, predictions: np.ndarray, posteriors: np.ndarray):
+        """Debug method to understand prediction issues"""
+        print(f"🔍 Debug - y_remaining unique: {np.unique(y_remaining)}")
+        print(f"🔍 Debug - predictions unique: {np.unique(predictions) if len(predictions) > 0 else 'empty'}")
+        print(f"🔍 Debug - predictions shape: {predictions.shape if hasattr(predictions, 'shape') else 'no shape'}")
+        print(f"🔍 Debug - posteriors shape: {posteriors.shape}")
+        print(f"🔍 Debug - sample predictions: {predictions[:5] if len(predictions) > 5 else predictions}")
+        print(f"🔍 Debug - sample posteriors: {posteriors[:2] if len(posteriors) > 2 else posteriors}")
 
-            # Restore original parameters
-            self.model.max_epochs = original_max_epochs
-            self.model.trials = original_trials
+    def prepare_full_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Prepare the full dataset for adaptive learning"""
+        print("📊 Preparing full dataset...")
 
-            return True
+        # Load data using the model's method
+        self.model.load_data()
 
-        except Exception as e:
-            print(f"⚠️ Training error: {e}")
-            return False
+        # Preprocess data using the enhanced preprocessor
+        X, y, feature_names = self.model.preprocess_data()
 
-    def _select_informative_samples(self, X: np.ndarray, y: np.ndarray,
-                                  predictions: np.ndarray, posteriors: np.ndarray) -> List[int]:
-        """
-        Select informative samples based on configuration
-        """
-        # Check if KL divergence selection is enabled
-        if self.adaptive_config.get('enable_kl_divergence', False):
-            return self._select_kl_divergence_samples(X, y, predictions, posteriors)
+        # Store original y for reference (before encoding)
+        y_original = y.copy()
+
+        # Store the full dataset
+        self.X_full = X
+        self.y_full = y
+        self.y_full_original = y_original
+        self.original_data_shape = X.shape
+
+        print(f"✅ Dataset prepared: {X.shape[0]} samples, {X.shape[1]} features")
+        print(f"📊 Classes: {len(np.unique(y))} ({np.unique(y_original)})")
+        print(f"🔧 Features: {feature_names}")
+
+        return X, y, y_original
+
+    def adaptive_learn(self, X: np.ndarray = None, y: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Main adaptive learning method following the exact requirements"""
+        print("\n🚀 STARTING ADAPTIVE LEARNING")
+        print("=" * 60)
+
+        # Use provided data or prepare full data
+        if X is None or y is None:
+            print("📊 Preparing dataset...")
+            X, y, y_original = self.prepare_full_data()
         else:
-            return self._select_simple_margin_samples(X, y, predictions, posteriors)
+            y_original = y.copy()
+            if len(y.shape) > 1 and y.shape[1] > 1:
+                y = np.argmax(y, axis=1)
 
-    def _select_simple_margin_samples(self, X: np.ndarray, y: np.ndarray,
-                                    predictions: np.ndarray, posteriors: np.ndarray) -> List[int]:
-        """
-        Simple selection: one max posterior and one min margin sample per class
-        """
-        samples_to_add = []
-        unique_classes = np.unique(y)
-        max_samples = self.adaptive_config.get('max_samples_per_class_fallback', 2)
+        # Store the full dataset
+        self.X_full = X.copy()
+        self.y_full = y.copy()
+        self.y_full_original = y_original
 
-        print("🔍 Using simple margin-based selection (KL disabled)...")
+        print(f"📦 Total samples: {len(X)}")
+        print(f"🎯 Classes: {np.unique(y_original)}")
 
-        # Get test set predictions and true labels
-        y_test = y[self.test_indices]
+        # STEP 1: Initialize DBNN architecture with full dataset
+        self.model.initialize_with_full_data(X, y)
 
-        # Find all misclassified samples
-        misclassified_mask = predictions != y_test
-        misclassified_indices = np.where(misclassified_mask)[0]
+        # STEP 2: Select initial diverse training samples
+        X_train, y_train, initial_indices = self._select_initial_training_samples(X, y)
+        remaining_indices = [i for i in range(len(X)) if i not in initial_indices]
 
-        if len(misclassified_indices) == 0:
-            print("✅ No misclassified samples found - model is performing well!")
-            return samples_to_add
+        print(f"📊 Initial training set: {len(X_train)} samples")
+        print(f"📊 Remaining test set: {len(remaining_indices)} samples")
 
-        print(f"📊 Found {len(misclassified_indices)} misclassified samples")
-        print(f"📊 Posteriors shape: {posteriors.shape}")
-        print(f"📊 Unique true classes in test: {np.unique(y_test)}")
-        print(f"📊 Unique predicted classes: {np.unique(predictions)}")
+        # Initialize tracking variables
+        self.best_accuracy = 0.0
+        self.best_training_indices = initial_indices.copy()
+        self.best_round = 0
+        patience_counter = 0
 
-        # Group misclassified samples by true class
-        class_samples = defaultdict(list)
-        skipped_count = 0
+        max_rounds = self.adaptive_config['max_adaptive_rounds']
+        patience = self.adaptive_config['patience']
 
-        for i, idx_in_test in enumerate(misclassified_indices):
-            original_idx = self.test_indices[idx_in_test]
-            true_class = y_test[idx_in_test]
-            pred_class = predictions[idx_in_test]
+        print(f"\n🔄 Starting adaptive learning for up to {max_rounds} rounds...")
+        self.adaptive_start_time = datetime.now()
 
-            # Handle label encoding mismatch - map predictions to valid range
-            if pred_class >= posteriors.shape[1]:
-                # If prediction is out of bounds, use the class with highest posterior
-                pred_class = np.argmax(posteriors[idx_in_test])
+        for round_num in range(1, max_rounds + 1):
+            self.adaptive_round = round_num
 
-            # Double-check bounds
-            if (true_class >= posteriors.shape[1] or
-                pred_class >= posteriors.shape[1] or
-                true_class < 0 or pred_class < 0):
-                skipped_count += 1
-                if skipped_count <= 10:  # Only show first 10 skipped samples
-                    print(f"⚠️  Skipping sample {i}: true_class={true_class}, pred_class={pred_class}, posteriors_shape={posteriors.shape}")
-                continue
+            print(f"\n🎯 Round {round_num}/{max_rounds}")
+            print("-" * 40)
 
-            # Calculate margin and posterior
-            true_posterior = posteriors[idx_in_test, true_class]
-            pred_posterior = posteriors[idx_in_test, pred_class]
-            margin = pred_posterior - true_posterior
+            # STEP 2 (continued): Train with current training data (no split)
+            print("🎯 Training with current training data...")
+            success = self.model.train_with_data(X_train, y_train, reset_weights=True)
 
-            class_samples[true_class].append({
-                'index': original_idx,
-                'margin': margin,
-                'true_posterior': true_posterior,
-                'pred_posterior': pred_posterior,
-                'true_class': true_class,
-                'pred_class': pred_class
-            })
+            if not success:
+                print("❌ Training failed, stopping...")
+                break
 
-        if skipped_count > 0:
-            print(f"⚠️  Skipped {skipped_count} samples due to label encoding issues")
+            # STEP 3: Run acid test on entire dataset
+            print("🧪 Running acid test on entire dataset...")
+            try:
+                all_predictions = self.model.predict(X)
+                # Ensure predictions and y have same data type
+                all_predictions = all_predictions.astype(y.dtype)
+                acid_test_accuracy = accuracy_score(y, all_predictions)
+                print(f"📊 Acid test accuracy: {acid_test_accuracy:.4f}")
 
-        # For each class, select max posterior and min margin samples
-        for class_id in unique_classes:
-            if class_id not in class_samples or not class_samples[class_id]:
-                print(f"   ⚠️ Class {class_id}: No valid failed samples available")
-                continue
+                # Check if all samples are correctly classified
+                if acid_test_accuracy >= 0.999:  # 99.9% accuracy
+                    print("🎉 All samples correctly classified!")
+                    # Update best accuracy before breaking
+                    if acid_test_accuracy > self.best_accuracy:
+                        self.best_accuracy = acid_test_accuracy
+                        self.best_training_indices = initial_indices.copy()
+                        self.best_round = round_num
+                    break
+            except Exception as e:
+                print(f"❌ Acid test failed: {e}")
+                acid_test_accuracy = 0.0
+            # STEP 3 (continued): Identify failed candidates in remaining data
+            if not remaining_indices:
+                print("💤 No more samples to add")
+                break
 
-            class_data = class_samples[class_id]
+            X_remaining = X[remaining_indices]
+            y_remaining = y[remaining_indices]
 
-            # Select sample with maximum true posterior (most confident wrong prediction)
-            max_posterior_sample = max(class_data, key=lambda x: x['true_posterior'])
+            # Get predictions for remaining data
+            remaining_predictions = self.model.predict(X_remaining)
+            remaining_posteriors = self.model._compute_batch_posterior(X_remaining)
 
-            # Select sample with minimum margin (most ambiguous decision)
-            min_margin_sample = min(class_data, key=lambda x: x['margin'])
+            # Debug predictions
+            self._debug_predictions(y_remaining, remaining_predictions, remaining_posteriors)
 
-            selected_samples = []
+            # Find misclassified samples
+            misclassified_mask = remaining_predictions != y_remaining
+            misclassified_indices = np.where(misclassified_mask)[0]
 
-            # Add max posterior sample if not already in training
-            if (max_posterior_sample['index'] not in self.training_indices and
-                max_posterior_sample['index'] not in samples_to_add):
-                selected_samples.append(max_posterior_sample)
-                samples_to_add.append(max_posterior_sample['index'])
+            if len(misclassified_indices) == 0:
+                print("✅ No misclassified samples in remaining data!")
+                # Update best accuracy before breaking
+                if acid_test_accuracy > self.best_accuracy:
+                    self.best_accuracy = acid_test_accuracy
+                    self.best_training_indices = initial_indices.copy()
+                    self.best_round = round_num
+                break
 
-                # Track selection
-                self.all_selected_samples[self._get_original_class_label(class_id)].append({
-                    'index': max_posterior_sample['index'],
-                    'margin': max_posterior_sample['margin'],
-                    'true_posterior': max_posterior_sample['true_posterior'],
-                    'selection_type': 'max_posterior',
-                    'round': self.adaptive_round
-                })
+            print(f"📊 Found {len(misclassified_indices)} misclassified samples in remaining data")
 
-            # Add min margin sample if different from max posterior and not in training
-            if (min_margin_sample['index'] != max_posterior_sample['index'] and
-                min_margin_sample['index'] not in self.training_indices and
-                min_margin_sample['index'] not in samples_to_add):
-                selected_samples.append(min_margin_sample)
-                samples_to_add.append(min_margin_sample['index'])
+            # STEP 3 (continued): Select most divergent failed candidates
+            samples_to_add_indices = self._select_divergent_samples(
+                X_remaining, y_remaining, remaining_predictions, remaining_posteriors,
+                misclassified_indices, remaining_indices
+            )
 
-                # Track selection
-                self.all_selected_samples[self._get_original_class_label(class_id)].append({
-                    'index': min_margin_sample['index'],
-                    'margin': min_margin_sample['margin'],
-                    'true_posterior': min_margin_sample['true_posterior'],
-                    'selection_type': 'min_margin',
-                    'round': self.adaptive_round
-                })
+            if not samples_to_add_indices:
+                print("💤 No divergent samples to add")
+                break
 
-            print(f"   Class {class_id}: Selected {len(selected_samples)} samples "
-                  f"(max posterior: {max_posterior_sample['true_posterior']:.6f}, "
-                  f"min margin: {min_margin_sample['margin']:.6f})")
+            # Update training set
+            initial_indices.extend(samples_to_add_indices)
+            remaining_indices = [i for i in remaining_indices if i not in samples_to_add_indices]
 
-        print(f"🎯 Selected {len(samples_to_add)} samples total using simple margin strategy")
-        return samples_to_add
+            X_train = X[initial_indices]
+            y_train = y[initial_indices]
 
-    def _get_original_class_label(self, encoded_label: int) -> Any:
-        """Convert encoded label back to original class label"""
-        if hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
-            if encoded_label < len(self.label_encoder.classes_):
-                return self.label_encoder.classes_[encoded_label]
-        return encoded_label
+            print(f"📈 Training set size: {len(X_train)}")
+            print(f"📊 Remaining test set size: {len(remaining_indices)}")
 
-    def prepare_adaptive_data(self, X: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Prepare initial training data with diverse samples from each class"""
+            # Update best model based on acid test - FIXED: Always update when better
+            if acid_test_accuracy > self.best_accuracy + self.adaptive_config['min_improvement']:
+                self.best_accuracy = acid_test_accuracy
+                self.best_training_indices = initial_indices.copy()
+                self.best_round = round_num
+                patience_counter = 0
+                print(f"🏆 New best acid test accuracy: {acid_test_accuracy:.4f}")
+            else:
+                patience_counter += 1
+                print(f"🔄 No improvement (Patience: {patience_counter}/{patience})")
+
+            # Early stopping based on acid test
+            if patience_counter >= patience:
+                print(f"🛑 Patience exceeded: no improvement in acid test for {patience} rounds")
+                break
+
+        # Finalize with best configuration
+        print(f"\n🎉 Adaptive learning completed after {self.adaptive_round} rounds!")
+
+        # Ensure we have valid best values
+        if not hasattr(self, 'best_accuracy') or self.best_accuracy == 0.0:
+            # Use final values if best wasn't set
+            self.best_accuracy = acid_test_accuracy if 'acid_test_accuracy' in locals() else 0.0
+            self.best_training_indices = initial_indices.copy()
+            self.best_round = self.adaptive_round
+
+        print(f"🏆 Best acid test accuracy: {self.best_accuracy:.4f} (round {self.best_round})")
+
+        # Use best configuration for final model
+        X_train_best = X[self.best_training_indices]
+        y_train_best = y[self.best_training_indices]
+        X_test_best = X[[i for i in range(len(X)) if i not in self.best_training_indices]]
+        y_test_best = y[[i for i in range(len(X)) if i not in self.best_training_indices]]
+
+        # Train final model with best configuration
+        print("🔧 Training final model with best configuration...")
+        self.model.train_with_data(X_train_best, y_train_best, reset_weights=True)
+
+        # Final acid test
+        final_predictions = self.model.predict(X)
+        final_accuracy = accuracy_score(y, final_predictions)
+
+        print(f"📊 Final acid test accuracy: {final_accuracy:.4f}")
+        print(f"📈 Final training set size: {len(X_train_best)}")
+        print(f"📊 Final remaining set size: {len(X_test_best)}")
+
+        # Generate reports
+        self._generate_adaptive_learning_report()
+
+        return X_train_best, y_train_best, X_test_best, y_test_best
+
+    def _select_initial_training_samples(self, X: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray, List[int]]:
+        """Select initial diverse training samples from each class"""
         initial_samples = self.adaptive_config['initial_samples_per_class']
         unique_classes = np.unique(y)
 
-        # Initialize indices
-        all_indices = np.arange(len(X))
-        self.training_indices = []
-        self.test_indices = list(all_indices)
+        initial_indices = []
 
         print("🎯 Selecting initial diverse training samples...")
 
@@ -918,1266 +1322,188 @@ class AdaptiveDBNN:
                 # Use all available samples
                 selected_indices = class_indices
 
-            self.training_indices.extend(selected_indices)
-            self.test_indices = [idx for idx in self.test_indices if idx not in selected_indices]
+            initial_indices.extend(selected_indices)
 
-        # Create datasets
-        X_train = X[self.training_indices]
-        y_train = y[self.training_indices]
-        X_test = X[self.test_indices]
-        y_test = y[self.test_indices]
+        X_train = X[initial_indices]
+        y_train = y[initial_indices]
 
-        # Get original class labels for display
-        original_class_labels = [self._get_original_class_label(cls) for cls in np.unique(y_train)]
+        return X_train, y_train, initial_indices
 
-        print(f"📊 Initial training set: {len(X_train)} samples")
-        print(f"📊 Initial test set: {len(X_test)} samples")
-        print(f"🎯 Class distribution (original labels): {original_class_labels}")
-        print(f"🎯 Class counts: {np.bincount(y_train)}")
-
-        # Initialize best indices
-        self.best_training_indices = self.training_indices.copy()
-        self.best_test_indices = self.test_indices.copy()
-        self.best_accuracy = 0.0
-
-        return X_train, y_train, X_test, y_test
-
-    def _initialize_dbnn_architecture(self, X: np.ndarray, y: np.ndarray):
-        """Initialize DBNN with entire dataset and freeze architecture"""
-        print("🎯 Initializing and freezing DBNN architecture...")
-
-        # Store original training config
-        original_train_enabled = self.model.train_enabled
-        original_train_only = self.model.train_only
-        original_max_epochs = getattr(self.model, 'max_epochs', 1000)
-
-        try:
-            # Temporarily enable full training mode
-            self.model.train_enabled = True
-            self.model.train_only = False
-            self.model.max_epochs = 100  # Short training for initialization
-
-            # Prepare data for DBNN initialization
-            print("   Preparing data for initialization...")
-            X_train_init, X_test_init, y_train_init, y_test_init = self._prepare_dbnn_data(X, y)
-
-            # Run one complete training round on entire dataset
-            print("   Running architecture initialization...")
-            self.model._compute_likelihood_parameters(X_train_init, y_train_init)
-            self.model.train()
-
-            # FREEZE ARCHITECTURE in DBNN itself
-            print("   Freezing DBNN architecture...")
-            self.model.freeze_architecture()
-
-            # Verify the model is working
-            print("   Verifying initialized model...")
-            test_predictions = self.model.predict(X_test_init)
-            test_accuracy = accuracy_score(y_test_init, test_predictions)
-
-            print(f"✅ DBNN architecture initialized and frozen")
-            print(f"   Initial accuracy: {test_accuracy:.4f}")
-            print(f"   Architecture frozen: {self.model.architecture_frozen}")
-
-        except Exception as e:
-            print(f"❌ DBNN initialization failed: {e}")
-            raise
-        finally:
-            # Restore original training config
-            self.model.train_enabled = original_train_enabled
-            self.model.train_only = original_train_only
-            self.model.max_epochs = original_max_epochs
-
-    def _verify_frozen_architecture_reset_weights(self):
-        """Verify that architecture is frozen and preserved, but weights are reset"""
-        print("   🔍 Verifying frozen architecture with preserved components and reset weights...")
-
-        # Check architecture is frozen
-        if not hasattr(self.model, 'architecture_frozen') or not self.model.architecture_frozen:
-            print("     ❌ Architecture not frozen!")
-            return False
-
-        print("     ✅ Architecture frozen")
-
-        # Verify architectural components are preserved
-        if self.model.model_type == 'histogram':
-            if hasattr(self.model, 'bin_edges') and self.model.bin_edges is not None:
-                print(f"     ✅ bin_edges preserved: {self.model.bin_edges.shape}")
-            if hasattr(self.model, 'histograms') and self.model.histograms is not None:
-                print(f"     ✅ histograms preserved: {self.model.histograms.shape}")
-
-        elif self.model.model_type == 'gaussian':
-            if hasattr(self.model, 'feature_pairs') and self.model.feature_pairs is not None:
-                print(f"     ✅ feature_pairs preserved: {self.model.feature_pairs.shape}")
-
-        # Check weights are reset (should be uniform)
-        if hasattr(self.model, 'current_W'):
-            # For histogram model, check that weights are uniform but bins are preserved
-            if self.model.model_type == 'histogram':
-                # Verify we have the expected shape based on preserved histograms
-                if hasattr(self.model, 'histograms') and self.model.histograms is not None:
-                    expected_n_classes = self.model.histograms.shape[2]
-                    expected_n_features = self.model.histograms.shape[0]
-                    expected_n_bins = self.model.histograms.shape[1]
-
-                    actual_shape = self.model.current_W.shape
-                    expected_shape = (expected_n_classes, expected_n_features, expected_n_bins)
-
-                    if actual_shape == expected_shape:
-                        print(f"     ✅ Weights shape matches preserved architecture: {actual_shape}")
-                    else:
-                        print(f"     ❌ Weights shape mismatch: {actual_shape} vs {expected_shape}")
-
-            # Check weights are approximately uniform
-            weight_sums = np.sum(self.model.current_W, axis=0)  # Sum across classes
-            is_uniform = np.allclose(weight_sums, np.ones_like(weight_sums), atol=0.2)
-            if is_uniform:
-                print("     ✅ Weights reset to uniform distribution")
-            else:
-                print("     ⚠️  Weights may not be properly reset")
-
-        print("     ✅ Frozen architecture with preserved components and reset weights verified")
-        return True
-
-    def _extract_architectural_components(self) -> Dict[str, Any]:
-        """Extract architectural components that need to be frozen (ACTUAL values, not structure)"""
-        print("   📋 Extracting architectural components...")
-
-        frozen_components = {
-            'model_type': self.model.model_type,
-            'histogram_bins': self.model.histogram_bins,
-        }
-
-        # Extract histogram-specific components (ACTUAL VALUES)
-        if self.model.model_type == 'histogram':
-            if hasattr(self.model, 'bin_edges') and self.model.bin_edges is not None:
-                frozen_components['bin_edges'] = self.model.bin_edges.copy()
-                print(f"     - bin_edges: {self.model.bin_edges.shape}")
-
-            if hasattr(self.model, 'feature_min') and self.model.feature_min is not None:
-                frozen_components['feature_min'] = self.model.feature_min.copy()
-                print(f"     - feature_min: {self.model.feature_min.shape}")
-
-            if hasattr(self.model, 'feature_max') and self.model.feature_max is not None:
-                frozen_components['feature_max'] = self.model.feature_max.copy()
-                print(f"     - feature_max: {self.model.feature_max.shape}")
-
-            if hasattr(self.model, 'histograms') and self.model.histograms is not None:
-                frozen_components['histograms'] = self.model.histograms.copy()
-                print(f"     - histograms: {self.model.histograms.shape}")
-
-        # Extract Gaussian-specific components (ACTUAL VALUES)
-        elif self.model.model_type == 'gaussian':
-            if hasattr(self.model, 'feature_pairs') and self.model.feature_pairs is not None:
-                frozen_components['feature_pairs'] = self.model.feature_pairs.copy()
-                print(f"     - feature_pairs: {self.model.feature_pairs.shape}")
-
-        # Always extract label encoder
-        if hasattr(self.model, 'label_encoder') and self.model.label_encoder is not None:
-            frozen_components['label_encoder_classes'] = self.model.label_encoder.classes_.copy()
-            print(f"     - label_encoder: {len(self.model.label_encoder.classes_)} classes")
-
-        print(f"   ✅ Extracted {len(frozen_components)} architectural components (ACTUAL VALUES)")
-        return frozen_components
-
-    def _reset_weights_and_likelihood(self):
-        """Reset ONLY weights and likelihood parameters, preserving architectural components"""
-        print("   🔄 Resetting ONLY weights and likelihood parameters...")
-
-        # CRITICAL: Preserve all architectural components
-        # Store the current architectural state before resetting
-        preserved_bin_edges = self.model.bin_edges.copy() if hasattr(self.model, 'bin_edges') and self.model.bin_edges is not None else None
-        preserved_feature_min = self.model.feature_min.copy() if hasattr(self.model, 'feature_min') and self.model.feature_min is not None else None
-        preserved_feature_max = self.model.feature_max.copy() if hasattr(self.model, 'feature_max') and self.model.feature_max is not None else None
-        preserved_histograms = self.model.histograms.copy() if hasattr(self.model, 'histograms') and self.model.histograms is not None else None
-        preserved_feature_pairs = self.model.feature_pairs.copy() if hasattr(self.model, 'feature_pairs') and self.model.feature_pairs is not None else None
-
-        # Reset weights ONLY
-        if hasattr(self.model, 'current_W'):
-            if self.model.model_type == 'histogram':
-                # For histogram model, reset to uniform weights but keep the same shape
-                n_classes, n_features, n_bins = self.model.current_W.shape
-                self.model.current_W = np.ones((n_classes, n_features, n_bins)) / n_classes
-                print(f"     - Reset current_W to uniform: {self.model.current_W.shape}")
-            else:
-                # For Gaussian model, reset to uniform weights
-                n_classes, n_combinations = self.model.current_W.shape
-                self.model.current_W = np.ones((n_classes, n_combinations)) / n_classes
-                print(f"     - Reset current_W to uniform: {self.model.current_W.shape}")
-
-        # Reset best weights
-        if hasattr(self.model, 'best_W'):
-            self.model.best_W = self.model.current_W.copy() if hasattr(self.model, 'current_W') else None
-            print(f"     - Reset best_W")
-
-        # Reset initial weights
-        if hasattr(self.model, 'initial_W'):
-            self.model.initial_W = None
-            print(f"     - Reset initial_W")
-
-        # Reset likelihood parameters but preserve the structure
-        if hasattr(self.model, 'likelihood_params') and self.model.likelihood_params is not None:
-            if self.model.model_type == 'gaussian':
-                # For Gaussian model, we need to recompute likelihood but with the SAME feature pairs
-                # Store the feature pairs first
-                if preserved_feature_pairs is not None:
-                    self.model.feature_pairs = preserved_feature_pairs
-                self.model.likelihood_params = None
-                print(f"     - Reset likelihood_params (will be recomputed with SAME architecture)")
-
-        # CRITICAL: RESTORE the architectural components
-        if preserved_bin_edges is not None:
-            self.model.bin_edges = preserved_bin_edges
-            print(f"     - Preserved bin_edges: {preserved_bin_edges.shape}")
-
-        if preserved_feature_min is not None:
-            self.model.feature_min = preserved_feature_min
-            print(f"     - Preserved feature_min: {preserved_feature_min.shape}")
-
-        if preserved_feature_max is not None:
-            self.model.feature_max = preserved_feature_max
-            print(f"     - Preserved feature_max: {preserved_feature_max.shape}")
-
-        if preserved_histograms is not None:
-            self.model.histograms = preserved_histograms
-            print(f"     - Preserved histograms: {preserved_histograms.shape}")
-
-        # Reset training state
-        if hasattr(self.model, 'best_accuracy'):
-            self.model.best_accuracy = 0.0
-            print(f"     - Reset best_accuracy")
-
-        if hasattr(self.model, 'best_error'):
-            self.model.best_error = float('inf')
-            print(f"     - Reset best_error")
-
-        print("   ✅ Weights reset, architectural components PRESERVED")
-
-    def _prepare_dbnn_data(self, X: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Prepare data for DBNN initialization training"""
-        # Use the same split as the main adaptive learning
-        from sklearn.model_selection import train_test_split
-
-        # Filter sentinel values first
-        X_clean, y_clean = self._filter_sentinel_samples(X, y)
-
-        # Split the data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_clean, y_clean, test_size=self.model.test_size, random_state=self.model.random_state
-        )
-
-        # Scale the data using the model's scaler
-        X_train_scaled = self.model.scaler.fit_transform(X_train)
-        X_test_scaled = self.model.scaler.transform(X_test)
-
-        return X_train_scaled, X_test_scaled, y_train, y_test
-
-    def _verify_architecture_frozen(self):
-        """Verify that DBNN architecture remains frozen"""
-        if not hasattr(self.model, 'architecture_frozen') or not self.model.architecture_frozen:
-            print("   ❌ DBNN architecture not frozen!")
-            return False
-
-        print("   🔒 DBNN architecture verified frozen")
-        return True
-
-    def _debug_freeze_state(self):
-        """Debug the freeze state of both adaptive and DBNN models"""
-        print(f"\n🔍 FREEZE STATE DEBUG:")
-        print("=" * 50)
-
-        # Adaptive model freeze state
-        adaptive_frozen = getattr(self, 'architecture_frozen', False)
-        print(f"   AdaptiveDBNN frozen: {adaptive_frozen}")
-
-        # DBNN model freeze state
-        if hasattr(self.model, 'architecture_frozen'):
-            dbnn_frozen = self.model.architecture_frozen
-            frozen_components = list(getattr(self.model, 'frozen_components', {}).keys())
-            print(f"   DBNN frozen: {dbnn_frozen}")
-            print(f"   DBNN frozen components: {frozen_components}")
-        else:
-            print(f"   ❌ DBNN freeze capability not available")
-
-        print("=" * 50)
-
-    def adaptive_learn(self, X: np.ndarray = None, y: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Main adaptive learning with initialize-and-freeze architecture"""
-        print("\n🚀 STARTING ADAPTIVE LEARNING WITH INITIALIZE-AND-FREEZE ARCHITECTURE")
-        print("=" * 80)
-
-        # Use base model's data if not provided
-        if X is None or y is None:
-            print("Using base model's dataset...")
-            X, y, y_original = self.prepare_full_data()
-
-        # Store the full dataset
-        self.X_full = X.copy()
-        self.y_full = y.copy()
-        self.y_full_original = y_original
-
-        print(f"📦 Total samples: {len(X)}")
-        print(f"🎯 Classes: {np.unique(y_original)}")
-
-        # STEP 1: INITIALIZE DBNN WITH ENTIRE DATASET
-        print("\n" + "="*50)
-        print("🎯 STEP 1: INITIALIZING DBNN ARCHITECTURE")
-        print("="*50)
-
-        self._initialize_dbnn_architecture(X, y)
-
-        # STEP 2: VERIFY FREEZE STATE
-        print("\n" + "="*50)
-        print("🎯 STEP 2: VERIFYING FREEZE STATE")
-        print("="*50)
-
-        self._debug_freeze_state()
-
-        # STEP 3: START ADAPTIVE TRAINING WITH FROZEN ARCHITECTURE
-        print("\n" + "="*50)
-        print("🎯 STEP 3: STARTING ADAPTIVE TRAINING (FROZEN ARCHITECTURE)")
-        print("="*50)
-
-        # Initialize adaptive learning state
-        X_train, y_train, X_test, y_test = self.prepare_adaptive_data(X, y)
-        self.adaptive_start_time = datetime.now()
-
-        # Track failed examples history
-        failed_history = []
-
-        exhaust_all_failed = self.adaptive_config['exhaust_all_failed']
-        min_failed_threshold = self.adaptive_config['min_failed_threshold']
-
-        if exhaust_all_failed:
-            print("🔁 MODE: EXHAUSTIVE - Continuing until failed examples are addressed")
-            print(f"🎯 Min failed threshold: {min_failed_threshold}")
-            effective_max_rounds = 1000
-        else:
-            print(f"🔄 MODE: PATIENCE - Max rounds: {self.adaptive_config['max_adaptive_rounds']}")
-            effective_max_rounds = self.adaptive_config['max_adaptive_rounds']
-
-        # Main adaptive learning loop
-        round_num = 0
-        while True:
-            round_num += 1
-            self.adaptive_round = round_num
-
-            if exhaust_all_failed:
-                print(f"\n🔄 Adaptive Learning Round {round_num} (Exhaustive Mode)")
-            else:
-                print(f"\n🔄 Adaptive Learning Round {round_num}/{effective_max_rounds}")
-            print("=" * 50)
-
-            # Safety check: prevent infinite loops
-            if round_num > 1000:
-                print("🛑 Safety limit reached: 1000 rounds")
-                break
-
-            # Verify architecture is frozen
-            self._verify_architecture_frozen()
-
-            # Step 1: Train until convergence
-            round_start_time = datetime.now()
-            training_success = self._train_until_convergence(X_train, y_train)
-
-            if not training_success:
-                print("❌ Training failed, skipping round")
-                continue
-
-            # Step 2: Evaluate CURRENT model on TEST set
-            print("🎯 Evaluating current model on test set...")
-            current_test_predictions = self._predict_with_current_model(X_test)
-            current_test_accuracy = accuracy_score(y_test, current_test_predictions)
-
-            # Count failed examples
-            misclassified_mask = current_test_predictions != y_test
-            failed_count = np.sum(misclassified_mask)
-            failed_history.append(failed_count)
-
-            print(f"📊 Round {round_num} Test Accuracy: {current_test_accuracy:.4f}")
-            print(f"❌ Failed examples: {failed_count}")
-
-            # Step 3: Check if current model is POTENTIALLY better than global best
-            improvement_threshold = self.adaptive_config['min_improvement']
-            is_potential_improvement = current_test_accuracy > self.global_best_accuracy + improvement_threshold
-
-            if is_potential_improvement:
-                print(f"🎯 POTENTIAL IMPROVEMENT DETECTED!")
-                print(f"   Current test accuracy: {current_test_accuracy:.4f}")
-                print(f"   Global best accuracy: {self.global_best_accuracy:.4f}")
-                print(f"   Improvement threshold: +{improvement_threshold:.4f}")
-
-                # Step 4: Save current weights temporarily and perform ACID TEST
-                temp_weights = self.model.current_W.copy() if hasattr(self.model, 'current_W') else None
-
-                print("🧪 Performing acid test on entire dataset...")
-                current_full_predictions = self._predict_with_current_model(X)
-                current_full_accuracy = accuracy_score(y, current_full_predictions)
-                print(f"🧪 Entire Dataset Accuracy: {current_full_accuracy:.4f}")
-
-                # Step 5: Update global best if acid test confirms improvement
-                if current_full_accuracy > self.global_best_accuracy + improvement_threshold:
-                    improvement = current_full_accuracy - self.global_best_accuracy
-
-                    # Update global best metrics
-                    self.global_best_accuracy = current_full_accuracy
-                    self.global_best_round = round_num
-                    self.global_best_training_indices = self.training_indices.copy()
-                    self.global_best_test_indices = self.test_indices.copy()
-                    self.global_best_weights = temp_weights
-
-                    # Also update displayed best accuracy
-                    self.best_accuracy = current_full_accuracy  # Display ENTIRE dataset accuracy
-                    self.best_round = round_num
-                    self.best_training_indices = self.training_indices.copy()
-                    self.best_test_indices = self.test_indices.copy()
-                    self.best_weights = temp_weights
-
-                    print(f"🏆 NEW GLOBAL BEST MODEL!")
-                    print(f"   Test Accuracy (remaining data): {current_test_accuracy:.4f}")
-                    print(f"   Entire Dataset Accuracy (all data): {current_full_accuracy:.4f}")
-                    print(f"   Improvement: +{improvement:.4f}")
-                    print(f"   Training set size: {len(self.training_indices)}")
-
-                    # Save the new best weights
-                    if self.best_weights is not None:
-                        self.model._save_best_weights()
-                        print("💾 Best weights saved")
-                else:
-                    print(f"   ❌ Acid test failed to confirm improvement")
-                    print(f"   Entire dataset accuracy: {current_full_accuracy:.4f} <= {self.global_best_accuracy:.4f} + {improvement_threshold}")
-
-                    # Restore previous best weights if we have them
-                    if self.global_best_weights is not None and hasattr(self.model, 'current_W'):
-                        self.model.current_W = self.global_best_weights.copy()
-            else:
-                print(f"   📉 No potential improvement detected")
-                print(f"   Current test accuracy: {current_test_accuracy:.4f}")
-                print(f"   Global best accuracy: {self.global_best_accuracy:.4f}")
-
-            # Track 3D visualization data
-            if hasattr(self, '_track_feature_grids_3d'):
-                if round_num % 5 == 0 or round_num <= 10:
-                    self._track_feature_grids_3d(round_num, X_train, y_train)
-
-            # Create round visualizations
-            if self.stats_config.get('enable_confusion_matrix', True) and round_num <= 20:
-                self._create_round_visualizations(round_num, y_test, current_test_predictions)
-
-            # Step 6: Select informative samples for next round
-            print("🎯 Selecting informative samples...")
-            posteriors = self._get_posteriors_with_current_model(X_test)
-            samples_to_add = self._select_informative_samples(X, y, current_test_predictions, posteriors)
-
-            # Step 7: Check stopping conditions
-            stop_reason = self._check_stopping_conditions(
-                round_num, samples_to_add, failed_count, min_failed_threshold,
-                self.adaptive_config['patience'], exhaust_all_failed, effective_max_rounds,
-                self.global_best_accuracy, self.global_best_accuracy
-            )
-
-            if stop_reason:
-                print(f"🛑 {stop_reason}")
-                break
-
-            # Step 8: Update training set
-            print("🎯 Updating training set...")
-            added_count = len(samples_to_add)
-            self.training_indices.extend(samples_to_add)
-            self.test_indices = [idx for idx in self.test_indices if idx not in samples_to_add]
-
-            # Update datasets
-            X_train = X[self.training_indices]
-            y_train = y[self.training_indices]
-            X_test = X[self.test_indices]
-            y_test = y[self.test_indices]
-
-            # Record statistics
-            round_duration = (datetime.now() - round_start_time).total_seconds()
-            self._record_round_statistics(round_num, X_train, y_train, X_test, y_test,
-                                        current_test_accuracy, samples_to_add, round_duration,
-                                        failed_count, self.global_best_accuracy)
-
-            print(f"📥 Added {added_count} samples to training set")
-            print(f"📊 New training size: {len(X_train)}")
-            print(f"📊 New test size: {len(X_test)}")
-            print(f"❌ Remaining failed examples: {failed_count}")
-            print(f"🏆 Global Best Entire Dataset Accuracy: {self.global_best_accuracy:.4f}")
-            print(f"⏱️ Round duration: {round_duration:.2f}s")
-
-            # Progress indicator for exhaustive mode
-            if exhaust_all_failed and round_num % 10 == 0:
-                initial_test_size = len(X) - len(self.global_best_training_indices) if self.global_best_training_indices else len(X_test)
-                progress = ((initial_test_size - len(X_test)) / initial_test_size) * 100
-                print(f"📈 Progress: {progress:.1f}% of test set processed")
-
-        # Final processing
-        print(f"\n🏁 Adaptive Learning Completed after {round_num} rounds")
-        print("=" * 70)
-
-        # Use GLOBAL BEST configuration
-        if self.global_best_training_indices:
-            X_train_best = X[self.global_best_training_indices]
-            y_train_best = y[self.global_best_training_indices]
-            X_test_best = X[self.global_best_test_indices]
-            y_test_best = y[self.global_best_test_indices]
-
-            # Restore global best weights
-            if self.global_best_weights is not None and hasattr(self.model, 'current_W'):
-                self.model.current_W = self.global_best_weights.copy()
-        else:
-            # Fallback to current configuration
-            X_train_best = X[self.training_indices]
-            y_train_best = y[self.training_indices]
-            X_test_best = X[self.test_indices]
-            y_test_best = y[self.test_indices]
-
-        print(f"🏆 Best Entire Dataset Accuracy: {self.global_best_accuracy:.4f} (achieved at round {self.global_best_round})")
-        print(f"📊 Final test set accuracy: {current_test_accuracy:.4f}")
-        print(f"📦 Optimal training set size: {len(X_train_best)}")
-        print(f"📊 Final test set size: {len(X_test_best)}")
-        print(f"❌ Final failed examples: {failed_history[-1] if failed_history else 'N/A'}")
-        print(f"⏱️ Total training time: {(datetime.now() - self.adaptive_start_time).total_seconds():.2f}s")
-
-        # Retrain final model with best configuration
-        print("\n🔧 Training final model with optimal configuration...")
-        self._train_with_custom_data(X_train_best, y_train_best)
-
-        # Create comprehensive visualizations and analysis
-        print("\n📊 Creating comprehensive analysis...")
-        self._create_comprehensive_analysis(X_train_best, y_train_best, X_test_best, y_test_best)
-
-        # Create interactive HTML visualization dashboard
-        print("\n🎨 Creating interactive HTML visualization dashboard...")
-        self._create_interactive_html_dashboard(X_train_best, y_train_best, X_test_best, y_test_best)
-
-        # Create animated GIFs for quick viewing
-        if hasattr(self, '_create_unified_3d_animation'):
-            print("\n🎬 Creating animated visualizations...")
-            self._create_unified_3d_animation()
-            if hasattr(self, '_create_comprehensive_3d_visualization'):
-                self._create_comprehensive_3d_visualization(X_train_best, y_train_best)
-
-        # Save final results
-        self._save_final_results(X_train_best, y_train_best, X_test_best, y_test_best)
-
-        # Final summary
-        print("\n" + "="*70)
-        print("✅ ADAPTIVE LEARNING COMPLETED SUCCESSFULLY!")
-        print("="*70)
-        print(f"📁 Results saved in: {self.viz_config.get('output_dir', 'adaptive_visualizations')}")
-        print(f"🏆 Best Model: Entire Dataset Accuracy = {self.global_best_accuracy:.4f}")
-        print("\n📊 Available Visualizations:")
-        print("   - interactive_dashboard.html (Complete interactive analysis)")
-        print("   - adaptive_learning_3d_evolution.gif (Animated 3D evolution)")
-        print("   - adaptive_learning_progression.png (Learning curves)")
-        print("   - final_performance_analysis.png (Model performance)")
-        print("   - adaptive_learning_summary.json (Detailed statistics)")
-        print("\n💡 Open 'interactive_dashboard.html' in your browser for the complete analysis!")
-
-        return X_train_best, y_train_best, X_test_best, y_test_best
-
-    def _check_stopping_conditions(self, round_num: int, samples_to_add: List[int],
-                                 failed_count: int, min_failed_threshold: int,
-                                 patience: int, exhaust_all_failed: bool, max_rounds: int,
-                                 current_global_best: float, previous_global_best: float) -> str:
-        """Check all stopping conditions with global best accuracy"""
-
-        # Calculate current training set percentage of entire dataset
-        current_training_size = len(self.training_indices)
-        total_dataset_size = len(self.X_full) if hasattr(self, 'X_full') else 1
-        training_percentage = (current_training_size / total_dataset_size) * 100
-
-        # Get configurable thresholds
-        min_stopping_percentage = self.adaptive_config.get('min_training_percentage_for_stopping', 10.0)
-        max_training_percentage = self.adaptive_config.get('max_training_percentage', 90.0)
-
-        print(f"📊 Training set: {current_training_size}/{total_dataset_size} ({training_percentage:.1f}% of total)")
-
-        # 1. No more samples to add
-        if not samples_to_add:
-            return "No more informative samples found!"
-
-        # 2. EXHAUSTIVE MODE: Only stop when failed examples are effectively addressed
-        if exhaust_all_failed:
-            if failed_count <= min_failed_threshold:
-                return f"Failed examples ({failed_count}) below threshold ({min_failed_threshold})"
-
-            # In exhaustive mode, also stop if test set is too small to be meaningful
-            if len(self.test_indices) <= min_failed_threshold * 2:
-                return f"Test set too small ({len(self.test_indices)} samples) for meaningful evaluation"
-
-            # Relax global best degradation check until we have sufficient training data
-            degradation_threshold = 0.1  # 10% degradation
-            if training_percentage >= min_stopping_percentage:
-                # Use global best accuracy for degradation check
-                if current_global_best < previous_global_best - degradation_threshold:
-                    return f"Significant degradation in global best accuracy: {current_global_best:.4f} < {previous_global_best:.4f}"
-            else:
-                print(f"   🛡️  Global best degradation check suspended (training data: {training_percentage:.1f}% < {min_stopping_percentage}%)")
-
-            # Continue learning regardless of rounds or patience
-            return ""
-
-        # 3. Max rounds
-        if round_num >= max_rounds:
-            return f"Reached maximum rounds ({max_rounds})"
-
-        # 4. Patience-based stopping (only if not in exhaustive mode)
-        if not exhaust_all_failed:
-            # Use rounds without global best improvement for patience
-            rounds_without_improvement = round_num - self.global_best_round if self.global_best_round > 0 else 0
-
-            if training_percentage >= min_stopping_percentage:
-                if rounds_without_improvement >= patience:
-                    return f"Early stopping after {patience} rounds without global best improvement"
-            else:
-                print(f"   🛡️  Patience stopping suspended (training data: {training_percentage:.1f}% < {min_stopping_percentage}%)")
-                return ""
-
-        # 5. Stop if training set reaches maximum allowed percentage
-        if training_percentage >= max_training_percentage:
-            return f"Training set reached {training_percentage:.1f}% of total data - stopping to prevent overfitting"
-
-        return ""  # Continue learning
-
-    def _record_round_statistics(self, round_num: int, X_train: np.ndarray, y_train: np.ndarray,
-                               X_test: np.ndarray, y_test: np.ndarray, current_accuracy: float,
-                               samples_added: List[int], duration: float, failed_count: int,
-                               global_best_accuracy: float):
-        """Record comprehensive statistics for the current round"""
-        # Get class distribution with original labels
-        y_train_original = np.array([self._get_original_class_label(cls) for cls in y_train])
-        unique_classes, class_counts = np.unique(y_train_original, return_counts=True)
-        class_distribution = dict(zip(unique_classes, class_counts))
-
-        stats = {
-            'round': round_num,
-            'training_size': len(X_train),
-            'test_size': len(X_test),
-            'current_test_accuracy': current_accuracy,  # Current model on test set
-            'global_best_accuracy': global_best_accuracy,  # Best model on entire dataset
-            'samples_added': len(samples_added),
-            'class_distribution': class_distribution,
-            'duration': duration,
-            'failed_count': failed_count,
-            'global_best_round': self.global_best_round,
-            'timestamp': datetime.now().isoformat()
-        }
-
-        self.round_stats.append(stats)
-
-    def _create_round_visualizations(self, round_num: int, y_true: np.ndarray, y_pred: np.ndarray):
-        """Create visualizations for the current round"""
-        if not self.stats_config.get('enable_confusion_matrix', True):
-            return
-
-        # Convert to original labels for confusion matrix
-        y_true_original = np.array([self._get_original_class_label(cls) for cls in y_true])
-        y_pred_original = np.array([self._get_original_class_label(cls) for cls in y_pred])
-
-        # Create confusion matrix
-        plt.figure(figsize=(10, 8))
-        cm = confusion_matrix(y_true_original, y_pred_original)
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-        plt.title(f'Round {round_num} - Confusion Matrix\nAccuracy: {accuracy_score(y_true, y_pred):.4f}')
-        plt.xlabel('Predicted')
-        plt.ylabel('Actual')
-
-        # Save with round number
-        output_dir = self.viz_config.get('output_dir', 'adaptive_visualizations')
-        plt.savefig(f'{output_dir}/confusion_matrix_round_{round_num:03d}.png', dpi=150, bbox_inches='tight')
-        plt.close()
-
-    def _create_comprehensive_analysis(self, X_train: np.ndarray, y_train: np.ndarray,
-                                    X_test: np.ndarray, y_test: np.ndarray):
-        """Create comprehensive analysis of the adaptive learning process"""
-        print("\n📊 Creating comprehensive analysis...")
-
-        # 1. Create learning curve
-        self._create_learning_curve()
-
-        # 2. Create sample selection analysis
-        self._create_sample_selection_analysis()
-
-        # 3. Create final model evaluation
-        self._create_final_evaluation(X_test, y_test)
-
-        # 4. Create adaptive learning summary
-        self._create_adaptive_summary()
-
-        print("✅ Comprehensive analysis completed!")
-
-    def _create_learning_curve(self):
-        """Create learning curve showing accuracy and training size over rounds"""
-        if len(self.round_stats) < 2:
-            print("⚠️ Not enough rounds for learning curve")
-            return
-
-        rounds = [stats['round'] for stats in self.round_stats]
-        current_accuracies = [stats['current_test_accuracy'] for stats in self.round_stats]
-        global_best_accuracies = [stats['global_best_accuracy'] for stats in self.round_stats]
-        training_sizes = [stats['training_size'] for stats in self.round_stats]
-        failed_counts = [stats['failed_count'] for stats in self.round_stats]
-
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
-
-        # Plot 1: Accuracy progression
-        ax1.plot(rounds, current_accuracies, 'b-o', linewidth=2, markersize=6, label='Current Test Accuracy')
-        ax1.plot(rounds, global_best_accuracies, 'r-o', linewidth=2, markersize=6, label='Global Best (Entire Dataset)')
-        ax1.set_xlabel('Adaptive Round')
-        ax1.set_ylabel('Accuracy')
-        ax1.set_title('Adaptive Learning - Accuracy Progression')
-        ax1.grid(True, alpha=0.3)
-        ax1.axhline(y=self.global_best_accuracy, color='g', linestyle='--', label=f'Best: {self.global_best_accuracy:.4f}')
-        ax1.legend()
-
-        # Plot 2: Training size progression
-        ax2.plot(rounds, training_sizes, 'g-o', linewidth=2, markersize=6)
-        ax2.set_xlabel('Adaptive Round')
-        ax2.set_ylabel('Training Set Size')
-        ax2.set_title('Training Set Growth')
-        ax2.grid(True, alpha=0.3)
-
-        # Plot 3: Failed examples progression
-        ax3.plot(rounds, failed_counts, 'r-o', linewidth=2, markersize=6)
-        ax3.set_xlabel('Adaptive Round')
-        ax3.set_ylabel('Failed Examples')
-        ax3.set_title('Failed Examples Reduction')
-        ax3.grid(True, alpha=0.3)
-
-        # Plot 4: Samples added per round
-        samples_added = [stats['samples_added'] for stats in self.round_stats]
-        ax4.bar(rounds, samples_added, alpha=0.7, color='orange')
-        ax4.set_xlabel('Adaptive Round')
-        ax4.set_ylabel('Samples Added')
-        ax4.set_title('Samples Added per Round')
-        ax4.grid(True, alpha=0.3)
-
-        plt.tight_layout()
-        output_dir = self.viz_config.get('output_dir', 'adaptive_visualizations')
-        plt.savefig(f'{output_dir}/adaptive_learning_curve.png', dpi=150, bbox_inches='tight')
-        plt.close()
-
-    def _create_sample_selection_analysis(self):
-        """Create analysis of sample selection patterns"""
-        if not self.all_selected_samples:
-            print("⚠️ No sample selection data available")
-            return
-
-        # Analyze selection patterns by class and round
-        selection_data = []
-        for class_label, samples in self.all_selected_samples.items():
-            for sample_info in samples:
-                selection_data.append({
-                    'class': class_label,
-                    'round': sample_info['round'],
-                    'margin': sample_info['margin'],
-                    'selection_type': sample_info['selection_type']
-                })
-
-        if not selection_data:
-            return
-
-        df = pd.DataFrame(selection_data)
-
-        plt.figure(figsize=(12, 8))
-
-        # Plot 1: Samples selected by class and round
-        plt.subplot(2, 2, 1)
-        class_round_counts = df.groupby(['class', 'round']).size().unstack(fill_value=0)
-        class_round_counts.T.plot(kind='bar', stacked=True, ax=plt.gca())
-        plt.title('Samples Selected by Class and Round')
-        plt.xlabel('Adaptive Round')
-        plt.ylabel('Number of Samples')
-        plt.legend(title='Class', bbox_to_anchor=(1.05, 1), loc='upper left')
-
-        # Plot 2: Margin distribution by class
-        plt.subplot(2, 2, 2)
-        df.boxplot(column='margin', by='class', ax=plt.gca())
-        plt.title('Margin Distribution by Class')
-        plt.suptitle('')  # Remove automatic title
-        plt.xlabel('Class')
-        plt.ylabel('Margin')
-
-        # Plot 3: Selection types
-        plt.subplot(2, 2, 3)
-        selection_counts = df['selection_type'].value_counts()
-        plt.pie(selection_counts.values, labels=selection_counts.index, autopct='%1.1f%%')
-        plt.title('Sample Selection Types')
-
-        # Plot 4: Rounds with most selections
-        plt.subplot(2, 2, 4)
-        round_counts = df['round'].value_counts().sort_index()
-        plt.bar(round_counts.index, round_counts.values)
-        plt.title('Samples Selected per Round')
-        plt.xlabel('Round')
-        plt.ylabel('Samples Selected')
-
-        plt.tight_layout()
-        output_dir = self.viz_config.get('output_dir', 'adaptive_visualizations')
-        plt.savefig(f'{output_dir}/sample_selection_analysis.png', dpi=150, bbox_inches='tight')
-        plt.close()
-
-    def _create_final_evaluation(self, X_test: np.ndarray, y_test: np.ndarray):
-        """Create final model evaluation"""
-        print("📈 Creating final model evaluation...")
-
-        # Get predictions
-        y_pred = self._predict_with_current_model(X_test)
-        y_test_original = np.array([self._get_original_class_label(cls) for cls in y_test])
-        y_pred_original = np.array([self._get_original_class_label(cls) for cls in y_pred])
-
-        # Final accuracy
-        final_accuracy = accuracy_score(y_test, y_pred)
-        print(f"🎯 Final Test Accuracy: {final_accuracy:.4f}")
-
-        # Detailed classification report
-        print("\n📋 Detailed Classification Report:")
-        print(classification_report(y_test_original, y_pred_original))
-
-        # Final confusion matrix
-        plt.figure(figsize=(10, 8))
-        cm = confusion_matrix(y_test_original, y_pred_original)
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-        plt.title(f'Final Model - Confusion Matrix\nAccuracy: {final_accuracy:.4f}')
-        plt.xlabel('Predicted')
-        plt.ylabel('Actual')
-
-        output_dir = self.viz_config.get('output_dir', 'adaptive_visualizations')
-        plt.savefig(f'{output_dir}/final_confusion_matrix.png', dpi=150, bbox_inches='tight')
-        plt.close()
-
-    def _create_adaptive_summary(self):
-        """Create comprehensive adaptive learning summary"""
-        summary = {
-            'dataset': self.dataset_name,
-            'device': self.device_type,
-            'total_rounds': len(self.round_stats),
-            'best_round': self.best_round,
-            'best_accuracy': self.best_accuracy,
-            'global_best_round': self.global_best_round,
-            'global_best_accuracy': self.global_best_accuracy,
-            'final_training_size': len(self.best_training_indices),
-            'adaptive_config': self.adaptive_config,
-            'start_time': self.adaptive_start_time.isoformat(),
-            'end_time': datetime.now().isoformat(),
-            'total_duration': (datetime.now() - self.adaptive_start_time).total_seconds(),
-            'round_statistics': self.round_stats,
-            'sample_selection_summary': {
-                class_label: len(samples)
-                for class_label, samples in self.all_selected_samples.items()
-            },
-            'architecture_frozen': getattr(self.model, 'architecture_frozen', False)
-        }
-
-        # Save summary as JSON
-        output_dir = self.viz_config.get('output_dir', 'adaptive_visualizations')
-        with open(f'{output_dir}/adaptive_learning_summary.json', 'w') as f:
-            json.dump(summary, f, indent=4, default=str)
-
-        # Print summary to console
-        print("\n📊 ADAPTIVE LEARNING SUMMARY")
-        print("=" * 50)
-        print(f"Dataset: {summary['dataset']}")
-        print(f"Device: {summary['device']}")
-        print(f"Total Rounds: {summary['total_rounds']}")
-        print(f"Best Round: {summary['best_round']}")
-        print(f"Best Accuracy: {summary['best_accuracy']:.4f}")
-        print(f"Global Best Round: {summary['global_best_round']}")
-        print(f"Global Best Accuracy (Entire Dataset): {summary['global_best_accuracy']:.4f}")
-        print(f"Final Training Size: {summary['final_training_size']}")
-        print(f"Total Duration: {summary['total_duration']:.2f}s")
-        print(f"Architecture Frozen: {summary['architecture_frozen']}")
-        print(f"Sample Selection Summary: {summary['sample_selection_summary']}")
-
-    def _save_final_results(self, X_train: np.ndarray, y_train: np.ndarray,
-                          X_test: np.ndarray, y_test: np.ndarray):
-        """Save final results and model"""
-        print("\n💾 Saving final results...")
-
-        output_dir = self.viz_config.get('output_dir', 'adaptive_visualizations')
-
-        # Save indices and global best information
-        results = {
-            'global_best_training_indices': self.global_best_training_indices,
-            'global_best_test_indices': self.global_best_test_indices,
-            'global_best_accuracy': self.global_best_accuracy,
-            'global_best_round': self.global_best_round,
-            'best_training_indices': self.best_training_indices,
-            'best_test_indices': self.best_test_indices,
-            'best_accuracy': self.best_accuracy,
-            'best_round': self.best_round,
-            'adaptive_config': self.adaptive_config,
-            'round_statistics': self.round_stats,
-            'final_training_set_size': len(X_train),
-            'final_test_set_size': len(X_test),
-            'architecture_frozen': getattr(self.model, 'architecture_frozen', False)
-        }
-
-        with open(f'{output_dir}/adaptive_results.json', 'w') as f:
-            json.dump(results, f, indent=4, default=str)
-
-        # Save the trained model
-        self.model.save_model()
-
-        print("✅ Final results saved with global best model information!")
-
-    def prepare_full_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Prepare full dataset for adaptive learning"""
-        # Use the base model's data preparation
-        df = self.model.data
-        feature_cols = [col for col in df.columns if col != self.model.target_column]
-        X = df[feature_cols].values
-        y_original = df[self.model.target_column].values
-
-        # Fit label encoder for adaptive learning
-        self.label_encoder.fit(y_original)
-        y = self.label_encoder.transform(y_original)
-
-        return X, y, y_original
-
-    def _train_with_custom_data(self, X_train: np.ndarray, y_train: np.ndarray):
-        """Train the model with custom data"""
-        # This method needs to be implemented to handle custom training data
-        # For now, we'll use the model's internal training method
-        try:
-            # Convert to appropriate format if needed
-            original_data = self.model.data.copy()
-            # Create temporary DataFrame with custom training data
-            feature_cols = [col for col in original_data.columns if col != self.model.target_column]
-            temp_df = pd.DataFrame(X_train, columns=feature_cols)
-            temp_df[self.model.target_column] = self.label_encoder.inverse_transform(y_train)
-
-            # Replace model data temporarily
-            self.model.data = temp_df
-
-            # Train the model
-            self.model.train()
-
-            # Restore original data
-            self.model.data = original_data
-        except Exception as e:
-            print(f"⚠️ Custom training error: {e}")
-
-    def _predict_with_current_model(self, X: np.ndarray) -> np.ndarray:
-        """Get predictions from current model with proper label encoding"""
-        try:
-            # Get raw predictions directly from DBNN
-            raw_predictions = self.model.predict(X)
-
-            # Determine if predictions are encoded or decoded
-            if hasattr(self, 'label_encoder') and self.label_encoder is not None:
-                # Check if predictions are within valid encoded range
-                unique_preds = np.unique(raw_predictions)
-                n_classes = len(self.label_encoder.classes_)
-
-                if (np.issubdtype(raw_predictions.dtype, np.integer) and
-                    np.min(unique_preds) >= 0 and
-                    np.max(unique_preds) < n_classes):
-                    return raw_predictions
-                else:
-                    # Predictions are decoded, convert to encoded
-                    try:
-                        encoded_predictions = self.label_encoder.transform(raw_predictions)
-                        return encoded_predictions
-                    except Exception as e:
-                        print(f"   ❌ Encoding failed: {e}")
-                        return raw_predictions
-            else:
-                return raw_predictions
-
-        except Exception as e:
-            print(f"⚠️ Prediction error: {e}")
-            # Return fallback predictions that match y encoding
-            n_classes = len(np.unique(self.y_full)) if hasattr(self, 'y_full') else 5
-            return np.random.randint(0, n_classes, len(X))
-
-    def _get_posteriors_with_current_model(self, X: np.ndarray) -> np.ndarray:
-        """Get posterior probabilities from current model with numerical stability"""
-        try:
-            posteriors = self.model._compute_batch_posterior(X)
-
-            # Add numerical stability checks
-            if np.any(np.isnan(posteriors)) or np.any(np.isinf(posteriors)):
-                print(f"❌ Invalid posteriors detected: NaN={np.any(np.isnan(posteriors))}, Inf={np.any(np.isinf(posteriors))}")
-                # Fix by setting to uniform distribution
-                n_classes = posteriors.shape[1]
-                uniform_probs = np.ones_like(posteriors) / n_classes
-                return uniform_probs
-
-            # Check for zero posteriors (numerical underflow)
-            zero_mask = np.sum(posteriors, axis=1) == 0
-            if np.any(zero_mask):
-                n_zero = np.sum(zero_mask)
-                print(f"⚠️  {n_zero} samples have zero posteriors - applying numerical fix")
-                # Apply uniform distribution
-                n_classes = posteriors.shape[1]
-                posteriors[zero_mask] = 1.0 / n_classes
-
-            # Ensure probabilities sum to 1
-            row_sums = np.sum(posteriors, axis=1, keepdims=True)
-            if np.any(np.abs(row_sums - 1.0) > 1e-6):
-                posteriors = posteriors / (row_sums + 1e-10)
-
-            return posteriors
-
-        except Exception as e:
-            print(f"⚠️ Posterior error: {e}")
-            # Return uniform probabilities as fallback
-            n_classes = len(np.unique(self.y_full)) if hasattr(self, 'y_full') else 5
-            return np.ones((len(X), n_classes)) / n_classes
-
-    def _filter_sentinel_samples(self, X: np.ndarray, y: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray]:
-        """Filter out samples that contain sentinel values (-9999)"""
-        SENTINEL_VALUE = -9999
-        valid_mask = ~np.any(X == SENTINEL_VALUE, axis=1)
-
-        if not np.any(valid_mask):
-            raise ValueError("All samples contain sentinel values - no valid data to process")
-
-        X_filtered = X[valid_mask]
-
-        if y is not None:
-            y_filtered = y[valid_mask]
-            filtered_count = len(X) - len(X_filtered)
-            if filtered_count > 0:
-                print(f"Filtered out {filtered_count} samples containing sentinel values")
-            return X_filtered, y_filtered
-
-        return X_filtered, valid_mask
-
-    # Placeholder for methods that were not fully implemented in the original
-    def _select_kl_divergence_samples(self, X: np.ndarray, y: np.ndarray,
-                                    predictions: np.ndarray, posteriors: np.ndarray) -> List[int]:
-        """
-        Hybrid selection: First find failed examples within margin tolerance,
-        then rank by KL divergence to select most informative samples
-        """
-        print("🔍 Using HYBRID margin-tolerance + KL divergence selection...")
-
+    def _select_divergent_samples(self, X_remaining: np.ndarray, y_remaining: np.ndarray,
+                                predictions: np.ndarray, posteriors: np.ndarray,
+                                misclassified_indices: np.ndarray, remaining_indices: List[int]) -> List[int]:
+        """Select most divergent failed candidates from each class"""
         samples_to_add = []
-        unique_classes = np.unique(y)
+        unique_classes = np.unique(y_remaining)
 
-        # Get configuration parameters
-        margin_tolerance = self.adaptive_config.get('margin_tolerance', 0.15)
-        kl_threshold = self.adaptive_config.get('kl_divergence_threshold', 0.1)
-        max_kl_samples = self.adaptive_config.get('max_kl_samples_per_class', 5)
+        print("🔍 Selecting most divergent failed candidates...")
 
-        print(f"   Margin tolerance: {margin_tolerance}, KL threshold: {kl_threshold}")
-        print(f"   Max samples per class: {max_kl_samples}")
-
-        # Get test set predictions and true labels
-        y_test = y[self.test_indices]
-
-        # Find all misclassified samples
-        misclassified_mask = predictions != y_test
-        misclassified_indices = np.where(misclassified_mask)[0]
-
-        if len(misclassified_indices) == 0:
-            print("✅ No misclassified samples found")
-            return samples_to_add
-
-        print(f"📊 Found {len(misclassified_indices)} misclassified samples")
-
-        # Group misclassified samples by true class and calculate margins
+        # Group misclassified samples by true class
         class_samples = defaultdict(list)
 
-        for i, idx_in_test in enumerate(misclassified_indices):
-            original_idx = self.test_indices[idx_in_test]
-            true_class = y_test[idx_in_test]
-            pred_class = predictions[idx_in_test]
+        for idx_in_remaining in misclassified_indices:
+            original_idx = remaining_indices[idx_in_remaining]
+            true_class = y_remaining[idx_in_remaining]
+            pred_class = predictions[idx_in_remaining]
 
-            # Skip if indices are out of bounds
-            if (true_class >= posteriors.shape[1] or pred_class >= posteriors.shape[1] or
-                true_class < 0 or pred_class < 0):
+            # Convert class labels to 0-based indices for array access
+            true_class_idx_result = np.where(unique_classes == true_class)[0]
+            pred_class_idx_result = np.where(unique_classes == pred_class)[0]
+
+            # Check if we found valid indices
+            if len(true_class_idx_result) == 0 or len(pred_class_idx_result) == 0:
                 continue
 
-            # Calculate margin
-            true_posterior = posteriors[idx_in_test, true_class]
-            pred_posterior = posteriors[idx_in_test, pred_class]
+            true_class_idx = true_class_idx_result[0]
+            pred_class_idx = pred_class_idx_result[0]
+
+            # Calculate margin (divergence)
+            true_posterior = posteriors[idx_in_remaining, true_class_idx]
+            pred_posterior = posteriors[idx_in_remaining, pred_class_idx]
             margin = pred_posterior - true_posterior
 
             class_samples[true_class].append({
                 'index': original_idx,
                 'margin': margin,
                 'true_posterior': true_posterior,
-                'pred_posterior': pred_posterior,
-                'true_class': true_class,
-                'pred_class': pred_class,
-                'posteriors': posteriors[idx_in_test]  # Store full posterior for KL calculation
+                'pred_posterior': pred_posterior
             })
 
-        # For each class, apply the hybrid selection strategy
+        # For each class, select most divergent samples
+        max_samples = self.adaptive_config.get('max_margin_samples_per_class', 2)
+
         for class_id in unique_classes:
             if class_id not in class_samples or not class_samples[class_id]:
-                print(f"   ⚠️ Class {class_id}: No valid failed samples available")
                 continue
 
             class_data = class_samples[class_id]
-            print(f"   Class {class_id}: {len(class_data)} failed samples")
 
-            # STEP 1: Find margin range for this class
-            margins = [sample['margin'] for sample in class_data]
-            min_margin = min(margins)
-            max_margin = max(margins)
-            margin_range = max_margin - min_margin
+            # Sort by margin (most negative first - most divergent)
+            class_data.sort(key=lambda x: x['margin'])
 
-            # Calculate tolerance threshold
-            tolerance_threshold = min_margin + (margin_range * margin_tolerance)
+            # Select top divergent samples
+            selected_for_class = class_data[:max_samples]
 
-            print(f"     Margin range: [{min_margin:.4f}, {max_margin:.4f}]")
-            print(f"     Tolerance threshold: {tolerance_threshold:.4f}")
+            for sample in selected_for_class:
+                samples_to_add.append(sample['index'])
 
-            # STEP 2: Filter samples within margin tolerance (most ambiguous/misclassified)
-            tolerance_samples = [sample for sample in class_data if sample['margin'] <= tolerance_threshold]
-
-            if not tolerance_samples:
-                print(f"     ⚠️ No samples within margin tolerance, using all samples")
-                tolerance_samples = class_data
-
-            print(f"     Samples within margin tolerance: {len(tolerance_samples)}")
-
-            # STEP 3: Calculate KL divergence for filtered samples
-            kl_samples = []
-            for sample in tolerance_samples:
-                try:
-                    # Create target distribution (one-hot for true class)
-                    target_distribution = np.zeros_like(sample['posteriors'])
-                    target_distribution[sample['true_class']] = 1.0
-
-                    # Calculate KL divergence: KL(target || predicted)
-                    eps = 1e-10
-                    p_safe = target_distribution + eps
-                    q_safe = sample['posteriors'] + eps
-
-                    # Normalize
-                    p_safe = p_safe / np.sum(p_safe)
-                    q_safe = q_safe / np.sum(q_safe)
-
-                    kl_divergence = np.sum(p_safe * np.log(p_safe / q_safe))
-
-                    # Also calculate entropy of predicted distribution for additional insight
-                    entropy_pred = entropy(q_safe)
-
-                    kl_samples.append({
-                        **sample,  # Include all original sample data
-                        'kl_divergence': kl_divergence,
-                        'entropy': entropy_pred,
-                        'combined_score': kl_divergence * (1 + entropy_pred)  # Combine KL and entropy
-                    })
-
-                except Exception as e:
-                    continue
-
-            if not kl_samples:
-                print(f"     ❌ No valid KL divergence calculations")
-                continue
-
-            # STEP 4: Filter by KL divergence threshold and sort
-            high_kl_samples = [sample for sample in kl_samples if sample['kl_divergence'] >= kl_threshold]
-
-            if not high_kl_samples:
-                print(f"     ⚠️ No samples meet KL threshold, using top KL samples")
-                # If no samples meet threshold, use top samples by KL divergence
-                high_kl_samples = sorted(kl_samples, key=lambda x: x['kl_divergence'], reverse=True)[:max_kl_samples]
-            else:
-                # Sort high KL samples by combined score (KL divergence × entropy)
-                high_kl_samples = sorted(high_kl_samples, key=lambda x: x['combined_score'], reverse=True)
-
-            print(f"     High KL samples (≥{kl_threshold}): {len(high_kl_samples)}")
-
-            # STEP 5: Select top samples
-            selected_for_class = []
-            for sample_info in high_kl_samples[:max_kl_samples]:
-                if (sample_info['index'] not in self.training_indices and
-                    sample_info['index'] not in samples_to_add):
-
-                    selected_for_class.append(sample_info)
-                    samples_to_add.append(sample_info['index'])
-
-                    # Track selection with detailed information
-                    self.all_selected_samples[self._get_original_class_label(class_id)].append({
-                        'index': sample_info['index'],
-                        'margin': sample_info['margin'],
-                        'kl_divergence': sample_info['kl_divergence'],
-                        'entropy': sample_info['entropy'],
-                        'combined_score': sample_info['combined_score'],
-                        'true_posterior': sample_info['true_posterior'],
-                        'selection_type': 'hybrid_kl_divergence',
-                        'round': self.adaptive_round,
-                        'within_margin_tolerance': sample_info['margin'] <= tolerance_threshold
-                    })
+                # Track selection
+                self.all_selected_samples[self._get_original_class_label(class_id)].append({
+                    'index': sample['index'],
+                    'margin': sample['margin'],
+                    'selection_type': 'divergent',
+                    'round': self.adaptive_round
+                })
 
             if selected_for_class:
-                avg_margin = np.mean([s['margin'] for s in selected_for_class])
-                avg_kl = np.mean([s['kl_divergence'] for s in selected_for_class])
-                print(f"     ✅ Selected {len(selected_for_class)} samples "
-                      f"(avg margin: {avg_margin:.4f}, avg KL: {avg_kl:.4f})")
+                print(f"   ✅ Class {class_id}: Selected {len(selected_for_class)} divergent samples")
 
-                # Show selection details
-                if len(selected_for_class) > 0:
-                    best_sample = selected_for_class[0]
-                    print(f"       Best: KL={best_sample['kl_divergence']:.4f}, "
-                          f"margin={best_sample['margin']:.4f}, "
-                          f"entropy={best_sample['entropy']:.4f}")
-            else:
-                print(f"     ❌ No new samples selected for class {class_id}")
-
-        print(f"🎯 Selected {len(samples_to_add)} total samples using hybrid KL divergence strategy")
-
-        # Show overall statistics
-        if samples_to_add:
-            all_kl_values = []
-            all_margins = []
-            for class_id in unique_classes:
-                if class_id in class_samples:
-                    for sample in self.all_selected_samples.get(self._get_original_class_label(class_id), []):
-                        if sample['round'] == self.adaptive_round and sample['selection_type'] == 'hybrid_kl_divergence':
-                            all_kl_values.append(sample['kl_divergence'])
-                            all_margins.append(sample['margin'])
-
-            if all_kl_values:
-                print(f"📈 Selection stats: KL[{min(all_kl_values):.4f}, {max(all_kl_values):.4f}], "
-                      f"Margin[{min(all_margins):.4f}, {max(all_margins):.4f}]")
-
+        print(f"📥 Total divergent samples to add: {len(samples_to_add)}")
         return samples_to_add
 
-    def _create_interactive_html_dashboard(self, X_train: np.ndarray, y_train: np.ndarray,
-                                        X_test: np.ndarray, y_test: np.ndarray):
-        """Create interactive HTML dashboard (placeholder)"""
-        print("📊 Interactive HTML dashboard creation not yet implemented")
+    def _get_original_class_label(self, encoded_class: int) -> str:
+        """Convert encoded class back to original label"""
+        if hasattr(self.label_encoder, 'classes_'):
+            try:
+                return str(self.label_encoder.inverse_transform([encoded_class])[0])
+            except:
+                return str(encoded_class)
+        return str(encoded_class)
 
-    def _create_unified_3d_animation(self):
-        """Create unified 3D animation (placeholder)"""
-        print("🎬 Unified 3D animation creation not yet implemented")
+    def _generate_adaptive_learning_report(self):
+        """Generate comprehensive adaptive learning report"""
+        print("\n📊 Generating Adaptive Learning Report...")
 
-    def _create_comprehensive_3d_visualization(self, X_train: np.ndarray, y_train: np.ndarray):
-        """Create comprehensive 3D visualization (placeholder)"""
-        print("🎨 Comprehensive 3D visualization creation not yet implemented")
+        # Ensure we have valid statistics
+        if not hasattr(self, 'best_accuracy'):
+            self.best_accuracy = 0.0
+        if not hasattr(self, 'best_training_indices'):
+            self.best_training_indices = []
+        if not hasattr(self, 'best_round'):
+            self.best_round = 0
 
+        total_time = str(datetime.now() - self.adaptive_start_time) if hasattr(self, 'adaptive_start_time') and self.adaptive_start_time else "N/A"
+
+        report = {
+            'dataset': self.dataset_name,
+            'total_samples': len(self.X_full) if hasattr(self, 'X_full') else 0,
+            'final_training_size': len(self.best_training_indices),
+            'final_remaining_size': (len(self.X_full) - len(self.best_training_indices)) if hasattr(self, 'X_full') else 0,
+            'best_accuracy': float(self.best_accuracy),  # Ensure it's a float
+            'best_round': self.best_round,
+            'total_rounds': getattr(self, 'adaptive_round', 0),
+            'total_time': total_time,
+            'adaptive_config': self.adaptive_config,
+            'round_statistics': getattr(self, 'round_stats', []),
+            'selected_samples_by_class': {k: len(v) for k, v in self.all_selected_samples.items()}
+        }
+
+        # Save report
+        report_path = f"{self.viz_config.get('output_dir', 'adaptive_visualizations')}/adaptive_learning_report.json"
+        with open(report_path, 'w') as f:
+            json.dump(report, f, indent=4, default=str)
+
+        print(f"✅ Report saved to: {report_path}")
+
+        # Print summary with proper formatting
+        print("\n📈 Adaptive Learning Summary:")
+        print("=" * 50)
+        print(f"   Dataset: {report['dataset']}")
+        print(f"   Total samples: {report['total_samples']}")
+
+        if report['total_samples'] > 0:
+            training_percentage = (report['final_training_size'] / report['total_samples']) * 100
+            print(f"   Final training set: {report['final_training_size']} ({training_percentage:.1f}%)")
+        else:
+            print(f"   Final training set: {report['final_training_size']}")
+
+        print(f"   Best acid test accuracy: {report['best_accuracy']:.4f}")
+        print(f"   Achieved in round: {report['best_round']}")
+        print(f"   Total rounds: {report['total_rounds']}")
+        print(f"   Total time: {report['total_time']}")
+        print("=" * 50)
 
 def main():
-    """Main function to demonstrate adaptive DBNN"""
-    print("🎯 Advanced Adaptive DBNN System")
+    """Main function to run adaptive DBNN"""
+    print("🎯 Adaptive DBNN System")
     print("=" * 50)
 
-    # Create and run adaptive DBNN
+    # Create adaptive DBNN
     adaptive_model = AdaptiveDBNN()
 
-    # Optionally configure settings
+    # Ask if user wants to configure settings
     configure = input("\nConfigure adaptive learning settings? (y/N): ").strip().lower()
     if configure == 'y':
-        adaptive_model.configure_adaptive_learning()
+        # Simple configuration interface
+        print("\n🎛️  Configuration Options:")
+        print("1. Enable KL Divergence sampling")
+        print("2. Disable sample limits")
+        print("3. Change number of rounds")
+        print("4. Keep current settings")
+
+        choice = input("Select option (1-4): ").strip()
+        if choice == '1':
+            adaptive_model.adaptive_config['enable_kl_divergence'] = True
+            print("✅ KL Divergence sampling enabled")
+        elif choice == '2':
+            adaptive_model.adaptive_config['disable_sample_limit'] = True
+            print("✅ Sample limits disabled")
+        elif choice == '3':
+            try:
+                rounds = int(input("Enter number of rounds: "))
+                adaptive_model.adaptive_config['max_adaptive_rounds'] = rounds
+                print(f"✅ Max rounds set to {rounds}")
+            except ValueError:
+                print("❌ Invalid number, using default")
 
     # Run adaptive learning
-    print("\n🚀 Starting adaptive learning process...")
+    print("\n🚀 Starting adaptive learning...")
     X_train, y_train, X_test, y_test = adaptive_model.adaptive_learn()
 
     print(f"\n✅ Adaptive learning completed!")
     print(f"📦 Final training set size: {len(X_train)}")
     print(f"📊 Final test set size: {len(X_test)}")
-    print(f"🏆 Best accuracy achieved: {adaptive_model.global_best_accuracy:.4f}")
+    print(f"🏆 Best accuracy achieved: {adaptive_model.best_accuracy:.4f}")
 
 if __name__ == "__main__":
     main()
