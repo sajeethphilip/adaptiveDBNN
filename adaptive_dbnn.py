@@ -349,7 +349,7 @@ class DBNNWrapper:
         return self.preprocessor.preprocess_dataset(self.data)
 
     def initialize_with_full_data(self, X: np.ndarray, y: np.ndarray):
-        """Step 1: Initialize DBNN architecture with full dataset"""
+        """Step 1: Initialize DBNN architecture with full dataset - NO TRAINING"""
         print("🏗️ Initializing DBNN architecture with full dataset...")
 
         # Create temporary file with full data
@@ -363,8 +363,9 @@ class DBNNWrapper:
             # First, manually initialize the DBNN core architecture
             self._initialize_dbnn_architecture(X, y, feature_cols)
 
-            # Then train with full data to initialize architecture
-            success = self._train_with_initialized_architecture(temp_file, feature_cols)
+            # Instead of training, just build the initial network structure
+            print("🔧 Building network structure (no training)...")
+            success = self._build_network_structure_only(temp_file, feature_cols)
 
             if success:
                 print("✅ DBNN architecture initialized with full dataset")
@@ -382,6 +383,70 @@ class DBNNWrapper:
         finally:
             if os.path.exists(temp_file):
                 os.remove(temp_file)
+
+    def _build_network_structure_only(self, train_file: str, feature_cols: List[str]):
+        """Build network structure without training - just initialize counts"""
+        try:
+            # Load data without re-initializing
+            features_batches, targets_batches, feature_columns_used, original_targets_batches = self.core.load_data(
+                train_file, self.target_column, feature_cols
+            )
+
+            if not features_batches:
+                return False
+
+            # Encode targets using existing encoder
+            encoded_targets_batches = []
+            for batch in original_targets_batches:
+                encoded_batch = self.core.class_encoder.transform(batch)
+                encoded_targets_batches.append(encoded_batch)
+
+            # Initialize training parameters (minimal setup)
+            resol = self.core.config.get('resol', 100)
+            omax, omin = self._initialize_training_params(features_batches, encoded_targets_batches, resol)
+
+            # Process just a few samples to build the network structure
+            # We don't need to process all samples for architecture setup
+            total_samples = sum(len(batch) for batch in features_batches)
+            sample_limit = min(100, total_samples)  # Process only up to 100 samples
+
+            print(f"📊 Building network structure with {sample_limit} samples...")
+            processed_count = 0
+
+            for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
+                batch_size = len(features_batch)
+
+                for sample_idx in range(min(batch_size, sample_limit - processed_count)):
+                    vects = np.zeros(self.core.innodes + self.core.outnodes + 2)
+                    for i in range(1, self.core.innodes + 1):
+                        vects[i] = features_batch[sample_idx, i-1]
+                    tmpv = targets_batch[sample_idx]
+
+                    # Use the core's processing function to build network counts
+                    self.core.anti_net = dbnn.process_training_sample(
+                        vects, tmpv, self.core.anti_net, self.core.anti_wts, self.core.binloc,
+                        self.core.resolution_arr, self.core.dmyclass, self.core.min_val, self.core.max_val,
+                        self.core.innodes, self.core.outnodes
+                    )
+
+                    processed_count += 1
+
+                if processed_count >= sample_limit:
+                    break
+
+            print(f"✅ Network structure built with {processed_count} samples")
+
+            # Mark as trained to allow predictions, but note it's architecture-only
+            self.core.is_trained = True
+            self.core.is_architecture_only = True  # Add this flag
+
+            return True
+
+        except Exception as e:
+            print(f"❌ Network structure building error: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
 
     def _initialize_dbnn_architecture(self, X: np.ndarray, y: np.ndarray, feature_cols: List[str]):
         """Manually initialize DBNN architecture to avoid the dmyclass error"""
@@ -431,7 +496,7 @@ class DBNNWrapper:
                 os.remove(temp_file)
 
     def _train_with_initialized_architecture(self, train_file: str, feature_cols: List[str]):
-        """Train with already initialized architecture (no re-initialization)"""
+        """Train with acid test-based early stopping"""
         try:
             # Load data without re-initializing
             features_batches, targets_batches, feature_columns_used, original_targets_batches = self.core.load_data(
@@ -458,17 +523,16 @@ class DBNNWrapper:
             for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
                 processed = self._process_training_batch(features_batch, targets_batch)
                 total_processed += processed
-                if total_processed % 1000 == 0:
-                    print(f"Processed {total_processed}/{total_samples} samples")
 
-            # Training with early stopping
+            # Training with acid test-based early stopping
             gain = self.core.config.get('gain', 2.0)
             max_epochs = self.core.config.get('epochs', 100)
             patience = self.core.config.get('patience', 10)
             min_improvement = self.core.config.get('min_improvement', 0.1)
 
-            print(f"Starting weight training with early stopping...")
+            print(f"Starting weight training (max {max_epochs} epochs)...")
             best_accuracy = 0.0
+            best_weights = None
             best_round = 0
             patience_counter = 0
 
@@ -476,31 +540,53 @@ class DBNNWrapper:
                 if rnd == 0:
                     # Initial evaluation
                     current_accuracy, correct_predictions, _ = self._evaluate_model(features_batches, encoded_targets_batches)
-                    print(f"Round {rnd:3d}: Initial Accuracy = {current_accuracy:.2f}% ({correct_predictions}/{total_samples})")
+                    print(f"Epoch {rnd:3d}: Accuracy = {current_accuracy:.2f}% ({correct_predictions}/{total_samples})")
                     best_accuracy = current_accuracy
+                    best_weights = self.core.anti_wts.copy()
+                    best_round = rnd
+
+                    # Stop immediately if we already have 100% accuracy
+                    if current_accuracy >= 100.0:
+                        print("🎉 Already at 100% accuracy - stopping training!")
+                        break
                     continue
 
                 # Training pass
                 self._train_epoch(features_batches, encoded_targets_batches, gain)
 
-                # Evaluation after training round
+                # Evaluation after training epoch
                 current_accuracy, correct_predictions, _ = self._evaluate_model(features_batches, encoded_targets_batches)
-                print(f"Round {rnd:3d}: Accuracy = {current_accuracy:.2f}% ({correct_predictions}/{total_samples})")
 
-                # Early stopping logic
-                if current_accuracy > best_accuracy + min_improvement:
+                # Stop immediately if we reach 100% accuracy
+                if current_accuracy >= 100.0:
+                    print(f"Epoch {rnd:3d}: Accuracy = {current_accuracy:.2f}% - 🎉 100% ACCURACY REACHED!")
                     best_accuracy = current_accuracy
+                    best_weights = self.core.anti_wts.copy()
+                    best_round = rnd
+                    break
+
+                print(f"Epoch {rnd:3d}: Accuracy = {current_accuracy:.2f}% ({correct_predictions}/{total_samples})")
+
+                # Check for improvement
+                if current_accuracy > best_accuracy + min_improvement:
+                    improvement = current_accuracy - best_accuracy
+                    best_accuracy = current_accuracy
+                    best_weights = self.core.anti_wts.copy()
                     best_round = rnd
                     patience_counter = 0
-                    print(f"  → New best accuracy! (Improved by {current_accuracy - best_accuracy:.2f}%)")
+                    print(f"  → Improved by {improvement:.2f}%")
                 else:
                     patience_counter += 1
-                    print(f"  → No improvement (Patience: {patience_counter}/{patience})")
+                    if patience_counter >= patience:
+                        print(f"  → Early stopping after {rnd} epochs (no improvement for {patience} epochs)")
+                        break
+                    else:
+                        print(f"  → No improvement (patience: {patience_counter}/{patience})")
 
-                if patience_counter >= patience:
-                    print(f"\nEarly stopping triggered after {rnd} rounds.")
-                    print(f"Best accuracy {best_accuracy:.2f}% achieved at round {best_round}")
-                    break
+            # Restore best weights
+            if best_weights is not None:
+                self.core.anti_wts = best_weights
+                print(f"✅ Training completed - Best accuracy: {best_accuracy:.2f}% (epoch {best_round})")
 
             self.core.is_trained = True
             return True
@@ -1151,7 +1237,7 @@ class AdaptiveDBNN:
         return X, y, y_original
 
     def adaptive_learn(self, X: np.ndarray = None, y: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Main adaptive learning method following the exact requirements"""
+        """Main adaptive learning method with acid test-based stopping criteria"""
         print("\n🚀 STARTING ADAPTIVE LEARNING")
         print("=" * 60)
 
@@ -1182,16 +1268,19 @@ class AdaptiveDBNN:
         print(f"📊 Initial training set: {len(X_train)} samples")
         print(f"📊 Remaining test set: {len(remaining_indices)} samples")
 
-        # Initialize tracking variables
+        # Initialize tracking variables for acid test-based stopping
         self.best_accuracy = 0.0
         self.best_training_indices = initial_indices.copy()
         self.best_round = 0
+        acid_test_history = []
         patience_counter = 0
 
         max_rounds = self.adaptive_config['max_adaptive_rounds']
         patience = self.adaptive_config['patience']
+        min_improvement = self.adaptive_config['min_improvement']
 
         print(f"\n🔄 Starting adaptive learning for up to {max_rounds} rounds...")
+        print(f"📊 Stopping criteria: 100% acid test OR no improvement for {patience} rounds")
         self.adaptive_start_time = datetime.now()
 
         for round_num in range(1, max_rounds + 1):
@@ -1208,32 +1297,42 @@ class AdaptiveDBNN:
                 print("❌ Training failed, stopping...")
                 break
 
-            # STEP 3: Run acid test on entire dataset
+            # STEP 3: Run acid test on entire dataset - THIS IS OUR MAIN STOPPING CRITERION
             print("🧪 Running acid test on entire dataset...")
             try:
                 all_predictions = self.model.predict(X)
                 # Ensure predictions and y have same data type
                 all_predictions = all_predictions.astype(y.dtype)
                 acid_test_accuracy = accuracy_score(y, all_predictions)
+                acid_test_history.append(acid_test_accuracy)
                 print(f"📊 Acid test accuracy: {acid_test_accuracy:.4f}")
 
-                # Check if all samples are correctly classified
-                if acid_test_accuracy >= 0.999:  # 99.9% accuracy
-                    print("🎉 All samples correctly classified!")
-                    # Update best accuracy before breaking
-                    if acid_test_accuracy > self.best_accuracy:
-                        self.best_accuracy = acid_test_accuracy
-                        self.best_training_indices = initial_indices.copy()
-                        self.best_round = round_num
+                # PRIMARY STOPPING CRITERION 1: 100% accuracy on entire dataset
+                if acid_test_accuracy >= 0.9999:  # 99.99% accuracy (accounting for floating point)
+                    print("🎉 REACHED 100% ACCURACY ON ENTIRE DATASET! Stopping adaptive learning.")
+                    self.best_accuracy = acid_test_accuracy
+                    self.best_training_indices = initial_indices.copy()
+                    self.best_round = round_num
                     break
+
             except Exception as e:
                 print(f"❌ Acid test failed: {e}")
                 acid_test_accuracy = 0.0
-            # STEP 3 (continued): Identify failed candidates in remaining data
-            if not remaining_indices:
-                print("💤 No more samples to add")
-                break
+                acid_test_history.append(0.0)
+                continue
 
+            # STEP 3 (continued): Check if we have any remaining samples to process
+            if not remaining_indices:
+                print("💤 No more samples to add to training set")
+                # Check if we should stop based on acid test performance
+                if len(acid_test_history) >= 3:
+                    recent_improvement = acid_test_history[-1] - acid_test_history[-3]
+                    if recent_improvement < min_improvement:
+                        print("📊 Acid test performance flattened - stopping adaptive learning.")
+                        break
+                continue
+
+            # STEP 4: Identify failed candidates in remaining data
             X_remaining = X[remaining_indices]
             y_remaining = y[remaining_indices]
 
@@ -1241,25 +1340,22 @@ class AdaptiveDBNN:
             remaining_predictions = self.model.predict(X_remaining)
             remaining_posteriors = self.model._compute_batch_posterior(X_remaining)
 
-            # Debug predictions
-            self._debug_predictions(y_remaining, remaining_predictions, remaining_posteriors)
-
             # Find misclassified samples
             misclassified_mask = remaining_predictions != y_remaining
             misclassified_indices = np.where(misclassified_mask)[0]
 
             if len(misclassified_indices) == 0:
                 print("✅ No misclassified samples in remaining data!")
-                # Update best accuracy before breaking
-                if acid_test_accuracy > self.best_accuracy:
-                    self.best_accuracy = acid_test_accuracy
-                    self.best_training_indices = initial_indices.copy()
-                    self.best_round = round_num
+                # PRIMARY STOPPING CRITERION 2: No errors in remaining data
+                print("🎉 PERFECT CLASSIFICATION ON REMAINING DATA! Stopping adaptive learning.")
+                self.best_accuracy = acid_test_accuracy
+                self.best_training_indices = initial_indices.copy()
+                self.best_round = round_num
                 break
 
             print(f"📊 Found {len(misclassified_indices)} misclassified samples in remaining data")
 
-            # STEP 3 (continued): Select most divergent failed candidates
+            # STEP 5: Select most divergent failed candidates
             samples_to_add_indices = self._select_divergent_samples(
                 X_remaining, y_remaining, remaining_predictions, remaining_posteriors,
                 misclassified_indices, remaining_indices
@@ -1267,7 +1363,13 @@ class AdaptiveDBNN:
 
             if not samples_to_add_indices:
                 print("💤 No divergent samples to add")
-                break
+                # Check if we should stop based on acid test performance
+                if len(acid_test_history) >= 3:
+                    recent_improvement = acid_test_history[-1] - acid_test_history[-3]
+                    if recent_improvement < min_improvement:
+                        print("📊 Acid test performance flattened - stopping adaptive learning.")
+                        break
+                continue
 
             # Update training set
             initial_indices.extend(samples_to_add_indices)
@@ -1276,24 +1378,42 @@ class AdaptiveDBNN:
             X_train = X[initial_indices]
             y_train = y[initial_indices]
 
-            print(f"📈 Training set size: {len(X_train)}")
-            print(f"📊 Remaining test set size: {len(remaining_indices)}")
+            print(f"📈 Training set size: {len(X_train)} samples ({len(X_train)/len(X)*100:.1f}% of total)")
+            print(f"📊 Remaining set size: {len(remaining_indices)} samples")
 
-            # Update best model based on acid test - FIXED: Always update when better
-            if acid_test_accuracy > self.best_accuracy + self.adaptive_config['min_improvement']:
+            # STEP 6: Update best model and check for improvement
+            if acid_test_accuracy > self.best_accuracy + min_improvement:
+                improvement = acid_test_accuracy - self.best_accuracy
                 self.best_accuracy = acid_test_accuracy
                 self.best_training_indices = initial_indices.copy()
                 self.best_round = round_num
                 patience_counter = 0
-                print(f"🏆 New best acid test accuracy: {acid_test_accuracy:.4f}")
+                print(f"🏆 New best acid test accuracy: {acid_test_accuracy:.4f} (+{improvement:.4f})")
             else:
                 patience_counter += 1
-                print(f"🔄 No improvement (Patience: {patience_counter}/{patience})")
+                if acid_test_accuracy > self.best_accuracy:
+                    small_improvement = acid_test_accuracy - self.best_accuracy
+                    print(f"↗️  Small improvement: {acid_test_accuracy:.4f} (+{small_improvement:.4f}) - Patience: {patience_counter}/{patience}")
+                else:
+                    print(f"🔄 No improvement - Patience: {patience_counter}/{patience}")
 
-            # Early stopping based on acid test
+            # PRIMARY STOPPING CRITERION 3: No significant improvement for patience rounds
             if patience_counter >= patience:
-                print(f"🛑 Patience exceeded: no improvement in acid test for {patience} rounds")
+                print(f"🛑 PATIENCE EXCEEDED: No significant improvement in acid test for {patience} rounds")
+                print(f"   Best acid test accuracy: {self.best_accuracy:.4f} (round {self.best_round})")
+                print(f"   Current acid test accuracy: {acid_test_accuracy:.4f}")
                 break
+
+            # SECONDARY STOPPING CRITERION: Check for performance plateau
+            if len(acid_test_history) >= 5:
+                recent_trend = acid_test_history[-5:]
+                max_recent = max(recent_trend)
+                min_recent = min(recent_trend)
+                fluctuation = max_recent - min_recent
+
+                if fluctuation < min_improvement * 2:  # Very small fluctuations
+                    print(f"📊 Acid test performance plateaued (fluctuation: {fluctuation:.4f}) - stopping adaptive learning.")
+                    break
 
         # Finalize with best configuration
         print(f"\n🎉 Adaptive learning completed after {self.adaptive_round} rounds!")
@@ -1301,11 +1421,12 @@ class AdaptiveDBNN:
         # Ensure we have valid best values
         if not hasattr(self, 'best_accuracy') or self.best_accuracy == 0.0:
             # Use final values if best wasn't set
-            self.best_accuracy = acid_test_accuracy if 'acid_test_accuracy' in locals() else 0.0
+            self.best_accuracy = acid_test_history[-1] if acid_test_history else 0.0
             self.best_training_indices = initial_indices.copy()
             self.best_round = self.adaptive_round
 
         print(f"🏆 Best acid test accuracy: {self.best_accuracy:.4f} (round {self.best_round})")
+        print(f"📊 Final training set: {len(self.best_training_indices)} samples ({len(self.best_training_indices)/len(X)*100:.1f}% of total)")
 
         # Use best configuration for final model
         X_train_best = X[self.best_training_indices]
@@ -1317,7 +1438,7 @@ class AdaptiveDBNN:
         print("🔧 Training final model with best configuration...")
         self.model.train_with_data(X_train_best, y_train_best, reset_weights=True)
 
-        # Final acid test
+        # Final acid test verification
         final_predictions = self.model.predict(X)
         final_accuracy = accuracy_score(y, final_predictions)
 
