@@ -1,4 +1,7 @@
-```{
+```
+Use python adaptive_dbnn.py --gui for setting up the configuration.
+
+{
     "file_path": "breast_cancer_wisconsin.csv",
     "target_column": "diagnosis",
     "separator": ",",
