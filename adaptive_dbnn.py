@@ -26,8 +26,8 @@ from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.colors import ListedColormap
 import imageio
 from scipy.spatial import ConvexHull
-
-# Import the DBNN implementation from dbnn.py
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox, scrolledtext
 import dbnn
 
 class DatasetConfig:
@@ -36,21 +36,51 @@ class DatasetConfig:
     @staticmethod
     def get_available_datasets():
         """Get list of available datasets from configuration files"""
-        config_files = glob.glob("*.conf")
-        datasets = [f.replace('.conf', '') for f in config_files]
+        config_files = glob.glob("*.conf") + glob.glob("*.json")
+        datasets = []
+        for f in config_files:
+            # Remove both .conf and .json extensions
+            base_name = f.replace('.conf', '').replace('.json', '')
+            if base_name not in datasets:  # Avoid duplicates
+                datasets.append(base_name)
         return datasets
 
     @staticmethod
     def load_config(dataset_name):
-        """Load configuration for a dataset"""
-        config_path = f"{dataset_name}.conf"
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, 'r') as f:
-                    return json.load(f)
-            except:
-                return {}
+        """Load configuration for a dataset - supports both .conf and .json"""
+        # Try .json first, then .conf
+        config_paths = [
+            f"{dataset_name}.json",
+            f"{dataset_name}.conf"
+        ]
+
+        for config_path in config_paths:
+            if os.path.exists(config_path):
+                try:
+                    with open(config_path, 'r') as f:
+                        return json.load(f)
+                except Exception as e:
+                    print(f"⚠️  Warning: Could not load config from {config_path}: {e}")
+                    continue
         return {}
+
+    @staticmethod
+    def get_available_config_files():
+        """Get all available configuration files with their types"""
+        config_files = []
+        # Look for JSON config files
+        json_files = glob.glob("*.json")
+        for f in json_files:
+            # Skip the auto-saved config to avoid confusion
+            if not f.endswith('_run_config.json') and not f.endswith('adaptive_dbnn_config.json'):
+                config_files.append({'file': f, 'type': 'JSON'})
+
+        # Look for CONF config files
+        conf_files = glob.glob("*.conf")
+        for f in conf_files:
+            config_files.append({'file': f, 'type': 'CONF'})
+
+        return config_files
 
 class DataPreprocessor:
     """Comprehensive data preprocessing for DBNN"""
@@ -955,38 +985,41 @@ class AdaptiveDBNN:
 
     def _select_dataset(self) -> str:
         """Select dataset from available configuration files or data files"""
-        available_datasets = DatasetConfig.get_available_datasets()
+        available_configs = DatasetConfig.get_available_config_files()
 
         # Also look for data files
         csv_files = glob.glob("*.csv")
         dat_files = glob.glob("*.dat")
         data_files = csv_files + dat_files
 
-        if available_datasets or data_files:
-            print("📁 Available datasets and data files:")
+        if available_configs or data_files:
+            print("📁 Available datasets and configuration files:")
 
             # Show configuration-based datasets
-            if available_datasets:
-                print("\n🎯 Configured datasets:")
-                for i, dataset in enumerate(available_datasets, 1):
-                    print(f"  {i}. {dataset} (configuration)")
+            if available_configs:
+                print("\n🎯 Configuration files:")
+                for i, config in enumerate(available_configs, 1):
+                    base_name = config['file'].replace('.json', '').replace('.conf', '')
+                    print(f"  {i}. {base_name} ({config['type']} configuration)")
 
             # Show data files
             if data_files:
                 print("\n📊 Data files:")
-                for i, data_file in enumerate(data_files, len(available_datasets) + 1):
+                start_idx = len(available_configs) + 1
+                for i, data_file in enumerate(data_files, start_idx):
                     print(f"  {i}. {data_file}")
 
             try:
-                choice = input(f"\nSelect a dataset (1-{len(available_datasets) + len(data_files)}): ").strip()
+                choice = input(f"\nSelect a dataset (1-{len(available_configs) + len(data_files)}): ").strip()
                 choice_idx = int(choice) - 1
 
-                if 0 <= choice_idx < len(available_datasets):
-                    selected_dataset = available_datasets[choice_idx]
-                    print(f"🎯 Selected configured dataset: {selected_dataset}")
+                if 0 <= choice_idx < len(available_configs):
+                    selected_config = available_configs[choice_idx]
+                    selected_dataset = selected_config['file'].replace('.json', '').replace('.conf', '')
+                    print(f"🎯 Selected configuration: {selected_dataset} ({selected_config['type']})")
                     return selected_dataset
-                elif len(available_datasets) <= choice_idx < len(available_datasets) + len(data_files):
-                    data_file_idx = choice_idx - len(available_datasets)
+                elif len(available_configs) <= choice_idx < len(available_configs) + len(data_files):
+                    data_file_idx = choice_idx - len(available_configs)
                     selected_file = data_files[data_file_idx]
                     dataset_name = selected_file.replace('.csv', '').replace('.dat', '')
                     print(f"📁 Selected data file: {selected_file}")
@@ -998,7 +1031,8 @@ class AdaptiveDBNN:
                 print("❌ Invalid input")
                 return input("Enter dataset name: ").strip()
         else:
-            print("❌ No dataset configurations or data files found.")
+            print("❌ No configuration files or data files found.")
+            print("   Looking for: *.json, *.conf, *.csv, *.dat")
             dataset_name = input("Enter dataset name: ").strip()
             if not dataset_name:
                 dataset_name = "default_dataset"
@@ -1463,38 +1497,989 @@ class AdaptiveDBNN:
         print(f"   Total time: {report['total_time']}")
         print("=" * 50)
 
+
+class AdaptiveDBNNGUI:
+    """GUI interface for configuring and running Adaptive DBNN"""
+
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Adaptive DBNN Configuration")
+        self.root.geometry("1200x900")
+
+        # Configuration storage
+        self.config = {}
+        self.config_file = "adaptive_dbnn_config.json"
+
+        # Data storage
+        self.data = None
+        self.data_columns = []
+        self.column_types = {}
+
+        # Main variables
+        self.dataset_name = tk.StringVar()
+        self.data_file_path = tk.StringVar()
+        self.target_column = tk.StringVar(value="target")
+        self.output_dir = tk.StringVar(value="adaptive_visualizations")
+
+        # Feature selection
+        self.feature_vars = {}
+        self.feature_frame = None
+
+        self.setup_ui()
+        self.load_saved_config()
+
+    def setup_ui(self):
+        """Setup the main GUI interface"""
+        # Create notebook for tabs
+        notebook = ttk.Notebook(self.root)
+        notebook.pack(fill='both', expand=True, padx=10, pady=10)
+
+        # Main Configuration Tab
+        main_frame = ttk.Frame(notebook)
+        notebook.add(main_frame, text="Dataset & Features")
+
+        # Adaptive Learning Tab
+        adaptive_frame = ttk.Frame(notebook)
+        notebook.add(adaptive_frame, text="Adaptive Learning")
+
+        # Advanced Tab
+        advanced_frame = ttk.Frame(notebook)
+        notebook.add(advanced_frame, text="Advanced")
+
+        # Setup each tab
+        self.setup_main_tab(main_frame)
+        self.setup_adaptive_tab(adaptive_frame)
+        self.setup_advanced_tab(advanced_frame)
+
+        # Control buttons
+        self.setup_control_buttons()
+
+    def setup_main_tab(self, parent):
+        """Setup main configuration tab with dataset and feature selection"""
+        # Dataset selection
+        dataset_frame = ttk.LabelFrame(parent, text="Dataset Configuration", padding="10")
+        dataset_frame.pack(fill='x', padx=5, pady=5)
+
+        ttk.Label(dataset_frame, text="Dataset File:").grid(row=0, column=0, sticky='w', pady=2)
+        ttk.Entry(dataset_frame, textvariable=self.data_file_path, width=50).grid(row=0, column=1, sticky='w', pady=2, padx=5)
+        ttk.Button(dataset_frame, text="Browse", command=self.browse_data_file).grid(row=0, column=2, padx=5)
+        ttk.Button(dataset_frame, text="Load & Analyze", command=self.load_and_analyze_data).grid(row=0, column=3, padx=5)
+
+        ttk.Label(dataset_frame, text="Dataset Name:").grid(row=1, column=0, sticky='w', pady=2)
+        ttk.Entry(dataset_frame, textvariable=self.dataset_name, width=30).grid(row=1, column=1, sticky='w', pady=2, padx=5)
+
+        ttk.Label(dataset_frame, text="Target Column:").grid(row=2, column=0, sticky='w', pady=2)
+        self.target_combo = ttk.Combobox(dataset_frame, textvariable=self.target_column, width=30, state="readonly")
+        self.target_combo.grid(row=2, column=1, sticky='w', pady=2, padx=5)
+        ttk.Button(dataset_frame, text="Auto-Detect Target", command=self.auto_detect_target).grid(row=2, column=2, padx=5)
+
+        ttk.Label(dataset_frame, text="Output Directory:").grid(row=3, column=0, sticky='w', pady=2)
+        ttk.Entry(dataset_frame, textvariable=self.output_dir, width=30).grid(row=3, column=1, sticky='w', pady=2, padx=5)
+        ttk.Button(dataset_frame, text="Browse", command=self.browse_output_dir).grid(row=3, column=2, padx=5)
+
+        # Data preview
+        preview_frame = ttk.LabelFrame(parent, text="Data Preview", padding="10")
+        preview_frame.pack(fill='x', padx=5, pady=5)
+
+        self.preview_text = scrolledtext.ScrolledText(preview_frame, height=8, width=100)
+        self.preview_text.pack(fill='both', expand=True)
+
+        # Feature selection
+        self.feature_frame = ttk.LabelFrame(parent, text="Feature Selection", padding="10")
+        self.feature_frame.pack(fill='both', expand=True, padx=5, pady=5)
+
+        # Feature selection controls will be populated after data load
+
+        # DBNN Core Parameters
+        core_frame = ttk.LabelFrame(parent, text="DBNN Core Parameters", padding="10")
+        core_frame.pack(fill='x', padx=5, pady=5)
+
+        # Create a grid for core parameters
+        core_params = [
+            ("Resolution:", "resolution", "100", "Higher = more precise, slower"),
+            ("Gain:", "gain", "2.0", "Weight update intensity"),
+            ("Margin:", "margin", "0.2", "Classification tolerance"),
+            ("Max Epochs:", "max_epochs", "100", "Maximum training epochs"),
+            ("Patience:", "patience", "10", "Early stopping rounds")
+        ]
+
+        for i, (label, attr, default, tooltip) in enumerate(core_params):
+            ttk.Label(core_frame, text=label).grid(row=i, column=0, sticky='w', pady=2, padx=5)
+            var = tk.StringVar(value=default)
+            setattr(self, attr, var)
+            entry = ttk.Entry(core_frame, textvariable=var, width=10)
+            entry.grid(row=i, column=1, sticky='w', pady=2, padx=5)
+            ttk.Label(core_frame, text=tooltip).grid(row=i, column=2, sticky='w', padx=5)
+            self.create_tooltip(entry, tooltip)
+
+    def setup_feature_selection(self):
+        """Setup feature selection interface after data is loaded"""
+        # Clear existing feature selection
+        for widget in self.feature_frame.winfo_children():
+            widget.destroy()
+
+        if not self.data_columns:
+            ttk.Label(self.feature_frame, text="No data loaded. Please load a dataset first.").pack(pady=10)
+            return
+
+        # Create header with selection controls
+        header_frame = ttk.Frame(self.feature_frame)
+        header_frame.pack(fill='x', pady=5)
+
+        ttk.Label(header_frame, text="Select features for training:", font=('Arial', 10, 'bold')).pack(side='left', padx=5)
+
+        button_frame = ttk.Frame(header_frame)
+        button_frame.pack(side='right', padx=5)
+
+        ttk.Button(button_frame, text="Select All", command=self.select_all_features).pack(side='left', padx=2)
+        ttk.Button(button_frame, text="Deselect All", command=self.deselect_all_features).pack(side='left', padx=2)
+        ttk.Button(button_frame, text="Select Numeric", command=self.select_numeric_features).pack(side='left', padx=2)
+        ttk.Button(button_frame, text="Invert Selection", command=self.invert_feature_selection).pack(side='left', padx=2)
+
+        # Create scrollable frame for feature checkboxes
+        canvas = tk.Canvas(self.feature_frame, height=200)
+        scrollbar = ttk.Scrollbar(self.feature_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Create feature checkboxes in a grid
+        self.feature_vars = {}
+        num_columns = 4  # Number of columns for the grid
+        features_per_column = (len(self.data_columns) + num_columns - 1) // num_columns
+
+        for i, column in enumerate(self.data_columns):
+            if column == self.target_column.get():
+                continue  # Skip target column
+
+            row = i % features_per_column
+            col = i // features_per_column
+
+            var = tk.BooleanVar(value=True)  # Default to selected
+            self.feature_vars[column] = var
+
+            # Determine column type and create appropriate display
+            col_type = self.column_types.get(column, 'unknown')
+            display_text = f"{column} ({col_type})"
+
+            cb = ttk.Checkbutton(scrollable_frame, text=display_text, variable=var)
+            cb.grid(row=row, column=col, sticky='w', padx=5, pady=2)
+
+            # Color code based on type
+            if col_type == 'numeric':
+                cb.configure(style='Numeric.TCheckbutton')
+            elif col_type == 'categorical':
+                cb.configure(style='Categorical.TCheckbutton')
+
+            self.create_tooltip(cb, f"Column: {column}\nType: {col_type}")
+
+        # Add summary
+        summary_frame = ttk.Frame(self.feature_frame)
+        summary_frame.pack(fill='x', pady=5)
+
+        self.feature_summary = tk.StringVar()
+        ttk.Label(summary_frame, textvariable=self.feature_summary).pack(side='left')
+        self.update_feature_summary()
+
+    def analyze_column_types(self, df):
+        """Analyze column types for recommendations"""
+        column_types = {}
+
+        for column in df.columns:
+            # Skip if all null
+            if df[column].isna().all():
+                column_types[column] = 'all_null'
+                continue
+
+            # Check if numeric
+            if pd.api.types.is_numeric_dtype(df[column]):
+                column_types[column] = 'numeric'
+            else:
+                # Check if it could be categorical
+                unique_ratio = df[column].nunique() / len(df[column])
+                if unique_ratio < 0.1:  # Low cardinality
+                    column_types[column] = 'categorical_low'
+                elif unique_ratio < 0.5:  # Medium cardinality
+                    column_types[column] = 'categorical_medium'
+                else:  # High cardinality
+                    column_types[column] = 'categorical_high'
+
+        return column_types
+
+    def get_target_recommendations(self, df):
+        """Get target column recommendations based on cardinality"""
+        recommendations = []
+
+        for column in df.columns:
+            col_type = self.column_types.get(column, 'unknown')
+
+            # Good candidates for classification targets
+            if col_type in ['categorical_low', 'categorical_medium']:
+                unique_count = df[column].nunique()
+                if 2 <= unique_count <= 50:  # Reasonable number of classes
+                    recommendations.append({
+                        'column': column,
+                        'type': 'classification',
+                        'unique_count': unique_count,
+                        'score': 100 - unique_count  # Lower unique count = better for classification
+                    })
+
+            # Good candidates for regression targets
+            elif col_type == 'numeric':
+                if df[column].nunique() > 20:  # High cardinality numeric
+                    recommendations.append({
+                        'column': column,
+                        'type': 'regression',
+                        'unique_count': df[column].nunique(),
+                        'score': 50
+                    })
+
+        # Sort by score (higher is better)
+        recommendations.sort(key=lambda x: x['score'], reverse=True)
+        return recommendations
+
+    def auto_detect_target(self):
+        """Automatically detect and set the best target column"""
+        if self.data is None:
+            messagebox.showwarning("No Data", "Please load data first.")
+            return
+
+        recommendations = self.get_target_recommendations(self.data)
+
+        if not recommendations:
+            messagebox.showinfo("No Recommendations", "No suitable target columns found automatically.")
+            return
+
+        # Use the best recommendation
+        best_target = recommendations[0]
+        self.target_column.set(best_target['column'])
+
+        # Update target combo
+        self.target_combo.set(best_target['column'])
+
+        messagebox.showinfo(
+            "Target Auto-Detected",
+            f"Selected '{best_target['column']}' as target.\n"
+            f"Type: {best_target['type']}\n"
+            f"Unique values: {best_target['unique_count']}"
+        )
+
+        # Refresh feature selection to exclude the new target
+        self.setup_feature_selection()
+
+    def browse_data_file(self):
+        """Browse for data file"""
+        filename = filedialog.askopenfilename(
+            title="Select Data File",
+            filetypes=[("CSV files", "*.csv"), ("DAT files", "*.dat"), ("All files", "*.*")]
+        )
+        if filename:
+            self.data_file_path.set(filename)
+            # Extract dataset name from filename
+            base_name = os.path.splitext(os.path.basename(filename))[0]
+            self.dataset_name.set(base_name)
+
+    def load_and_analyze_data(self):
+        """Load and analyze the selected data file"""
+        file_path = self.data_file_path.get()
+        if not file_path or not os.path.exists(file_path):
+            messagebox.showerror("Error", "Please select a valid data file.")
+            return
+
+        try:
+            # Load data based on file type
+            if file_path.endswith('.csv'):
+                self.data = pd.read_csv(file_path)
+            else:  # DAT file or other
+                try:
+                    self.data = pd.read_csv(file_path, delimiter=r'\s+')  # Space separated
+                except:
+                    self.data = pd.read_csv(file_path)  # Try with default parameters
+
+            self.data_columns = self.data.columns.tolist()
+
+            # Analyze column types
+            self.column_types = self.analyze_column_types(self.data)
+
+            # Update target column combobox
+            self.target_combo['values'] = self.data_columns
+
+            # Update data preview
+            self.update_data_preview()
+
+            # Setup feature selection
+            self.setup_feature_selection()
+
+            # Show target recommendations
+            self.show_target_recommendations()
+
+            messagebox.showinfo("Success", f"Data loaded successfully!\n{self.data.shape[0]} rows, {self.data.shape[1]} columns")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load data:\n{str(e)}")
+
+    def update_data_preview(self):
+        """Update the data preview text"""
+        if self.data is None:
+            self.preview_text.delete(1.0, tk.END)
+            self.preview_text.insert(tk.END, "No data loaded.")
+            return
+
+        preview_info = f"Dataset: {self.data.shape[0]} rows × {self.data.shape[1]} columns\n"
+        preview_info += f"Columns: {', '.join(self.data_columns)}\n\n"
+        preview_info += "First 5 rows:\n"
+        preview_info += self.data.head().to_string()
+
+        self.preview_text.delete(1.0, tk.END)
+        self.preview_text.insert(tk.END, preview_info)
+
+    def show_target_recommendations(self):
+        """Show target column recommendations"""
+        if self.data is None:
+            return
+
+        recommendations = self.get_target_recommendations(self.data)
+
+        if recommendations:
+            rec_text = "Target Column Recommendations:\n"
+            for i, rec in enumerate(recommendations[:5]):  # Top 5
+                rec_text += f"{i+1}. {rec['column']} ({rec['type']}, {rec['unique_count']} unique values)\n"
+
+            # Show in a message box
+            messagebox.showinfo("Target Recommendations", rec_text)
+
+    def select_all_features(self):
+        """Select all features"""
+        for var in self.feature_vars.values():
+            var.set(True)
+        self.update_feature_summary()
+
+    def deselect_all_features(self):
+        """Deselect all features"""
+        for var in self.feature_vars.values():
+            var.set(False)
+        self.update_feature_summary()
+
+    def select_numeric_features(self):
+        """Select only numeric features"""
+        for column, var in self.feature_vars.items():
+            col_type = self.column_types.get(column, 'unknown')
+            var.set(col_type == 'numeric')
+        self.update_feature_summary()
+
+    def invert_feature_selection(self):
+        """Invert feature selection"""
+        for var in self.feature_vars.values():
+            var.set(not var.get())
+        self.update_feature_summary()
+
+    def update_feature_summary(self):
+        """Update the feature selection summary"""
+        if not self.feature_vars:
+            self.feature_summary.set("No features available")
+            return
+
+        selected_count = sum(1 for var in self.feature_vars.values() if var.get())
+        total_count = len(self.feature_vars)
+
+        # Count by type
+        numeric_count = 0
+        categorical_count = 0
+        selected_numeric = 0
+        selected_categorical = 0
+
+        for column, var in self.feature_vars.items():
+            col_type = self.column_types.get(column, 'unknown')
+            is_selected = var.get()
+
+            if 'numeric' in col_type:
+                numeric_count += 1
+                if is_selected:
+                    selected_numeric += 1
+            elif 'categorical' in col_type:
+                categorical_count += 1
+                if is_selected:
+                    selected_categorical += 1
+
+        summary = f"Selected: {selected_count}/{total_count} features"
+        if numeric_count > 0:
+            summary += f" | Numeric: {selected_numeric}/{numeric_count}"
+        if categorical_count > 0:
+            summary += f" | Categorical: {selected_categorical}/{categorical_count}"
+
+        self.feature_summary.set(summary)
+
+    def get_selected_features(self):
+        """Get list of selected feature columns"""
+        return [col for col, var in self.feature_vars.items() if var.get()]
+
+    def setup_adaptive_tab(self, parent):
+        """Setup adaptive learning configuration tab"""
+        # Adaptive Learning Parameters
+        adaptive_frame = ttk.LabelFrame(parent, text="Adaptive Learning Parameters", padding="10")
+        adaptive_frame.pack(fill='both', expand=True, padx=5, pady=5)
+
+        # Create scrollable frame
+        canvas = tk.Canvas(adaptive_frame)
+        scrollbar = ttk.Scrollbar(adaptive_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Adaptive parameters
+        params = [
+            ("Enable Adaptive Learning", "enable_adaptive", "True", "checkbox", "Master switch for adaptive learning"),
+            ("Initial Samples Per Class", "initial_samples_per_class", "5", "entry", "Number of initial samples per class for training"),
+            ("Max Margin Samples Per Class", "max_margin_samples_per_class", "3", "entry", "Maximum margin-based samples to add per class per round"),
+            ("Margin Tolerance", "margin_tolerance", "0.15", "entry", "Tolerance for margin-based selection"),
+            ("KL Divergence Threshold", "kl_divergence_threshold", "0.1", "entry", "Threshold for KL divergence-based selection"),
+            ("Max Adaptive Rounds", "max_adaptive_rounds", "20", "entry", "Maximum number of adaptive learning rounds"),
+            ("Min Improvement", "min_improvement", "0.001", "entry", "Minimum improvement for early stopping"),
+            ("Training Convergence Epochs", "training_convergence_epochs", "50", "entry", "Epochs to wait for training convergence"),
+            ("Min Training Accuracy", "min_training_accuracy", "0.95", "entry", "Minimum training accuracy threshold"),
+            ("Min Samples To Add Per Class", "min_samples_to_add_per_class", "5", "entry", "Minimum samples to add per class"),
+            ("Adaptive Margin Relaxation", "adaptive_margin_relaxation", "0.1", "entry", "Margin relaxation factor"),
+            ("Max Divergence Samples Per Class", "max_divergence_samples_per_class", "5", "entry", "Maximum divergence samples per class"),
+            ("Exhaust All Failed", "exhaust_all_failed", "True", "checkbox", "Whether to exhaust all failed samples"),
+            ("Min Failed Threshold", "min_failed_threshold", "10", "entry", "Minimum failed samples threshold"),
+            ("Enable KL Divergence", "enable_kl_divergence", "True", "checkbox", "Enable KL divergence-based sampling"),
+            ("Max Samples Per Class Fallback", "max_samples_per_class_fallback", "2", "entry", "Fallback samples per class"),
+            ("Enable 3D Visualization", "enable_3d_visualization", "True", "checkbox", "Enable 3D visualization"),
+            ("3D Snapshot Interval", "3d_snapshot_interval", "10", "entry", "Interval for 3D snapshots"),
+            ("Learning Rate", "learning_rate", "1.0", "entry", "Learning rate for weight updates"),
+            ("Enable Acid Test", "enable_acid_test", "True", "checkbox", "Enable acid test on full dataset"),
+            ("Min Training Percentage For Stopping", "min_training_percentage_for_stopping", "10.0", "entry", "Minimum training percentage for stopping"),
+            ("Max Training Percentage", "max_training_percentage", "90.0", "entry", "Maximum training percentage"),
+            ("Max KL Samples Per Class", "max_kl_samples_per_class", "5", "entry", "Maximum KL-based samples per class"),
+            ("Disable Sample Limit", "disable_sample_limit", "False", "checkbox", "Disable sample limits (use with caution)"),
+        ]
+
+        self.adaptive_vars = {}
+
+        for i, (label, key, default, widget_type, tooltip) in enumerate(params):
+            ttk.Label(scrollable_frame, text=label).grid(row=i, column=0, sticky='w', pady=2, padx=5)
+
+            if widget_type == "checkbox":
+                var = tk.BooleanVar(value=(default.lower() == "true"))
+                cb = ttk.Checkbutton(scrollable_frame, variable=var)
+                cb.grid(row=i, column=1, sticky='w', pady=2)
+                self.adaptive_vars[key] = var
+            else:  # entry
+                var = tk.StringVar(value=default)
+                entry = ttk.Entry(scrollable_frame, textvariable=var, width=15)
+                entry.grid(row=i, column=1, sticky='w', pady=2)
+                self.adaptive_vars[key] = var
+
+            # Tooltip
+            widget = scrollable_frame.grid_slaves(row=i, column=1)[0]
+            self.create_tooltip(widget, f"Parameter: {key}\nDefault: {default}\n\n{tooltip}")
+
+    def setup_advanced_tab(self, parent):
+        """Setup advanced configuration tab"""
+        # Visualization Configuration
+        viz_frame = ttk.LabelFrame(parent, text="Visualization Configuration", padding="10")
+        viz_frame.pack(fill='x', padx=5, pady=5)
+
+        self.enable_visualization = tk.BooleanVar(value=True)
+        ttk.Checkbutton(viz_frame, text="Enable Visualization",
+                       variable=self.enable_visualization).grid(row=0, column=0, sticky='w', pady=2)
+
+        self.create_animations = tk.BooleanVar(value=False)
+        ttk.Checkbutton(viz_frame, text="Create Animations",
+                       variable=self.create_animations).grid(row=1, column=0, sticky='w', pady=2)
+
+        self.create_reports = tk.BooleanVar(value=True)
+        ttk.Checkbutton(viz_frame, text="Create Reports",
+                       variable=self.create_reports).grid(row=2, column=0, sticky='w', pady=2)
+
+        self.create_3d_visualizations = tk.BooleanVar(value=True)
+        ttk.Checkbutton(viz_frame, text="Create 3D Visualizations",
+                       variable=self.create_3d_visualizations).grid(row=3, column=0, sticky='w', pady=2)
+
+        # Statistics Configuration
+        stats_frame = ttk.LabelFrame(parent, text="Statistics Configuration", padding="10")
+        stats_frame.pack(fill='x', padx=5, pady=5)
+
+        self.enable_confusion_matrix = tk.BooleanVar(value=True)
+        ttk.Checkbutton(stats_frame, text="Enable Confusion Matrix",
+                       variable=self.enable_confusion_matrix).grid(row=0, column=0, sticky='w', pady=2)
+
+        self.enable_progress_plots = tk.BooleanVar(value=True)
+        ttk.Checkbutton(stats_frame, text="Enable Progress Plots",
+                       variable=self.enable_progress_plots).grid(row=1, column=0, sticky='w', pady=2)
+
+        self.create_interactive_plots = tk.BooleanVar(value=True)
+        ttk.Checkbutton(stats_frame, text="Create Interactive Plots",
+                       variable=self.create_interactive_plots).grid(row=2, column=0, sticky='w', pady=2)
+
+        self.create_sample_analysis = tk.BooleanVar(value=True)
+        ttk.Checkbutton(stats_frame, text="Create Sample Analysis",
+                       variable=self.create_sample_analysis).grid(row=3, column=0, sticky='w', pady=2)
+
+        # Color Configuration
+        color_frame = ttk.LabelFrame(parent, text="Color Configuration", padding="10")
+        color_frame.pack(fill='x', padx=5, pady=5)
+
+        ttk.Label(color_frame, text="Progress Color:").grid(row=0, column=0, sticky='w', pady=2)
+        self.color_progress = tk.StringVar(value="green")
+        ttk.Entry(color_frame, textvariable=self.color_progress, width=15).grid(row=0, column=1, sticky='w', pady=2)
+
+        ttk.Label(color_frame, text="Regression Color:").grid(row=1, column=0, sticky='w', pady=2)
+        self.color_regression = tk.StringVar(value="red")
+        ttk.Entry(color_frame, textvariable=self.color_regression, width=15).grid(row=1, column=1, sticky='w', pady=2)
+
+    def setup_control_buttons(self):
+        """Setup control buttons at the bottom"""
+        button_frame = ttk.Frame(self.root)
+        button_frame.pack(fill='x', padx=10, pady=10)
+
+        ttk.Button(button_frame, text="Save Configuration",
+                  command=self.save_configuration).pack(side='left', padx=5)
+
+        ttk.Button(button_frame, text="Load Configuration",
+                  command=self.load_configuration).pack(side='left', padx=5)
+
+        ttk.Button(button_frame, text="Reset to Defaults",
+                  command=self.reset_to_defaults).pack(side='left', padx=5)
+
+        ttk.Button(button_frame, text="Run Adaptive DBNN",
+                  command=self.run_adaptive_dbnn, style="Accent.TButton").pack(side='right', padx=5)
+
+        ttk.Button(button_frame, text="Close",
+                  command=self.root.quit).pack(side='right', padx=5)
+
+    def create_tooltip(self, widget, text):
+        """Create a tooltip for a widget"""
+        def enter(event):
+            tooltip = tk.Toplevel()
+            tooltip.wm_overrideredirect(True)
+            tooltip.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
+            label = ttk.Label(tooltip, text=text, background="yellow",
+                            relief='solid', borderwidth=1, padding=5, wraplength=300)
+            label.pack()
+            widget.tooltip = tooltip
+
+        def leave(event):
+            if hasattr(widget, 'tooltip'):
+                widget.tooltip.destroy()
+                delattr(widget, 'tooltip')
+
+        widget.bind("<Enter>", enter)
+        widget.bind("<Leave>", leave)
+
+    def browse_output_dir(self):
+        """Browse for output directory"""
+        directory = filedialog.askdirectory(title="Select Output Directory")
+        if directory:
+            self.output_dir.set(directory)
+
+    def get_configuration(self) -> Dict[str, Any]:
+        """Get current configuration from GUI"""
+        config = {
+            'dataset_name': self.dataset_name.get(),
+            'data_file': self.data_file_path.get(),
+            'target_column': self.target_column.get(),
+            'feature_columns': self.get_selected_features(),
+            'output_dir': self.output_dir.get(),
+
+            # Core DBNN parameters
+            'resol': int(self.resolution.get()),
+            'gain': float(self.gain.get()),
+            'margin': float(self.margin.get()),
+            'max_epochs': int(self.max_epochs.get()),
+            'patience': int(self.patience.get()),
+
+            # Adaptive learning parameters
+            'adaptive_learning': {},
+            'visualization_config': {},
+            'statistics': {}
+        }
+
+        # Adaptive learning parameters
+        for key, var in self.adaptive_vars.items():
+            if isinstance(var, tk.BooleanVar):
+                config['adaptive_learning'][key] = var.get()
+            else:
+                # Try to convert to appropriate type
+                value = var.get()
+                try:
+                    if '.' in value:
+                        config['adaptive_learning'][key] = float(value)
+                    else:
+                        config['adaptive_learning'][key] = int(value)
+                except ValueError:
+                    config['adaptive_learning'][key] = value
+
+        # Visualization configuration
+        config['visualization_config'] = {
+            'enabled': self.enable_visualization.get(),
+            'output_dir': self.output_dir.get(),
+            'create_animations': self.create_animations.get(),
+            'create_reports': self.create_reports.get(),
+            'create_3d_visualizations': self.create_3d_visualizations.get()
+        }
+
+        # Statistics configuration
+        config['statistics'] = {
+            'enable_confusion_matrix': self.enable_confusion_matrix.get(),
+            'enable_progress_plots': self.enable_progress_plots.get(),
+            'create_interactive_plots': self.create_interactive_plots.get(),
+            'create_sample_analysis': self.create_sample_analysis.get(),
+            'color_progress': self.color_progress.get(),
+            'color_regression': self.color_regression.get(),
+            'save_plots': True
+        }
+
+        return config
+
+    def save_configuration(self):
+        """Save configuration to file"""
+        config = self.get_configuration()
+
+        # Validate required fields
+        if not config['data_file'] or not os.path.exists(config['data_file']):
+            messagebox.showerror("Error", "Please select a valid data file first.")
+            return
+
+        if not config['target_column']:
+            messagebox.showerror("Error", "Please select a target column.")
+            return
+
+        selected_features = self.get_selected_features()
+        if not selected_features:
+            messagebox.showerror("Error", "Please select at least one feature.")
+            return
+
+        filename = filedialog.asksaveasfilename(
+            title="Save Configuration",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+
+        if filename:
+            try:
+                with open(filename, 'w') as f:
+                    json.dump(config, f, indent=4)
+                messagebox.showinfo("Success", f"Configuration saved to:\n{filename}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save configuration:\n{e}")
+
+    def load_configuration(self):
+        """Load configuration from file"""
+        filename = filedialog.askopenfilename(
+            title="Load Configuration",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+
+        if filename and os.path.exists(filename):
+            try:
+                with open(filename, 'r') as f:
+                    config = json.load(f)
+                self.apply_configuration(config)
+                messagebox.showinfo("Success", f"Configuration loaded from:\n{filename}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load configuration:\n{e}")
+
+    def load_saved_config(self):
+        """Load automatically saved configuration if exists"""
+        if os.path.exists(self.config_file):
+            try:
+                with open(self.config_file, 'r') as f:
+                    config = json.load(f)
+                self.apply_configuration(config)
+            except:
+                pass  # Ignore errors in auto-load
+
+    def apply_configuration(self, config: Dict[str, Any]):
+        """Apply configuration to GUI elements"""
+        # Main parameters
+        self.dataset_name.set(config.get('dataset_name', ''))
+        self.data_file_path.set(config.get('data_file', ''))
+        self.target_column.set(config.get('target_column', 'target'))
+        self.output_dir.set(config.get('output_dir', 'adaptive_visualizations'))
+
+        # Load data if file exists
+        if os.path.exists(self.data_file_path.get()):
+            self.load_and_analyze_data()
+
+        # Core parameters
+        self.resolution.set(str(config.get('resol', 100)))
+        self.gain.set(str(config.get('gain', 2.0)))
+        self.margin.set(str(config.get('margin', 0.2)))
+        self.max_epochs.set(str(config.get('max_epochs', 100)))
+        self.patience.set(str(config.get('patience', 10)))
+
+        # Adaptive learning parameters
+        adaptive_config = config.get('adaptive_learning', {})
+        for key, var in self.adaptive_vars.items():
+            if key in adaptive_config:
+                if isinstance(var, tk.BooleanVar):
+                    var.set(bool(adaptive_config[key]))
+                else:
+                    var.set(str(adaptive_config[key]))
+
+        # Visualization configuration
+        viz_config = config.get('visualization_config', {})
+        self.enable_visualization.set(viz_config.get('enabled', True))
+        self.create_animations.set(viz_config.get('create_animations', False))
+        self.create_reports.set(viz_config.get('create_reports', True))
+        self.create_3d_visualizations.set(viz_config.get('create_3d_visualizations', True))
+
+        # Statistics configuration
+        stats_config = config.get('statistics', {})
+        self.enable_confusion_matrix.set(stats_config.get('enable_confusion_matrix', True))
+        self.enable_progress_plots.set(stats_config.get('enable_progress_plots', True))
+        self.create_interactive_plots.set(stats_config.get('create_interactive_plots', True))
+        self.create_sample_analysis.set(stats_config.get('create_sample_analysis', True))
+        self.color_progress.set(stats_config.get('color_progress', 'green'))
+        self.color_regression.set(stats_config.get('color_regression', 'red'))
+
+        # Feature selection (need to be applied after data load)
+        if self.data is not None and 'feature_columns' in config:
+            # This will be applied when feature selection is set up
+            pass
+
+    def reset_to_defaults(self):
+        """Reset all values to defaults"""
+        default_config = {
+            'dataset_name': '',
+            'data_file': '',
+            'target_column': 'target',
+            'output_dir': 'adaptive_visualizations',
+            'resol': 100,
+            'gain': 2.0,
+            'margin': 0.2,
+            'max_epochs': 100,
+            'patience': 10,
+            'adaptive_learning': {
+                'enable_adaptive': True,
+                'initial_samples_per_class': 5,
+                'max_margin_samples_per_class': 3,
+                'margin_tolerance': 0.15,
+                'kl_divergence_threshold': 0.1,
+                'max_adaptive_rounds': 20,
+                'min_improvement': 0.001,
+                'training_convergence_epochs': 50,
+                'min_training_accuracy': 0.95,
+                'min_samples_to_add_per_class': 5,
+                'adaptive_margin_relaxation': 0.1,
+                'max_divergence_samples_per_class': 5,
+                'exhaust_all_failed': True,
+                'min_failed_threshold': 10,
+                'enable_kl_divergence': True,
+                'max_samples_per_class_fallback': 2,
+                'enable_3d_visualization': True,
+                '3d_snapshot_interval': 10,
+                'learning_rate': 1.0,
+                'enable_acid_test': True,
+                'min_training_percentage_for_stopping': 10.0,
+                'max_training_percentage': 90.0,
+                'max_kl_samples_per_class': 5,
+                'disable_sample_limit': False,
+            },
+            'visualization_config': {
+                'enabled': True,
+                'output_dir': 'adaptive_visualizations',
+                'create_animations': False,
+                'create_reports': True,
+                'create_3d_visualizations': True
+            },
+            'statistics': {
+                'enable_confusion_matrix': True,
+                'enable_progress_plots': True,
+                'color_progress': 'green',
+                'color_regression': 'red',
+                'save_plots': True,
+                'create_interactive_plots': True,
+                'create_sample_analysis': True
+            }
+        }
+
+        self.apply_configuration(default_config)
+
+    def run_adaptive_dbnn(self):
+        """Run adaptive DBNN with current configuration"""
+        config = self.get_configuration()
+
+        # Validate required fields
+        if not config['data_file'] or not os.path.exists(config['data_file']):
+            messagebox.showerror("Error", "Please select a valid data file first!")
+            return
+
+        if not config['target_column']:
+            messagebox.showerror("Error", "Please select a target column!")
+            return
+
+        selected_features = self.get_selected_features()
+        if not selected_features:
+            messagebox.showerror("Error", "Please select at least one feature!")
+            return
+
+        if config['target_column'] in selected_features:
+            messagebox.showerror("Error", f"Target column '{config['target_column']}' cannot be in feature columns!")
+            return
+
+        # Save configuration automatically
+        try:
+            with open(self.config_file, 'w') as f:
+                json.dump(config, f, indent=4)
+        except:
+            pass  # Ignore auto-save errors
+
+        # Save configuration for the adaptive DBNN to use - use JSON format
+        config_filename = f"{config['dataset_name']}_config.json"  # Changed to .json
+        try:
+            with open(config_filename, 'w') as f:
+                json.dump(config, f, indent=4)
+
+            messagebox.showinfo(
+                "Configuration Saved",
+                f"Configuration saved to:\n{config_filename}\n\n"
+                f"Close this window and run:\n"
+                f"python adaptive_dbnn.py --config {config_filename}\n\n"
+                f"Selected {len(selected_features)} features:\n"
+                f"{', '.join(selected_features[:5])}{'...' if len(selected_features) > 5 else ''}"
+            )
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save run configuration:\n{e}")
+
+
+def launch_gui():
+    """Launch the GUI interface"""
+    root = tk.Tk()
+
+    # Set theme if available
+    try:
+        from ttkthemes import ThemedTk
+        root = ThemedTk(theme="arc")
+
+        # Create custom styles for feature checkboxes
+        style = ttk.Style()
+        style.configure('Numeric.TCheckbutton', foreground='blue')
+        style.configure('Categorical.TCheckbutton', foreground='green')
+    except ImportError:
+        pass  # Use default theme
+
+    app = AdaptiveDBNNGUI(root)
+    root.mainloop()
+
+
+# Update the main function in adaptive_dbnn.py to handle feature columns
 def main():
     """Main function to run adaptive DBNN"""
+    import sys
+
+    # Check for GUI flag
+    if "--gui" in sys.argv or "-g" in sys.argv:
+        launch_gui()
+        return
+
+    # Check for config file parameter
+    config_file = None
+    for i, arg in enumerate(sys.argv):
+        if arg in ["--config", "-c"] and i + 1 < len(sys.argv):
+            config_file = sys.argv[i + 1]
+            break
+
     print("🎯 Adaptive DBNN System")
     print("=" * 50)
 
+    # Load configuration if provided
+    config = {}
+    if config_file and os.path.exists(config_file):
+        try:
+            with open(config_file, 'r') as f:
+                config = json.load(f)
+            print(f"✅ Loaded configuration from: {config_file}")
+
+            # Print configuration summary
+            if 'feature_columns' in config:
+                print(f"📊 Using {len(config['feature_columns'])} features: {config['feature_columns']}")
+            if 'target_column' in config:
+                print(f"🎯 Target column: {config['target_column']}")
+            if 'dataset_name' in config:
+                print(f"📁 Dataset: {config['dataset_name']}")
+
+        except Exception as e:
+            print(f"❌ Failed to load configuration: {e}")
+            config = {}
+    else:
+        # Show available configuration files if no specific config provided
+        available_configs = DatasetConfig.get_available_config_files()
+        if available_configs and not config_file:
+            print("\n📋 Available configuration files:")
+            for cfg in available_configs:
+                print(f"   • {cfg['file']} ({cfg['type']})")
+            print("\n💡 Use: python adaptive_dbnn.py --config <filename> to use a specific configuration")
+
     # Create adaptive DBNN
-    adaptive_model = AdaptiveDBNN()
+    adaptive_model = AdaptiveDBNN(config.get('dataset_name'), config)
 
-    # Ask if user wants to configure settings
-    configure = input("\nConfigure adaptive learning settings? (y/N): ").strip().lower()
-    if configure == 'y':
-        # Simple configuration interface
-        print("\n🎛️  Configuration Options:")
-        print("1. Enable KL Divergence sampling")
-        print("2. Disable sample limits")
-        print("3. Change number of rounds")
-        print("4. Keep current settings")
+    # If no config file, use interactive configuration
+    if not config_file:
+        # Show available configuration files as an option
+        available_configs = DatasetConfig.get_available_config_files()
+        if available_configs:
+            print(f"\n🔄 Found {len(available_configs)} configuration files")
+            print("   You can load one by entering its number below")
 
-        choice = input("Select option (1-4): ").strip()
-        if choice == '1':
-            adaptive_model.adaptive_config['enable_kl_divergence'] = True
-            print("✅ KL Divergence sampling enabled")
-        elif choice == '2':
-            adaptive_model.adaptive_config['disable_sample_limit'] = True
-            print("✅ Sample limits disabled")
-        elif choice == '3':
-            try:
-                rounds = int(input("Enter number of rounds: "))
-                adaptive_model.adaptive_config['max_adaptive_rounds'] = rounds
-                print(f"✅ Max rounds set to {rounds}")
-            except ValueError:
-                print("❌ Invalid number, using default")
+        configure = input("\nConfigure adaptive learning settings? (y/N/1-9 for config): ").strip().lower()
+
+        if configure.isdigit():
+            # User selected a configuration file by number
+            choice_idx = int(configure) - 1
+            if 0 <= choice_idx < len(available_configs):
+                selected_config = available_configs[choice_idx]
+                config_file = selected_config['file']
+                try:
+                    with open(config_file, 'r') as f:
+                        config = json.load(f)
+                    print(f"✅ Loaded configuration from: {config_file}")
+                    # Update the model with loaded config
+                    adaptive_model = AdaptiveDBNN(config.get('dataset_name'), config)
+                except Exception as e:
+                    print(f"❌ Failed to load configuration: {e}")
+
+        elif configure == 'y':
+            # Simple configuration interface
+            print("\n🎛️  Configuration Options:")
+            print("1. Enable KL Divergence sampling")
+            print("2. Disable sample limits")
+            print("3. Change number of rounds")
+            print("4. Keep current settings")
+
+            choice = input("Select option (1-4): ").strip()
+            if choice == '1':
+                adaptive_model.adaptive_config['enable_kl_divergence'] = True
+                print("✅ KL Divergence sampling enabled")
+            elif choice == '2':
+                adaptive_model.adaptive_config['disable_sample_limit'] = True
+                print("✅ Sample limits disabled")
+            elif choice == '3':
+                try:
+                    rounds = int(input("Enter number of rounds: "))
+                    adaptive_model.adaptive_config['max_adaptive_rounds'] = rounds
+                    print(f"✅ Max rounds set to {rounds}")
+                except ValueError:
+                    print("❌ Invalid number, using default")
 
     # Run adaptive learning
     print("\n🚀 Starting adaptive learning...")
@@ -1504,6 +2489,7 @@ def main():
     print(f"📦 Final training set size: {len(X_train)}")
     print(f"📊 Final test set size: {len(X_test)}")
     print(f"🏆 Best accuracy achieved: {adaptive_model.best_accuracy:.4f}")
+
 
 if __name__ == "__main__":
     main()
