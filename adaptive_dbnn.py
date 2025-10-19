@@ -66,6 +66,339 @@ from sklearn.manifold import TSNE
 from sklearn.metrics import confusion_matrix, classification_report
 import scipy.stats as stats
 
+class AdvancedInteractiveVisualizer:
+    """Advanced interactive 3D visualization with dynamic controls"""
+
+    def __init__(self, dataset_name, output_base_dir='Visualizer/adaptiveDBNN'):
+        self.dataset_name = dataset_name
+        self.output_dir = Path(output_base_dir) / dataset_name / 'interactive_3d'
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        self.colors = px.colors.qualitative.Set1 + px.colors.qualitative.Pastel
+
+    def create_advanced_3d_dashboard(self, X_full, y_full, training_history, feature_names, round_num=None):
+        """Create advanced interactive 3D dashboard with multiple visualization options"""
+        print("🌐 Creating advanced interactive 3D dashboard...")
+
+        # Create multiple visualization methods
+        self._create_pca_3d_plot(X_full, y_full, training_history, feature_names, round_num)
+        self._create_feature_space_3d(X_full, y_full, training_history, feature_names, round_num)
+        self._create_network_graph_3d(X_full, y_full, training_history, feature_names, round_num)
+        self._create_density_controlled_3d(X_full, y_full, training_history, feature_names, round_num)
+
+        # Create main dashboard that links all visualizations
+        self._create_main_dashboard(X_full, y_full, training_history, feature_names, round_num)
+
+    def _create_pca_3d_plot(self, X_full, y_full, training_history, feature_names, round_num):
+        """Create PCA-based 3D plot with interactive controls"""
+        from sklearn.decomposition import PCA
+
+        # Reduce dimensions
+        pca = PCA(n_components=3, random_state=42)
+        X_3d = pca.fit_transform(X_full)
+        explained_var = pca.explained_variance_ratio_
+
+        # Create interactive plot
+        unique_classes = np.unique(y_full)
+        fig = go.Figure()
+
+        for i, cls in enumerate(unique_classes):
+            class_mask = y_full == cls
+            scatter = go.Scatter3d(
+                x=X_3d[class_mask, 0],
+                y=X_3d[class_mask, 1],
+                z=X_3d[class_mask, 2],
+                mode='markers',
+                marker=dict(
+                    size=4,
+                    color=self.colors[i % len(self.colors)],
+                    opacity=0.7,
+                    line=dict(width=0.5, color='black')
+                ),
+                name=f'Class {cls}',
+                text=[f'Class: {cls}<br>PC1: {x:.3f}<br>PC2: {y:.3f}<br>PC3: {z:.3f}'
+                      for x, y, z in zip(X_3d[class_mask, 0], X_3d[class_mask, 1], X_3d[class_mask, 2])],
+                hoverinfo='text'
+            )
+            fig.add_trace(scatter)
+
+        # Add network connections for training samples
+        if training_history and len(training_history) > 0:
+            training_indices = training_history[-1] if round_num is None else training_history[round_num]
+            self._add_network_connections_3d(fig, X_3d, y_full, training_indices)
+
+        fig.update_layout(
+            title=f'3D PCA Visualization - {self.dataset_name}<br>'
+                  f'Explained Variance: PC1: {explained_var[0]:.3f}, PC2: {explained_var[1]:.3f}, PC3: {explained_var[2]:.3f}',
+            scene=dict(
+                xaxis_title=f'PC1 ({explained_var[0]:.2%} variance)',
+                yaxis_title=f'PC2 ({explained_var[1]:.2%} variance)',
+                zaxis_title=f'PC3 ({explained_var[2]:.2%} variance)',
+            ),
+            width=1000,
+            height=800
+        )
+
+        filename = f'pca_3d_round_{round_num}.html' if round_num else 'pca_3d_final.html'
+        fig.write_html(self.output_dir / filename)
+
+    def _create_feature_space_3d(self, X_full, y_full, training_history, feature_names, round_num):
+        """Create feature space 3D plot with selectable features"""
+        # Allow selection of any 3 features for visualization
+        if len(feature_names) >= 3:
+            # Use first 3 features by default, but create interface for selection
+            feature_indices = [0, 1, 2]
+            selected_features = [feature_names[i] for i in feature_indices]
+
+            fig = go.Figure()
+            unique_classes = np.unique(y_full)
+
+            for i, cls in enumerate(unique_classes):
+                class_mask = y_full == cls
+                scatter = go.Scatter3d(
+                    x=X_full[class_mask, feature_indices[0]],
+                    y=X_full[class_mask, feature_indices[1]],
+                    z=X_full[class_mask, feature_indices[2]],
+                    mode='markers',
+                    marker=dict(
+                        size=5,
+                        color=self.colors[i % len(self.colors)],
+                        opacity=0.6,
+                        symbol='circle'
+                    ),
+                    name=f'Class {cls}',
+                    text=[f'Class: {cls}<br>{selected_features[0]}: {x:.3f}<br>{selected_features[1]}: {y:.3f}<br>{selected_features[2]}: {z:.3f}'
+                          for x, y, z in zip(X_full[class_mask, feature_indices[0]],
+                                           X_full[class_mask, feature_indices[1]],
+                                           X_full[class_mask, feature_indices[2]])],
+                    hoverinfo='text'
+                )
+                fig.add_trace(scatter)
+
+            fig.update_layout(
+                title=f'3D Feature Space - {self.dataset_name}<br>Features: {selected_features}',
+                scene=dict(
+                    xaxis_title=selected_features[0],
+                    yaxis_title=selected_features[1],
+                    zaxis_title=selected_features[2],
+                ),
+                width=1000,
+                height=800
+            )
+
+            filename = f'feature_3d_round_{round_num}.html' if round_num else 'feature_3d_final.html'
+            fig.write_html(self.output_dir / filename)
+
+    def _add_network_connections_3d(self, fig, X_3d, y_full, training_indices):
+        """Add network connections between training samples"""
+        from scipy.spatial import distance_matrix
+        import networkx as nx
+
+        training_mask = np.isin(range(len(X_3d)), training_indices)
+        X_train = X_3d[training_mask]
+        y_train = y_full[training_mask]
+
+        unique_classes = np.unique(y_train)
+
+        for i, cls in enumerate(unique_classes):
+            class_mask = y_train == cls
+            class_points = X_train[class_mask]
+
+            if len(class_points) < 2:
+                continue
+
+            try:
+                # Create minimum spanning tree
+                dist_matrix = distance_matrix(class_points, class_points)
+                G = nx.Graph()
+
+                for j in range(len(class_points)):
+                    for k in range(j+1, len(class_points)):
+                        if dist_matrix[j, k] < np.percentile(dist_matrix, 25):  # Connect only close points
+                            G.add_edge(j, k, weight=dist_matrix[j, k])
+
+                if G.number_of_edges() > 0:
+                    mst = nx.minimum_spanning_tree(G)
+
+                    # Add edges to plot
+                    for edge in mst.edges():
+                        x_edges = [class_points[edge[0], 0], class_points[edge[1], 0], None]
+                        y_edges = [class_points[edge[0], 1], class_points[edge[1], 1], None]
+                        z_edges = [class_points[edge[0], 2], class_points[edge[1], 2], None]
+
+                        fig.add_trace(go.Scatter3d(
+                            x=x_edges, y=y_edges, z=z_edges,
+                            mode='lines',
+                            line=dict(color=self.colors[i % len(self.colors)], width=2, opacity=0.6),
+                            showlegend=False,
+                            hoverinfo='none'
+                        ))
+            except Exception:
+                continue
+
+    def _create_density_controlled_3d(self, X_full, y_full, training_history, feature_names, round_num):
+        """Create density-controlled 3D visualization with point skipping"""
+        from sklearn.decomposition import PCA
+
+        pca = PCA(n_components=3, random_state=42)
+        X_3d = pca.fit_transform(X_full)
+
+        # Apply density-based sampling
+        X_sampled, y_sampled = self._density_based_sampling(X_3d, y_full, max_points_per_class=100)
+
+        fig = go.Figure()
+        unique_classes = np.unique(y_sampled)
+
+        for i, cls in enumerate(unique_classes):
+            class_mask = y_sampled == cls
+            scatter = go.Scatter3d(
+                x=X_sampled[class_mask, 0],
+                y=X_sampled[class_mask, 1],
+                z=X_sampled[class_mask, 2],
+                mode='markers',
+                marker=dict(
+                    size=6,
+                    color=self.colors[i % len(self.colors)],
+                    opacity=0.8,
+                    line=dict(width=1, color='black')
+                ),
+                name=f'Class {cls} (density-controlled)',
+                text=[f'Class: {cls}' for _ in range(np.sum(class_mask))],
+                hoverinfo='text'
+            )
+            fig.add_trace(scatter)
+
+        fig.update_layout(
+            title=f'Density-Controlled 3D Visualization - {self.dataset_name}<br>'
+                  f'Points sampled to reduce overcrowding',
+            scene=dict(
+                xaxis_title='PC1',
+                yaxis_title='PC2',
+                zaxis_title='PC3',
+            ),
+            width=1000,
+            height=800
+        )
+
+        filename = f'density_3d_round_{round_num}.html' if round_num else 'density_3d_final.html'
+        fig.write_html(self.output_dir / filename)
+
+    def _density_based_sampling(self, X, y, max_points_per_class=100, min_distance_ratio=0.1):
+        """Sample points based on density to reduce overcrowding"""
+        from sklearn.neighbors import NearestNeighbors
+
+        unique_classes = np.unique(y)
+        X_sampled_list = []
+        y_sampled_list = []
+
+        for cls in unique_classes:
+            class_mask = y == cls
+            X_class = X[class_mask]
+
+            if len(X_class) <= max_points_per_class:
+                # No sampling needed
+                X_sampled_list.append(X_class)
+                y_sampled_list.append(np.full(len(X_class), cls))
+            else:
+                # Use k-nearest neighbors to sample diverse points
+                nbrs = NearestNeighbors(n_neighbors=min(10, len(X_class)), algorithm='auto').fit(X_class)
+                distances, indices = nbrs.kneighbors(X_class)
+
+                # Use average distance to neighbors as density measure
+                avg_distances = np.mean(distances, axis=1)
+
+                # Select points with higher average distances (less crowded)
+                density_scores = 1 / (avg_distances + 1e-8)  # Avoid division by zero
+
+                # Sample points inversely proportional to density
+                probabilities = 1 / (density_scores + 1e-8)
+                probabilities = probabilities / np.sum(probabilities)
+
+                selected_indices = np.random.choice(
+                    len(X_class),
+                    size=max_points_per_class,
+                    replace=False,
+                    p=probabilities
+                )
+
+                X_sampled_list.append(X_class[selected_indices])
+                y_sampled_list.append(np.full(max_points_per_class, cls))
+
+        return np.vstack(X_sampled_list), np.hstack(y_sampled_list)
+
+    def _create_main_dashboard(self, X_full, y_full, training_history, feature_names, round_num):
+        """Create main dashboard linking all visualizations"""
+        dashboard_html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Advanced 3D Visualization Dashboard - {dataset_name}</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                         color: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; }}
+                .nav {{ display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }}
+                .nav-button {{ padding: 10px 20px; background: #4CAF50; color: white;
+                            border: none; border-radius: 5px; cursor: pointer; text-decoration: none; }}
+                .nav-button:hover {{ background: #45a049; }}
+                .iframe-container {{ border: 1px solid #ddd; border-radius: 5px; margin-bottom: 20px; }}
+                iframe {{ width: 100%; height: 800px; border: none; }}
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <h1>🌐 Advanced 3D Visualization Dashboard</h1>
+                <h2>Dataset: {dataset_name}</h2>
+                <p>Round: {round_info} | Features: {feature_count} | Samples: {sample_count}</p>
+            </div>
+
+            <div class="nav">
+                <a class="nav-button" href="#pca">PCA 3D</a>
+                <a class="nav-button" href="#feature">Feature Space 3D</a>
+                <a class="nav-button" href="#density">Density-Controlled 3D</a>
+                <a class="nav-button" href="#network">Network Graph</a>
+            </div>
+
+            <div id="pca" class="iframe-container">
+                <h3>📊 PCA 3D Visualization</h3>
+                <iframe src="pca_3d_{round_suffix}.html"></iframe>
+            </div>
+
+            <div id="feature" class="iframe-container">
+                <h3>🔧 Feature Space 3D</h3>
+                <iframe src="feature_3d_{round_suffix}.html"></iframe>
+            </div>
+
+            <div id="density" class="iframe-container">
+                <h3>📈 Density-Controlled 3D</h3>
+                <iframe src="density_3d_{round_suffix}.html"></iframe>
+            </div>
+
+            <script>
+                // Smooth scrolling for navigation
+                document.querySelectorAll('.nav-button').forEach(button => {{
+                    button.addEventListener('click', function(e) {{
+                        e.preventDefault();
+                        const targetId = this.getAttribute('href').substring(1);
+                        document.getElementById(targetId).scrollIntoView({{
+                            behavior: 'smooth'
+                        }});
+                    }});
+                }});
+            </script>
+        </body>
+        </html>
+        """.format(
+            dataset_name=self.dataset_name,
+            round_info=f"Round {round_num}" if round_num else "Final",
+            feature_count=len(feature_names),
+            sample_count=len(X_full),
+            round_suffix=f"round_{round_num}" if round_num else "final"
+        )
+
+        with open(self.output_dir / f"dashboard_{'round_' + str(round_num) if round_num else 'final'}.html", "w") as f:
+            f.write(dashboard_html)
+
 class ComprehensiveAdaptiveVisualizer:
     """Comprehensive visualization system for Adaptive DBNN with intuitive plots"""
 
@@ -95,13 +428,19 @@ class ComprehensiveAdaptiveVisualizer:
         print(f"📁 Output directory: {self.output_dir}")
 
     def set_plot_style(self):
-        """Set consistent plot style"""
+        """Set consistent plot style with safe colors"""
         plt.style.use('default')
         sns.set_palette("husl")
         plt.rcParams['figure.figsize'] = [12, 8]
         plt.rcParams['font.size'] = 10
         plt.rcParams['axes.titlesize'] = 14
         plt.rcParams['axes.labelsize'] = 12
+
+        # Use safe colors that work with both matplotlib and plotly
+        self.colors = [
+            '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+            '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf'
+        ]
 
     def create_comprehensive_visualizations(self, adaptive_model, X_full, y_full,
                                          training_history, round_stats, feature_names):
@@ -1113,6 +1452,61 @@ class AdaptiveDBNNGUI:
         self.enable_visualization_var = tk.BooleanVar(value=True)  # NEW: Visualization toggle
 
         self.setup_gui()
+        self.setup_common_controls()
+
+
+    def setup_common_controls(self):
+        """Setup common window controls including exit button"""
+        # Create a common control frame at the bottom
+        control_frame = ttk.Frame(self.root)
+        control_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=10, pady=5)
+
+        ttk.Button(control_frame, text="🔄 Refresh GUI",
+                   command=self.refresh_gui_values).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="💾 Save All Settings",
+                   command=self.save_all_settings).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="❌ Exit",
+                   command=self.safe_exit, width=10).pack(side=tk.RIGHT, padx=5)
+
+        # Status bar
+        self.status_var = tk.StringVar(value="Ready")
+        status_bar = ttk.Label(control_frame, textvariable=self.status_var, relief=tk.SUNKEN)
+        status_bar.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=5)
+
+    def refresh_gui_values(self):
+        """Refresh all GUI values to ensure they are current"""
+        try:
+            # Force update of all variables
+            self.root.update()
+            self.log_output("✅ GUI values refreshed and effective")
+        except Exception as e:
+            self.log_output(f"❌ Error refreshing GUI: {e}")
+
+    def save_all_settings(self):
+        """Save all current settings to configuration"""
+        try:
+            if self.current_data_file:
+                self.save_configuration_for_file(self.current_data_file)
+                self.apply_hyperparameters()
+                self.log_output("✅ All settings saved and applied")
+            else:
+                messagebox.showinfo("Info", "Please load a data file first.")
+        except Exception as e:
+            self.log_output(f"❌ Error saving settings: {e}")
+
+    def safe_exit(self):
+        """Safely exit the application with confirmation"""
+        if messagebox.askyesno("Exit", "Are you sure you want to exit?"):
+            try:
+                # Clean up any temporary files or resources
+                if hasattr(self, 'adaptive_model'):
+                    del self.adaptive_model
+                self.root.quit()
+                self.root.destroy()
+            except Exception as e:
+                # Force exit even if cleanup fails
+                self.root.quit()
+                self.root.destroy()
 
     def setup_gui(self):
         """Setup the main GUI interface with tabs and horizontal navigation."""
@@ -1340,7 +1734,7 @@ class AdaptiveDBNNGUI:
         ttk.Checkbutton(adaptive_frame, text="Enable Visualization", variable=self.enable_visualization_var).grid(row=7, column=1, sticky=tk.W, padx=5)  # NEW
 
     def setup_training_tab(self):
-        """Setup training and evaluation tab."""
+        """Setup training and evaluation tab with enhanced visualization controls"""
         # Control frame
         control_frame = ttk.LabelFrame(self.training_tab, text="Model Control", padding="10")
         control_frame.pack(fill=tk.X, pady=5)
@@ -1356,14 +1750,24 @@ class AdaptiveDBNNGUI:
         ttk.Button(control_frame, text="Load Model",
                   command=self.load_model, width=12).pack(side=tk.LEFT, padx=2)
 
-        # Visualization frame
-        viz_frame = ttk.LabelFrame(self.training_tab, text="Visualization", padding="10")
+        # Enhanced Visualization frame
+        viz_frame = ttk.LabelFrame(self.training_tab, text="Advanced Visualization", padding="10")
         viz_frame.pack(fill=tk.X, pady=5)
 
-        ttk.Button(viz_frame, text="Basic Visualizations",
-                  command=self.show_visualizations, width=15).pack(side=tk.LEFT, padx=2)
-        ttk.Button(viz_frame, text="Advanced Analysis",
-                  command=self.show_advanced_analysis, width=15).pack(side=tk.LEFT, padx=2)
+        # Visualization controls in a grid
+        viz_control_frame = ttk.Frame(viz_frame)
+        viz_control_frame.pack(fill=tk.X)
+
+        ttk.Button(viz_control_frame, text="📊 Basic Visualizations",
+                  command=self.show_visualizations, width=18).grid(row=0, column=0, padx=2, pady=2)
+        ttk.Button(viz_control_frame, text="🔬 Advanced Analysis",
+                  command=self.show_advanced_analysis, width=18).grid(row=0, column=1, padx=2, pady=2)
+        ttk.Button(viz_control_frame, text="🌐 Interactive 3D",
+                  command=self.show_interactive_3d, width=18).grid(row=0, column=2, padx=2, pady=2)
+        ttk.Button(viz_control_frame, text="📁 Open Viz Location",
+                  command=self.open_visualization_location, width=18).grid(row=0, column=3, padx=2, pady=2)
+        ttk.Button(viz_control_frame, text="🎬 Show Animations",
+                  command=self.show_animations, width=18).grid(row=0, column=4, padx=2, pady=2)
 
         # Create a notebook for output and results
         output_notebook = ttk.Notebook(self.training_tab)
@@ -1383,6 +1787,78 @@ class AdaptiveDBNNGUI:
         self.results_text = scrolledtext.ScrolledText(results_frame, height=15, width=100)
         self.results_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         self.results_text.config(state=tk.DISABLED)
+
+    # NEW METHODS FOR VISUALIZATION CONTROLS
+    def open_visualization_location(self):
+        """Open the visualization directory in file explorer"""
+        try:
+            if hasattr(self, 'adaptive_model') and self.adaptive_model:
+                viz_dir = self.adaptive_model.comprehensive_visualizer.output_dir
+                if viz_dir.exists():
+                    import subprocess
+                    import platform
+
+                    system = platform.system()
+                    if system == "Windows":
+                        subprocess.Popen(f'explorer "{viz_dir}"')
+                    elif system == "Darwin":  # macOS
+                        subprocess.Popen(['open', str(viz_dir)])
+                    else:  # Linux
+                        subprocess.Popen(['xdg-open', str(viz_dir)])
+
+                    self.log_output(f"📁 Opened visualization directory: {viz_dir}")
+                else:
+                    self.log_output("❌ Visualization directory not found. Run adaptive learning first.")
+            else:
+                self.log_output("❌ No model available. Please run adaptive learning first.")
+        except Exception as e:
+            self.log_output(f"❌ Error opening visualization location: {e}")
+
+    def show_animations(self):
+        """Show available animations"""
+        try:
+            if hasattr(self, 'adaptive_model') and self.adaptive_model:
+                viz_dir = self.adaptive_model.comprehensive_visualizer.output_dir
+                animation_files = list(viz_dir.rglob("*.gif")) + list(viz_dir.rglob("*.mp4"))
+
+                if animation_files:
+                    self.log_output("🎬 Available animations:")
+                    for anim_file in animation_files:
+                        self.log_output(f"   📹 {anim_file.relative_to(viz_dir)}")
+
+                    # Open the animations directory
+                    self.open_visualization_location()
+                else:
+                    self.log_output("❌ No animations found. Run adaptive learning with visualization enabled.")
+            else:
+                self.log_output("❌ No model available. Please run adaptive learning first.")
+        except Exception as e:
+            self.log_output(f"❌ Error showing animations: {e}")
+
+    def show_interactive_3d(self):
+        """Show interactive 3D visualizations"""
+        try:
+            if hasattr(self, 'adaptive_model') and self.adaptive_model:
+                viz_dir = self.adaptive_model.comprehensive_visualizer.output_dir
+                html_files = list(viz_dir.rglob("*.html"))
+
+                interactive_3d_files = [f for f in html_files if "interactive" in f.name.lower() or "3d" in f.name.lower()]
+
+                if interactive_3d_files:
+                    self.log_output("🌐 Interactive 3D visualizations:")
+                    for html_file in interactive_3d_files:
+                        self.log_output(f"   🔗 {html_file.relative_to(viz_dir)}")
+
+                    # Open the first interactive 3D file in default browser
+                    import webbrowser
+                    webbrowser.open(f"file://{interactive_3d_files[0].absolute()}")
+                    self.log_output(f"📂 Opening: {interactive_3d_files[0].name}")
+                else:
+                    self.log_output("❌ No interactive 3D visualizations found. Run adaptive learning first.")
+            else:
+                self.log_output("❌ No model available. Please run adaptive learning first.")
+        except Exception as e:
+            self.log_output(f"❌ Error showing interactive 3D: {e}")
 
     def browse_data_file(self):
         """Browse for data file."""
@@ -1755,13 +2231,13 @@ Data Types:
         return f"{base_name}_adaptive_config.json"
 
     def apply_hyperparameters(self):
-        """Apply current hyperparameters to the model."""
+        """Apply current hyperparameters to the model and make them immediately effective"""
         if not self.data_loaded or self.adaptive_model is None:
             messagebox.showwarning("Warning", "Please load data and apply feature selection first.")
             return
 
         try:
-            # Update model configuration
+            # Update model configuration with ALL current GUI values
             config = {
                 'resol': int(self.config_vars["dbnn_resolution"].get()),
                 'gain': float(self.config_vars["dbnn_gain"].get()),
@@ -1777,19 +2253,28 @@ Data Types:
                     'enable_acid_test': self.enable_acid_var.get(),
                     'enable_kl_divergence': self.enable_kl_var.get(),
                     'disable_sample_limit': self.disable_sample_limit_var.get(),
+                    'enable_visualization': self.enable_visualization_var.get(),
                     'margin_tolerance': float(self.config_vars["adaptive_margin_tolerance"].get()),
                     'kl_threshold': float(self.config_vars["adaptive_kl_threshold"].get()),
+                    'training_convergence_epochs': int(self.config_vars["adaptive_training_convergence_epochs"].get()),
+                    'min_training_accuracy': float(self.config_vars["adaptive_min_training_accuracy"].get()),
+                    'adaptive_margin_relaxation': float(self.config_vars["adaptive_adaptive_margin_relaxation"].get()),
                 }
             }
 
+            # Update the model configuration
             self.adaptive_model.config.update(config)
             if hasattr(self.adaptive_model, 'adaptive_config'):
                 self.adaptive_model.adaptive_config.update(config.get('adaptive_learning', {}))
 
-            self.log_output("✅ Hyperparameters applied to model")
+            self.log_output("✅ Hyperparameters applied and effective immediately")
             self.log_output(f"   Resolution: {self.config_vars['dbnn_resolution'].get()}")
             self.log_output(f"   Max Rounds: {self.max_rounds_var.get()}")
             self.log_output(f"   Acid Test: {'Enabled' if self.enable_acid_var.get() else 'Disabled'}")
+            self.log_output(f"   Visualization: {'Enabled' if self.enable_visualization_var.get() else 'Disabled'}")
+
+            # Force GUI refresh
+            self.refresh_gui_values()
 
         except Exception as e:
             self.log_output(f"❌ Error applying hyperparameters: {e}")
@@ -2310,7 +2795,7 @@ class DBNNVisualizer:
     """Visualization system for DBNN"""
 
     def __init__(self, model, output_dir='visualizations', enabled=True):
-        self.model = model
+        self.db = model
         self.output_dir = output_dir
         self.enabled = enabled
         os.makedirs(output_dir, exist_ok=True)
@@ -3069,6 +3554,9 @@ class AdaptiveDBNN:
         self.training_history = []
         self.round_stats = []
 
+        # Enhanced visualization
+        self.advanced_visualizer = AdvancedInteractiveVisualizer(dataset_name)
+
         print("🎯 Adaptive DBNN initialized with configuration:")
         for key, value in self.adaptive_config.items():
             print(f"  {key:40}: {value}")
@@ -3326,7 +3814,7 @@ class AdaptiveDBNN:
         return samples_to_add
 
     def adaptive_learn(self, feature_columns: List[str] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Main adaptive learning method with enhanced acid test stopping criteria"""
+        """Main adaptive learning method with CORRECT best model selection"""
         print("\n🚀 STARTING ADAPTIVE LEARNING")
         print("=" * 60)
 
@@ -3352,10 +3840,11 @@ class AdaptiveDBNN:
         print(f"📊 Initial training set: {len(X_train)} samples")
         print(f"📊 Remaining test set: {len(remaining_indices)} samples")
 
-        # Initialize tracking variables
+        # Initialize tracking variables - FIXED: Track best model state
         self.best_accuracy = 0.0
         self.best_training_indices = initial_indices.copy()
         self.best_round = 0
+        self.best_model_state = None  # NEW: Store best model weights
         self.round_stats = []
         self.training_history = [initial_indices.copy()]
         acid_test_history = []
@@ -3365,12 +3854,12 @@ class AdaptiveDBNN:
         patience = self.adaptive_config['patience']
         min_improvement = self.adaptive_config['min_improvement']
         enable_acid_test = self.adaptive_config.get('enable_acid_test', True)
-        enable_visualization = self.adaptive_config.get('enable_visualization', True)  # NEW
+        enable_visualization = self.adaptive_config.get('enable_visualization', True)
 
         print(f"\n🔄 Starting adaptive learning for up to {max_rounds} rounds...")
         print(f"📊 Stopping criteria: 100% accuracy OR patience {patience} rounds OR max rounds {max_rounds}")
         print(f"🔬 Acid Test: {'ENABLED' if enable_acid_test else 'DISABLED'}")
-        print(f"🎨 Visualization: {'ENABLED' if enable_visualization else 'DISABLED'}")  # NEW
+        print(f"🎨 Visualization: {'ENABLED' if enable_visualization else 'DISABLED'}")
         self.adaptive_start_time = datetime.now()
 
         for round_num in range(1, max_rounds + 1):
@@ -3387,45 +3876,53 @@ class AdaptiveDBNN:
                 print("❌ Training failed, stopping...")
                 break
 
-            # Run acid test on entire dataset if enabled
-            acid_test_accuracy = 0.0
+            # Determine the accuracy metric to use for model selection
             if enable_acid_test:
                 print("🧪 Running acid test on entire dataset...")
                 try:
                     all_predictions = self.db.predict(X)
-                    acid_test_accuracy = accuracy_score(y, all_predictions)
-                    acid_test_history.append(acid_test_accuracy)
-
+                    current_accuracy = accuracy_score(y, all_predictions)
+                    accuracy_type = "acid test"
                     print(f"📊 Training accuracy: {train_accuracy:.2f}%")
-                    print(f"📊 Acid test accuracy: {acid_test_accuracy:.4f}")
-
+                    print(f"📊 Acid test accuracy: {current_accuracy:.4f}")
                 except Exception as e:
                     print(f"❌ Acid test failed: {e}")
-                    acid_test_accuracy = 0.0
-                    acid_test_history.append(0.0)
+                    # Fallback to training accuracy if acid test fails
+                    current_accuracy = train_accuracy / 100.0
+                    accuracy_type = "training (fallback)"
+                    print(f"📊 Using training accuracy as fallback: {current_accuracy:.4f}")
             else:
-                # If acid test disabled, use training accuracy
-                acid_test_accuracy = train_accuracy / 100.0
-                acid_test_history.append(acid_test_accuracy)
+                # If acid test disabled, use accuracy on remaining data
+                if len(remaining_indices) > 0:
+                    X_remaining = X[remaining_indices]
+                    y_remaining = y[remaining_indices]
+                    remaining_predictions = self.db.predict(X_remaining)
+                    current_accuracy = accuracy_score(y_remaining, remaining_predictions)
+                    accuracy_type = "remaining data"
+                else:
+                    current_accuracy = train_accuracy / 100.0
+                    accuracy_type = "training"
                 print(f"📊 Training accuracy: {train_accuracy:.2f}%")
+                print(f"📊 {accuracy_type.title()} accuracy: {current_accuracy:.4f}")
+
+            acid_test_history.append(current_accuracy)
 
             # Store round statistics
             round_stat = {
                 'round': round_num,
                 'training_size': len(X_train),
                 'train_accuracy': train_accuracy / 100.0,
-                'test_accuracy': acid_test_accuracy,
+                'test_accuracy': current_accuracy,
                 'new_samples': 0,
-                'improvement': 0.0
+                'improvement': 0.0,
+                'accuracy_type': accuracy_type
             }
 
-            # ENHANCED STOPPING CRITERION 1: 100% accuracy on entire dataset
-            if acid_test_accuracy >= 0.9999:
-                print("🎉 REACHED 100% ACCURACY ON ENTIRE DATASET! Stopping adaptive learning.")
-                self.best_accuracy = acid_test_accuracy
-                self.best_training_indices = initial_indices.copy()
-                self.best_round = round_num
-                round_stat['improvement'] = acid_test_accuracy - self.best_accuracy
+            # STOPPING CRITERION 1: 100% accuracy
+            if current_accuracy >= 0.9999:
+                print("🎉 REACHED 100% ACCURACY! Stopping adaptive learning.")
+                self._update_best_model(current_accuracy, initial_indices.copy(), round_num, self.db)
+                round_stat['improvement'] = current_accuracy - self.best_accuracy
                 self.round_stats.append(round_stat)
                 self.training_history.append(initial_indices.copy())
                 break
@@ -3449,10 +3946,8 @@ class AdaptiveDBNN:
             if len(misclassified_indices) == 0:
                 print("✅ No misclassified samples in remaining data!")
                 print("🎉 PERFECT CLASSIFICATION ON REMAINING DATA! Stopping adaptive learning.")
-                self.best_accuracy = acid_test_accuracy
-                self.best_training_indices = initial_indices.copy()
-                self.best_round = round_num
-                round_stat['improvement'] = acid_test_accuracy - self.best_accuracy
+                self._update_best_model(current_accuracy, initial_indices.copy(), round_num, self.db)
+                round_stat['improvement'] = current_accuracy - self.best_accuracy
                 self.round_stats.append(round_stat)
                 self.training_history.append(initial_indices.copy())
                 break
@@ -3482,34 +3977,32 @@ class AdaptiveDBNN:
             print(f"📈 Added {len(samples_to_add_indices)} samples. New training set: {len(X_train)} samples")
             print(f"📊 Remaining set size: {len(remaining_indices)} samples")
 
-            # ENHANCED: Update best model and check for improvement using acid test accuracy
-            improvement = acid_test_accuracy - self.best_accuracy
+            # CRITICAL FIX: Update best model and check for improvement
+            improvement = current_accuracy - self.best_accuracy
             round_stat['improvement'] = improvement
 
-            if acid_test_accuracy > self.best_accuracy + min_improvement:
-                self.best_accuracy = acid_test_accuracy
-                self.best_training_indices = initial_indices.copy()
-                self.best_round = round_num
+            if current_accuracy > self.best_accuracy + min_improvement:
+                self._update_best_model(current_accuracy, initial_indices.copy(), round_num, self.db)
                 patience_counter = 0
-                print(f"🏆 New best acid test accuracy: {acid_test_accuracy:.4f} (+{improvement:.4f})")
+                print(f"🏆 New best {accuracy_type} accuracy: {current_accuracy:.4f} (+{improvement:.4f})")
             else:
                 patience_counter += 1
-                if acid_test_accuracy > self.best_accuracy:
-                    print(f"↗️  Small improvement: {acid_test_accuracy:.4f} (+{improvement:.4f}) - Patience: {patience_counter}/{patience}")
+                if current_accuracy > self.best_accuracy:
+                    print(f"↗️  Small improvement: {current_accuracy:.4f} (+{improvement:.4f}) - Patience: {patience_counter}/{patience}")
                 else:
                     print(f"🔄 No improvement - Patience: {patience_counter}/{patience}")
 
             # Add round statistics
             self.round_stats.append(round_stat)
 
-            # Create intermediate visualizations only if enabled
-            if enable_visualization and (round_num % 3 == 0 or round_num == 1) and self._should_create_visualizations(round_num):
+            # Create intermediate visualizations only if enabled and at strategic points
+            if enable_visualization and self._should_create_visualizations(round_num):
                 self._create_intermediate_visualizations(round_num)
 
-            # ENHANCED STOPPING CRITERION: No significant improvement for patience rounds
+            # STOPPING CRITERION: No significant improvement for patience rounds
             if patience_counter >= patience:
                 print(f"🛑 PATIENCE EXCEEDED: No significant improvement for {patience} rounds")
-                print(f"   Best acid test accuracy: {self.best_accuracy:.4f} (round {self.best_round})")
+                print(f"   Best {accuracy_type} accuracy: {self.best_accuracy:.4f} (round {self.best_round})")
                 break
 
         # Finalize with best configuration
@@ -3521,10 +4014,14 @@ class AdaptiveDBNN:
             self.best_training_indices = initial_indices.copy()
             self.best_round = self.adaptive_round
 
-        print(f"🏆 Best acid test accuracy: {self.best_accuracy:.4f} (round {self.best_round})")
+        print(f"🏆 Best accuracy: {self.best_accuracy:.4f} (round {self.best_round})")
         print(f"📊 Final training set: {len(self.best_training_indices)} samples ({len(self.best_training_indices)/len(X)*100:.1f}% of total)")
 
-        # Use best configuration for final model
+        # Use best configuration for final model - RESTORE BEST MODEL STATE
+        if self.best_model_state is not None:
+            print("🔄 Restoring best model state...")
+            self._restore_best_model_state()
+
         X_train_best = X[self.best_training_indices]
         y_train_best = y[self.best_training_indices]
         X_test_best = X[[i for i in range(len(X)) if i not in self.best_training_indices]]
@@ -3534,11 +4031,11 @@ class AdaptiveDBNN:
         self.X_test = X_test_best
         self.y_test = y_test_best
 
-        # Train final model with best configuration
-        print("🔧 Training final model with best configuration...")
-        final_train_accuracy = self.db.train_with_data(X_train_best, y_train_best, reset_weights=True)
+        # Train final model with best configuration (quick fine-tuning)
+        print("🔧 Fine-tuning final model with best configuration...")
+        final_train_accuracy = self.db.train_with_data(X_train_best, y_train_best, reset_weights=False)
 
-        # Final acid test verification
+        # Final verification
         final_predictions = self.db.predict(X)
         final_accuracy = accuracy_score(y, final_predictions)
 
@@ -3546,7 +4043,7 @@ class AdaptiveDBNN:
         self.total_training_time = (datetime.now() - self.adaptive_start_time).total_seconds()
 
         print(f"📊 Final training accuracy: {final_train_accuracy:.2f}%")
-        print(f"📊 Final acid test accuracy: {final_accuracy:.4f}")
+        print(f"📊 Final accuracy: {final_accuracy:.4f}")
         print(f"📈 Final training set size: {len(X_train_best)}")
         print(f"📊 Final test set size: {len(X_test_best)}")
         print(f"⏱️  Total training time: {self.total_training_time:.2f} seconds")
@@ -3559,21 +4056,57 @@ class AdaptiveDBNN:
 
         return X_train_best, y_train_best, X_test_best, y_test_best
 
-    def _create_intermediate_visualizations(self, round_num):
-        """Create intermediate visualizations during adaptive learning"""
+    def _update_best_model(self, accuracy: float, training_indices: List[int], round_num: int, model):
+        """Update the best model state - CRITICAL FIX"""
+        self.best_accuracy = accuracy
+        self.best_training_indices = training_indices.copy()
+        self.best_round = round_num
+
+        # Store the actual model weights for later restoration
         try:
-            # Create snapshot of current state
+            if hasattr(model, 'core') and hasattr(model.core, 'anti_wts'):
+                self.best_model_state = {
+                    'anti_wts': model.core.anti_wts.copy(),
+                    'anti_net': model.core.anti_net.copy() if hasattr(model.core, 'anti_net') else None
+                }
+            else:
+                self.best_model_state = None
+        except Exception as e:
+            print(f"⚠️ Could not save model state: {e}")
+            self.best_model_state = None
+
+    def _restore_best_model_state(self):
+        """Restore the best model state"""
+        if self.best_model_state is not None and hasattr(self.db, 'core'):
+            try:
+                self.db.core.anti_wts = self.best_model_state['anti_wts'].copy()
+                if self.best_model_state['anti_net'] is not None and hasattr(self.db.core, 'anti_net'):
+                    self.db.core.anti_net = self.best_model_state['anti_net'].copy()
+                print("✅ Best model state restored")
+            except Exception as e:
+                print(f"⚠️ Could not restore model state: {e}")
+
+    def _create_intermediate_visualizations(self, round_num):
+        """Create intermediate visualizations including advanced 3D"""
+        try:
             current_indices = self.training_history[-1]
 
-            # Create 3D network visualization
+            # Create comprehensive visualizations
             self.comprehensive_visualizer.plot_3d_networks(
                 self.X_full, self.y_full, [current_indices],
                 self.feature_columns
             )
 
-            print(f"🎨 Created intermediate visualization for round {round_num}")
+            # Create advanced interactive 3D visualizations
+            if self.adaptive_config.get('enable_advanced_3d', True):
+                self.advanced_visualizer.create_advanced_3d_dashboard(
+                    self.X_full, self.y_full, self.training_history,
+                    self.feature_columns, round_num
+                )
+
+            print(f"🎨 Created advanced visualizations for round {round_num}")
         except Exception as e:
-            print(f"⚠️ Intermediate visualization failed: {e}")
+            print(f"⚠️ Advanced visualization failed: {e}")
 
     def _finalize_adaptive_learning(self):
         """Finalize adaptive learning with comprehensive outputs"""
@@ -3606,8 +4139,8 @@ class AdaptiveDBNN:
         model_path = self.models_dir / model_filename
 
         try:
-            # Use the DBNN core's save capability
-            success = self.model.core.save_model_auto(
+            # Use the DBNN core's save capability - FIXED: use self.db instead of self.model
+            success = self.db.core.save_model_auto(
                 model_dir=str(self.models_dir),
                 data_filename=f"{self.dataset_name}.csv",
                 feature_columns=self.feature_columns,
