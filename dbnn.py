@@ -332,6 +332,120 @@ class DBNNCore:
 
         return predictions, probabilities
 
+    def save_model_auto(self, model_dir="Model", data_filename=None, feature_columns=None, target_column=None):
+        """Automatically save trained model in binary format with timestamp to Model/ folder"""
+        if not self.is_trained:
+            print("❌ No trained model to save")
+            return None
+
+        try:
+            # Ensure Model directory exists with absolute path
+            model_dir = os.path.abspath(model_dir)
+            os.makedirs(model_dir, exist_ok=True)
+
+            # Create model filename based on data file and timestamp
+            if data_filename:
+                base_name = os.path.splitext(os.path.basename(data_filename))[0]
+            else:
+                base_name = "model"
+
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            model_filename = os.path.join(model_dir, f"{base_name}_{timestamp}_model.bin")
+
+            # Store additional metadata
+            model_metadata = {
+                'data_file': data_filename,
+                'feature_columns': feature_columns if feature_columns else [],
+                'target_column': target_column if target_column else "",
+                'best_accuracy': getattr(self, 'best_accuracy', 0.0),
+                'best_round': getattr(self, 'best_round', 0),
+                'training_date': time.strftime("%Y-%m-%d %H:%M:%S"),
+                'model_format': 'binary_auto_v1',
+                'input_nodes': self.innodes,
+                'output_nodes': self.outnodes,
+                'config': self.config  # Store the complete configuration
+            }
+
+            # Use core's save method but enhance with metadata
+            success = self.save_model(
+                model_filename,
+                feature_columns=feature_columns,
+                target_column=target_column,
+                use_json=False  # Always binary format for auto-save
+            )
+
+            if success:
+                # Save additional metadata separately
+                meta_filename = model_filename.replace('.bin', '_meta.json')
+                with open(meta_filename, 'w') as f:
+                    json.dump(model_metadata, f, indent=2)
+
+                print(f"✅ Model automatically saved to: {model_filename}")
+                print(f"   Best accuracy: {model_metadata['best_accuracy']:.2f}% at round {model_metadata['best_round']}")
+                print(f"   Metadata: {meta_filename}")
+                print(f"   Configuration: {len(self.config)} parameters embedded")
+
+                return model_filename
+            else:
+                print("❌ Failed to automatically save model")
+                return None
+
+        except Exception as e:
+            print(f"❌ Error in automatic model saving: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def load_model_auto_config(self, model_path):
+        """Load model and automatically configure system from metadata"""
+        try:
+            print(f"Loading model with auto-configuration: {model_path}")
+
+            # Load the model first
+            self.load_model(model_path)
+
+            # Try to load metadata
+            meta_path = model_path.replace('.bin', '_meta.json')
+            if os.path.exists(meta_path):
+                with open(meta_path, 'r') as f:
+                    metadata = json.load(f)
+
+                # Store metadata for reference
+                self.model_metadata = metadata
+
+                # Configure system based on metadata
+                data_file = metadata.get('data_file', '')
+                feature_columns = metadata.get('feature_columns', [])
+                target_column = metadata.get('target_column', '')
+                config = metadata.get('config', {})
+                best_accuracy = metadata.get('best_accuracy', 0.0)
+                best_round = metadata.get('best_round', 0)
+
+                # Update configuration
+                self.config.update(config)
+
+                # Store feature information
+                self.feature_columns = feature_columns
+                self.target_column = target_column
+                self.data_file = data_file
+                self.best_accuracy = best_accuracy
+                self.best_round = best_round
+
+                print(f"✅ Auto-configured from model metadata")
+                print(f"   Data file: {data_file}")
+                print(f"   Target: {target_column}")
+                print(f"   Features: {len(feature_columns)}")
+                print(f"   Best accuracy: {best_accuracy:.2f}% at round {best_round}")
+                print(f"   Configuration: {len(config)} parameters loaded")
+
+            return True
+
+        except Exception as e:
+            print(f"❌ Auto-configuration load error: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
     def detect_system_resources(self):
         """Detect available system resources and set optimal parameters"""
         resource_info = {
@@ -569,7 +683,7 @@ class DBNNCore:
         targets_batches = []
         original_targets_batches = []
 
-        print(f"Loading CSV data from: {filename}")
+        #print(f"Loading CSV data from: {filename}")
 
         with open(filename, 'r') as f:
             reader = csv.DictReader(f)
@@ -578,7 +692,7 @@ class DBNNCore:
                 raise ValueError("No headers found in CSV file")
 
             available_columns = reader.fieldnames
-            print(f"Available columns in CSV: {available_columns}")
+            #print(f"Available columns in CSV: {available_columns}")
 
             # For prediction mode: if target_column is None or 'None', skip target validation
             is_prediction_mode = (target_column is None or target_column == 'None' or target_column == '')
@@ -613,7 +727,7 @@ class DBNNCore:
                 if not feature_columns:
                     raise ValueError("No valid feature columns found in CSV file")
 
-            print(f"Using feature columns: {feature_columns}")
+            #print(f"Using feature columns: {feature_columns}")
             if not is_prediction_mode and target_column:
                 print(f"Using target column: {target_column}")
 
@@ -899,8 +1013,9 @@ class DBNNCore:
 
     def train_with_early_stopping(self, train_file: str, test_file: Optional[str] = None,
                                  use_csv: bool = True, target_column: Optional[str] = None,
-                                 feature_columns: Optional[List[str]] = None):
-        """Main training method with early stopping"""
+                                 feature_columns: Optional[List[str]] = None,
+                                 auto_save_model: bool = True, model_dir: str = "Model"):
+        """Main training method with early stopping and automatic model saving"""
         print("Starting model training with early stopping...")
 
         # Load training data
@@ -950,6 +1065,7 @@ class DBNNCore:
         best_accuracy = 0.0
         best_round = 0
         patience_counter = 0
+        best_weights = None
 
         for rnd in range(max_epochs + 1):
             if rnd == 0:
@@ -957,6 +1073,8 @@ class DBNNCore:
                 current_accuracy, correct_predictions, _ = self.evaluate(features_batches, encoded_targets_batches)
                 print(f"Round {rnd:3d}: Initial Accuracy = {current_accuracy:.2f}% ({correct_predictions}/{total_samples})")
                 best_accuracy = current_accuracy
+                best_weights = self.anti_wts.copy()
+                best_round = rnd
                 continue
 
             # Training pass
@@ -966,19 +1084,10 @@ class DBNNCore:
             current_accuracy, correct_predictions, _ = self.evaluate(features_batches, encoded_targets_batches)
             print(f"Round {rnd:3d}: Accuracy = {current_accuracy:.2f}% ({correct_predictions}/{total_samples})")
 
-            # Capture visualization snapshot if visualizer is attached
-            if self.visualizer and rnd % 5 == 0:
-                sample_features = np.vstack(features_batches)[:1000]  # Sample for performance
-                sample_targets = np.concatenate(encoded_targets_batches)[:1000]
-                sample_predictions, _ = self.predict_batch(sample_features)
-                self.visualizer.capture_training_snapshot(
-                    sample_features, sample_targets, self.anti_wts,
-                    sample_predictions, current_accuracy, rnd
-                )
-
             # Early stopping logic
             if current_accuracy > best_accuracy + min_improvement:
                 best_accuracy = current_accuracy
+                best_weights = self.anti_wts.copy()
                 best_round = rnd
                 patience_counter = 0
                 print(f"  → New best accuracy! (Improved by {current_accuracy - best_accuracy:.2f}%)")
@@ -991,10 +1100,32 @@ class DBNNCore:
                 print(f"Best accuracy {best_accuracy:.2f}% achieved at round {best_round}")
                 break
 
+        # Restore best weights
+        if best_weights is not None:
+            self.anti_wts = best_weights
+            print(f"Restored best weights from round {best_round}")
+
         self.is_trained = True
+        self.best_accuracy = best_accuracy
+        self.best_round = best_round
+
+        # Automatic model saving
+        if auto_save_model:
+            print("=== Auto-saving Trained Model ===")
+            saved_model_path = self.save_model_auto(
+                model_dir=model_dir,
+                data_filename=train_file,
+                feature_columns=feature_columns_used,
+                target_column=target_column
+            )
+
+            if saved_model_path:
+                print(f"✅ Model automatically saved to: {saved_model_path}")
+            else:
+                print("❌ Automatic model saving failed!")
+
         print("Training completed successfully!")
         return True
-
     def save_model(self, model_path: str, feature_columns=None, target_column=None, use_json=False):
         """Save complete model to file in binary format (default) or JSON format"""
         try:
@@ -1677,9 +1808,24 @@ class EnhancedDBNNInterface:
         self.setup_ui()
 
     def setup_ui(self):
-        """Setup enhanced UI with better feature selection"""
+        """Setup enhanced UI with configuration tab system"""
+        # Create notebook for tabs instead of paned window
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Setup main tab
+        self.setup_main_tab()
+
+        # Setup configuration tab
+        self.setup_configuration_tab()
+
+    def setup_main_tab(self):
+        """Setup the main working tab"""
+        main_frame = ttk.Frame(self.notebook)
+        self.notebook.add(main_frame, text="Main Interface")
+
         # Main frame with paned window for better layout
-        main_paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
+        main_paned = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
         main_paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         # Left frame for controls
@@ -1704,8 +1850,8 @@ class EnhancedDBNNInterface:
         self.file_info = scrolledtext.ScrolledText(file_frame, height=4, width=60)
         self.file_info.grid(row=1, column=0, columnspan=4, pady=5, sticky='we')
 
-        # Configuration
-        config_frame = ttk.LabelFrame(left_frame, text="Configuration", padding="5")
+        # Quick configuration
+        config_frame = ttk.LabelFrame(left_frame, text="Quick Configuration", padding="5")
         config_frame.pack(fill='x', pady=5)
 
         # Model name
@@ -1715,8 +1861,8 @@ class EnhancedDBNNInterface:
 
         # Training params in a grid
         params = [
-            ("Resolution:", "resol", "50"),
-            ("Epochs:", "epochs", "50"),
+            ("Resolution:", "resol", "100"),
+            ("Epochs:", "epochs", "100"),
             ("Gain:", "gain", "2.0"),
             ("Margin:", "margin", "0.2"),
             ("Patience:", "patience", "10")
@@ -1792,6 +1938,14 @@ class EnhancedDBNNInterface:
         ttk.Button(row2_frame, text="Load Model", command=self.load_model).pack(side='left', padx=2)
         ttk.Button(row2_frame, text="Visualize", command=self.visualize).pack(side='left', padx=2)
 
+        # Quick config buttons
+        row3_frame = ttk.Frame(button_frame)
+        row3_frame.pack(fill='x', pady=2)
+
+        ttk.Button(row3_frame, text="Load Config", command=lambda: self.load_config()).pack(side='left', padx=2)
+        ttk.Button(row3_frame, text="Save Config", command=self.save_config).pack(side='left', padx=2)
+        ttk.Button(row3_frame, text="Validate Config", command=self.validate_config).pack(side='left', padx=2)
+
         # Debug controls
         debug_frame = ttk.LabelFrame(left_frame, text="Debug Controls", padding="5")
         debug_frame.pack(fill='x', pady=5)
@@ -1806,6 +1960,315 @@ class EnhancedDBNNInterface:
 
         self.console = scrolledtext.ScrolledText(console_frame, height=30, width=80)
         self.console.pack(fill='both', expand=True)
+
+    def setup_configuration_tab(self):
+        """Setup configuration tab with all default parameters"""
+        # Create configuration tab
+        config_frame = ttk.Frame(self.notebook)
+        self.notebook.add(config_frame, text="Configuration")
+
+        # Main configuration frame
+        main_config_frame = ttk.LabelFrame(config_frame, text="Model Configuration Parameters", padding="10")
+        main_config_frame.pack(fill='both', expand=True, padx=10, pady=10)
+
+        # Create scrollable frame for configurations
+        canvas = tk.Canvas(main_config_frame)
+        scrollbar = ttk.Scrollbar(main_config_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Default configuration parameters
+        self.config_params = {
+            'resol': {'label': 'Resolution', 'default': 100, 'type': 'int', 'min': 10, 'max': 500, 'desc': 'Number of bins for feature discretization'},
+            'gain': {'label': 'Gain', 'default': 2.0, 'type': 'float', 'min': 0.1, 'max': 10.0, 'desc': 'Weight update gain factor'},
+            'margin': {'label': 'Margin', 'default': 0.2, 'type': 'float', 'min': 0.01, 'max': 1.0, 'desc': 'Classification margin threshold'},
+            'patience': {'label': 'Patience', 'default': 10, 'type': 'int', 'min': 1, 'max': 100, 'desc': 'Early stopping patience (epochs)'},
+            'epochs': {'label': 'Max Epochs', 'default': 100, 'type': 'int', 'min': 1, 'max': 1000, 'desc': 'Maximum training epochs'},
+            'min_improvement': {'label': 'Min Improvement (%)', 'default': 0.1, 'type': 'float', 'min': 0.01, 'max': 10.0, 'desc': 'Minimum accuracy improvement for early stopping'},
+            'fst_gain': {'label': 'First Gain', 'default': 1.0, 'type': 'float', 'min': 0.1, 'max': 5.0, 'desc': 'Initial gain factor'},
+            'LoC': {'label': 'Learning Rate', 'default': 0.65, 'type': 'float', 'min': 0.01, 'max': 1.0, 'desc': 'Learning rate coefficient'},
+            'nLoC': {'label': 'Negative Learning Rate', 'default': 0.0, 'type': 'float', 'min': 0.0, 'max': 1.0, 'desc': 'Negative learning rate coefficient'},
+            'nresol': {'label': 'Negative Resolution', 'default': 0, 'type': 'int', 'min': 0, 'max': 100, 'desc': 'Negative resolution parameter'},
+            'skpchk': {'label': 'Skip Check', 'default': 0, 'type': 'int', 'min': 0, 'max': 1, 'desc': 'Skip validation checks (0=no, 1=yes)'},
+            'oneround': {'label': 'One Round', 'default': 100, 'type': 'int', 'min': 1, 'max': 1000, 'desc': 'Samples per training round'}
+        }
+
+        self.config_vars = {}
+
+        # Create configuration entries in two columns
+        param_keys = list(self.config_params.keys())
+        half = len(param_keys) // 2 + len(param_keys) % 2
+
+        for i, key in enumerate(param_keys):
+            param = self.config_params[key]
+            row = i % half
+            col = i // half
+
+            frame = ttk.Frame(scrollable_frame)
+            frame.grid(row=row, column=col, sticky='w', padx=15, pady=8)
+
+            # Parameter label
+            ttk.Label(frame, text=param['label'] + ":", width=22, anchor='w').pack(side='left')
+
+            # Entry field
+            var = tk.StringVar(value=str(param['default']))
+            self.config_vars[key] = var
+
+            entry = ttk.Entry(frame, textvariable=var, width=12)
+            entry.pack(side='left', padx=5)
+
+            # Range label
+            range_text = f"({param['min']}-{param['max']})"
+            ttk.Label(frame, text=range_text, width=12, foreground="gray").pack(side='left', padx=5)
+
+            # Add tooltip with parameter description
+            self.create_tooltip(entry, f"{param['desc']}\nDefault: {param['default']}\nType: {param['type']}\nRange: {param['min']} to {param['max']}")
+            self.create_tooltip(frame, f"{param['desc']}\nDefault: {param['default']}")
+
+        # Configuration management buttons
+        button_frame = ttk.Frame(config_frame)
+        button_frame.pack(fill='x', padx=10, pady=10)
+
+        ttk.Button(button_frame, text="Load Default Configuration",
+                   command=self.load_default_config).pack(side='left', padx=5)
+        ttk.Button(button_frame, text="Validate Current Configuration",
+                   command=self.validate_config).pack(side='left', padx=5)
+        ttk.Button(button_frame, text="Save Configuration to File",
+                   command=self.save_config).pack(side='left', padx=5)
+        ttk.Button(button_frame, text="Load Configuration from File",
+                   command=self.load_config).pack(side='left', padx=5)
+
+        # Apply to main tab button
+        ttk.Button(button_frame, text="Apply to Main Tab",
+                   command=self.apply_config_to_main).pack(side='left', padx=5)
+
+        # Config status
+        self.config_status = ttk.Label(config_frame, text="Ready to configure", foreground="green", font=('Arial', 10))
+        self.config_status.pack(pady=10)
+
+        # Configuration info
+        info_text = """Configuration Management:
+    • Load Default: Reset all parameters to default values
+    • Validate: Check if current values are valid
+    • Save: Save configuration to Model/<dataset>_config.json
+    • Load: Load configuration from file
+    • Apply to Main: Copy values to main tab quick configuration"""
+
+        info_label = ttk.Label(config_frame, text=info_text, justify=tk.LEFT, foreground="blue",
+                              font=('Arial', 9))
+        info_label.pack(pady=5)
+
+    def create_tooltip(self, widget, text):
+        """Create a tooltip for a widget"""
+        def on_enter(event):
+            tooltip = tk.Toplevel()
+            tooltip.wm_overrideredirect(True)
+            tooltip.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
+            label = ttk.Label(tooltip, text=text, background="lightyellow",
+                             relief="solid", borderwidth=1, padding=5,
+                             font=('Arial', 9), wraplength=300)
+            label.pack()
+            widget.tooltip = tooltip
+
+        def on_leave(event):
+            if hasattr(widget, 'tooltip'):
+                widget.tooltip.destroy()
+
+        widget.bind("<Enter>", on_enter)
+        widget.bind("<Leave>", on_leave)
+
+
+    def load_default_config(self):
+        """Load default configuration values"""
+        for key, param in self.config_params.items():
+            self.config_vars[key].set(str(param['default']))
+        self.config_status.config(text="Default configuration loaded", foreground="green")
+
+    def validate_config(self):
+        """Validate configuration parameters"""
+        errors = []
+        for key, param in self.config_params.items():
+            try:
+                value = self.config_vars[key].get()
+                if param['type'] == 'int':
+                    int_value = int(value)
+                    if not (param['min'] <= int_value <= param['max']):
+                        errors.append(f"{param['label']} must be between {param['min']} and {param['max']}")
+                elif param['type'] == 'float':
+                    float_value = float(value)
+                    if not (param['min'] <= float_value <= param['max']):
+                        errors.append(f"{param['label']} must be between {param['min']} and {param['max']}")
+            except ValueError:
+                errors.append(f"{param['label']} must be a {param['type']}")
+
+        if errors:
+            error_msg = "\n".join(errors)
+            self.config_status.config(text="Configuration errors found", foreground="red")
+            messagebox.showerror("Configuration Error", f"Please fix the following errors:\n\n{error_msg}")
+        else:
+            self.config_status.config(text="Configuration validated successfully", foreground="green")
+            messagebox.showinfo("Success", "Configuration validated successfully!")
+
+        return len(errors) == 0
+
+    def get_config_dict(self):
+        """Get current configuration as dictionary"""
+        config = {}
+        for key in self.config_params.keys():
+            try:
+                value = self.config_vars[key].get()
+                if self.config_params[key]['type'] == 'int':
+                    config[key] = int(value)
+                elif self.config_params[key]['type'] == 'float':
+                    config[key] = float(value)
+            except ValueError:
+                # Use default if invalid
+                config[key] = self.config_params[key]['default']
+        return config
+
+    def save_config(self):
+        """Save configuration to file"""
+        if not self.current_file:
+            messagebox.showerror("Error", "Please select a data file first")
+            return
+
+        if not self.validate_config():
+            return
+
+        # Create config filename based on data file
+        data_filename = os.path.splitext(os.path.basename(self.current_file))[0]
+        config_filename = f"Model/{data_filename}_config.json"
+
+        # Ensure Model directory exists
+        os.makedirs("Model", exist_ok=True)
+
+        config_data = {
+            'config': self.get_config_dict(),
+            'data_file': self.current_file,
+            'feature_columns': self.get_selected_features() if hasattr(self, 'get_selected_features') else [],
+            'target_column': self.target_col.get() if hasattr(self, 'target_col') else "",
+            'saved_date': time.strftime("%Y-%m-%d %H:%M:%S")
+        }
+
+        try:
+            with open(config_filename, 'w') as f:
+                json.dump(config_data, f, indent=2)
+
+            self.config_status.config(text=f"Configuration saved to {config_filename}", foreground="green")
+            self.log(f"Configuration saved: {config_filename}")
+            messagebox.showinfo("Success", f"Configuration saved to:\n{config_filename}")
+
+        except Exception as e:
+            self.config_status.config(text="Error saving configuration", foreground="red")
+            messagebox.showerror("Error", f"Failed to save configuration: {e}")
+
+    def load_config(self, config_file=None):
+        """Load configuration from file"""
+        if config_file is None:
+            config_file = filedialog.askopenfilename(
+                title="Select Configuration File",
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+            )
+
+        if not config_file:
+            return
+
+        try:
+            with open(config_file, 'r') as f:
+                config_data = json.load(f)
+
+            # Update configuration values
+            config_dict = config_data.get('config', {})
+            for key, value in config_dict.items():
+                if key in self.config_vars:
+                    self.config_vars[key].set(str(value))
+
+            # Update data file if specified and exists
+            data_file = config_data.get('data_file', '')
+            if data_file and os.path.exists(data_file):
+                self.file_path.set(data_file)
+                self.current_file = data_file
+                self.analyze_file()
+
+            self.config_status.config(text=f"Configuration loaded from {config_file}", foreground="green")
+            self.log(f"Configuration loaded: {config_file}")
+            messagebox.showinfo("Success", f"Configuration loaded from:\n{config_file}")
+
+        except Exception as e:
+            self.config_status.config(text="Error loading configuration", foreground="red")
+            messagebox.showerror("Error", f"Failed to load configuration: {e}")
+
+    def auto_load_config(self):
+        """Automatically load configuration if it exists for current data file"""
+        if not self.current_file:
+            return
+
+        data_filename = os.path.splitext(os.path.basename(self.current_file))[0]
+        config_filename = f"Model/{data_filename}_config.json"
+
+        if os.path.exists(config_filename):
+            try:
+                with open(config_filename, 'r') as f:
+                    config_data = json.load(f)
+
+                # Update configuration values
+                config_dict = config_data.get('config', {})
+                for key, value in config_dict.items():
+                    if key in self.config_vars:
+                        self.config_vars[key].set(str(value))
+
+                # Update feature selection if available
+                feature_columns = config_data.get('feature_columns', [])
+                target_column = config_data.get('target_column', '')
+
+                if target_column and hasattr(self, 'target_col'):
+                    self.target_col.set(target_column)
+
+                if feature_columns and hasattr(self, 'feature_vars'):
+                    # Update feature checkboxes
+                    for col, var in self.feature_vars.items():
+                        var.set(col in feature_columns)
+
+                self.config_status.config(text=f"Auto-loaded configuration", foreground="green")
+                self.log(f"Auto-loaded configuration: {config_filename}")
+
+            except Exception as e:
+                self.log(f"Warning: Could not auto-load configuration: {e}")
+
+
+    def apply_config_to_main(self):
+        """Apply configuration tab values to main tab quick configuration"""
+        try:
+            config_dict = self.get_config_dict()
+
+            # Update main tab parameters
+            if hasattr(self, 'resol'):
+                self.resol.set(str(config_dict.get('resol', 100)))
+            if hasattr(self, 'epochs'):
+                self.epochs.set(str(config_dict.get('epochs', 100)))
+            if hasattr(self, 'gain'):
+                self.gain.set(str(config_dict.get('gain', 2.0)))
+            if hasattr(self, 'margin'):
+                self.margin.set(str(config_dict.get('margin', 0.2)))
+            if hasattr(self, 'patience'):
+                self.patience.set(str(config_dict.get('patience', 10)))
+
+            self.config_status.config(text="Configuration applied to main tab", foreground="green")
+            self.log("Configuration applied from config tab to main tab")
+
+        except Exception as e:
+            self.config_status.config(text="Error applying configuration", foreground="red")
+            self.log(f"Error applying configuration: {e}")
 
     def select_all_features(self):
         """Select all feature checkboxes"""
@@ -1840,8 +2303,208 @@ class EnhancedDBNNInterface:
         if filename:
             self.file_path.set(filename)
 
+    def predict(self):
+        """Make predictions using the trained model's configuration"""
+        if not self.core or not getattr(self.core, 'is_trained', False):
+            messagebox.showerror("Error", "No trained model available")
+            return
+
+        predict_file = filedialog.askopenfilename(
+            title="Select Prediction File",
+            filetypes=[("CSV files", "*.csv"), ("DAT files", "*.dat"), ("All files", "*.*")]
+        )
+
+        if not predict_file:
+            return
+
+        output_file = filedialog.asksaveasfilename(
+            title="Save Predictions As",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")]
+        )
+
+        if not output_file:
+            return
+
+        try:
+            self.show_processing_indicator("Analyzing system resources...")
+
+            # Use the trained model's configuration, not external config
+            if hasattr(self.core, 'feature_columns') and self.core.feature_columns:
+                training_features = self.core.feature_columns
+                self.log("=== PREDICTION USING TRAINED MODEL ===")
+                self.log(f"Using feature columns from trained model: {training_features}")
+                self.log(f"Model has {self.core.innodes} input nodes, {self.core.outnodes} output nodes")
+            else:
+                self.log("❌ No feature configuration found in trained model")
+                self.hide_processing_indicator()
+                return
+
+            # Detect resources and calculate optimal parameters
+            resources = self.core.detect_system_resources()
+            opt_params = self.core.calculate_optimal_parameters(resources, "prediction")
+
+            self.log(f"System: {resources['cpu_cores']} CPU cores, {resources['system_memory_gb']:.1f}GB RAM")
+            if resources['has_gpu']:
+                self.log(f"GPU: {resources.get('gpu_name', 'Unknown')} with {resources['gpu_memory_gb']:.1f}GB")
+            self.log(f"Optimization: {opt_params['optimization_level']} mode")
+            self.log(f"Batch size: {opt_params['batch_size']}, Concurrent: {opt_params['max_concurrent_batches']}")
+
+            # Load data with trained model's feature configuration
+            self.show_processing_indicator("Loading data for prediction...")
+
+            # For prediction, use None for target and the trained model's features
+            target_column = None  # No target in prediction mode
+            feature_columns = training_features  # Use training features from model
+
+            features_batches, _, feature_columns_used, _ = self.core.load_data(
+                predict_file,
+                target_column=target_column,
+                feature_columns=feature_columns,
+                batch_size=opt_params['batch_size']
+            )
+
+            if not features_batches:
+                self.log("❌ No prediction data loaded")
+                self.hide_processing_indicator()
+                return
+
+            total_batches = len(features_batches)
+            total_samples = sum(len(batch) for batch in features_batches)
+            self.log(f"Loaded {total_samples} samples in {total_batches} batches")
+
+            # Verify feature dimensions match the trained model
+            if features_batches and len(features_batches[0]) > 0:
+                actual_feature_count = features_batches[0].shape[1]
+                expected_feature_count = len(training_features)
+
+                if actual_feature_count != expected_feature_count:
+                    self.log(f"❌ Feature dimension mismatch!")
+                    self.log(f"   Model expects: {expected_feature_count} features")
+                    self.log(f"   Data has: {actual_feature_count} features")
+                    self.log(f"   Expected features: {training_features}")
+                    self.hide_processing_indicator()
+                    return
+                else:
+                    self.log(f"✅ Feature dimensions match: {actual_feature_count} features")
+
+            # Initialize output file
+            self._initialize_output_file(output_file, predict_file)
+
+            # Initialize performance monitoring
+            import time
+            start_time = time.time()
+            performance_stats = {
+                'batch_times': [],
+                'memory_usage': [],
+                'samples_processed': 0
+            }
+
+            # Process batches with resource-aware optimization
+            all_predictions = []
+            all_probabilities = []
+            batch_prediction_times = []
+
+            for batch_idx, features_batch in enumerate(features_batches):
+                batch_start = time.time()
+
+                # Adaptive progress updates
+                if self._should_update_progress(batch_idx, total_batches, performance_stats):
+                    memory_usage = self._get_memory_usage()
+                    elapsed = time.time() - start_time
+                    rate = performance_stats['samples_processed'] / elapsed if elapsed > 0 else 0
+
+                    self.show_processing_indicator(
+                        f"Batch {batch_idx+1}/{total_batches}\n"
+                        f"Samples: {performance_stats['samples_processed']}/{total_samples}\n"
+                        f"Rate: {rate:.1f} samples/sec\n"
+                        f"Memory: {memory_usage}"
+                    )
+
+                # Process batch using the trained model
+                predictions, probabilities = self.core.predict_batch_optimized(
+                    features_batch,
+                    clear_cache_every=opt_params['clear_cache_every']
+                )
+
+                batch_size = len(predictions)
+                all_predictions.extend(predictions)
+                all_probabilities.extend(probabilities)
+                performance_stats['samples_processed'] += batch_size
+
+                # Monitor batch performance
+                batch_time = time.time() - batch_start
+                batch_prediction_times.append(batch_time)
+                performance_stats['batch_times'].append(batch_time)
+
+                # Adaptive resource management
+                self._adaptive_resource_management(
+                    batch_idx, batch_prediction_times, performance_stats, opt_params
+                )
+
+                # Periodic disk writing and memory cleanup
+                if (batch_idx % opt_params['write_to_disk_every'] == 0 or
+                    batch_idx == total_batches - 1):
+
+                    if all_predictions:
+                        self._write_predictions_batch(
+                            output_file, all_predictions, all_probabilities,
+                            performance_stats['samples_processed'] - len(all_predictions)
+                        )
+                        # Clear memory
+                        all_predictions.clear()
+                        all_probabilities.clear()
+
+                        # Adaptive garbage collection
+                        if self._should_collect_garbage(batch_idx, performance_stats):
+                            import gc
+                            gc.collect()
+
+            # Final processing and summary
+            total_time = time.time() - start_time
+            self._print_performance_summary(performance_stats, total_samples, total_time)
+
+            # Show prediction distribution
+            if all_predictions:  # Write any remaining predictions
+                self._write_predictions_batch(
+                    output_file, all_predictions, all_probabilities,
+                    performance_stats['samples_processed'] - len(all_predictions)
+                )
+
+            self.log(f"✅ Predictions saved to: {output_file}")
+
+            # Show prediction summary
+            self._show_prediction_summary(output_file)
+
+            self.hide_processing_indicator()
+
+        except Exception as e:
+            self.hide_processing_indicator()
+            self.log(f"❌ Prediction error: {e}")
+            self.log(traceback.format_exc())
+
+    def _show_prediction_summary(self, output_file):
+        """Show summary of predictions made"""
+        try:
+            import pandas as pd
+            df = pd.read_csv(output_file)
+
+            total_predictions = len(df)
+            if 'prediction' in df.columns:
+                prediction_counts = df['prediction'].value_counts()
+
+                self.log("\n📊 PREDICTION SUMMARY:")
+                self.log(f"Total predictions: {total_predictions}")
+                self.log("Prediction distribution:")
+                for pred, count in prediction_counts.items():
+                    percentage = (count / total_predictions) * 100
+                    self.log(f"  {pred}: {count} ({percentage:.1f}%)")
+
+        except Exception as e:
+            self.log(f"Note: Could not generate prediction summary: {e}")
+
     def analyze_file(self):
-        """Analyze the selected file"""
+        """Analyze the selected file and auto-load configuration"""
         filename = self.file_path.get()
         if not filename:
             messagebox.showerror("Error", "Please select a file first")
@@ -1910,6 +2573,9 @@ class EnhancedDBNNInterface:
             self.current_file = filename
             self.log("File analysis completed")
 
+            # Auto-load configuration if it exists
+            self.auto_load_config()
+
         except Exception as e:
             messagebox.showerror("Error", f"Failed to analyze file: {e}")
             self.log(f"Error: {e}")
@@ -1917,6 +2583,100 @@ class EnhancedDBNNInterface:
             self.log(traceback.format_exc())
         finally:
             self.hide_processing_indicator()
+
+    def save_trained_model_auto(self, best_accuracy, best_round):
+        """GUI wrapper for automatic model saving - now much simpler"""
+        if not self.core or not getattr(self.core, 'is_trained', False):
+            self.log("❌ No trained model to save")
+            return None
+
+        try:
+            # Get feature information
+            feature_columns = self.get_selected_features() if hasattr(self, 'get_selected_features') else []
+            target_column = self.target_col.get() if hasattr(self, 'target_col') else ""
+
+            # Use core's auto-save functionality
+            saved_model_path = self.core.save_model_auto(
+                model_dir="Model",
+                data_filename=self.current_file,
+                feature_columns=feature_columns,
+                target_column=target_column
+            )
+
+            if saved_model_path:
+                self.log(f"✅ Model automatically saved: {saved_model_path}")
+                self.log(f"   Best accuracy: {best_accuracy:.2f}% at round {best_round}")
+            else:
+                self.log("❌ Failed to automatically save model")
+
+            return saved_model_path
+
+        except Exception as e:
+            self.log(f"❌ Error in automatic model saving: {e}")
+            return None
+
+    def load_model_auto_config(self, model_path):
+        """GUI wrapper for auto-configuration model loading"""
+        try:
+            self.show_processing_indicator("Loading model with auto-configuration...")
+
+            if not self.core:
+                self.initialize_core()
+
+            # Use core's auto-configuration loading
+            success = self.core.load_model_auto_config(model_path)
+
+            if success:
+                # Update GUI with loaded configuration
+                self.model_name.set(os.path.splitext(os.path.basename(model_path))[0])
+
+                # Update configuration tab with loaded config
+                if hasattr(self, 'config_vars'):
+                    for key, value in self.core.config.items():
+                        if key in self.config_vars:
+                            self.config_vars[key].set(str(value))
+
+                # Update main tab quick configuration
+                self.apply_core_config_to_main()
+
+                self.log("✅ Model loaded with auto-configuration")
+                if hasattr(self.core, 'best_accuracy'):
+                    self.log(f"   Best accuracy: {self.core.best_accuracy:.2f}%")
+                if hasattr(self.core, 'feature_columns'):
+                    self.log(f"   Features: {len(self.core.feature_columns)}")
+            else:
+                self.log("❌ Failed to load model with auto-configuration")
+
+            self.hide_processing_indicator()
+            return success
+
+        except Exception as e:
+            self.log(f"❌ Auto-configuration load error: {e}")
+            self.hide_processing_indicator()
+            return False
+
+    def apply_core_config_to_main(self):
+        """Apply core configuration to main tab quick configuration"""
+        try:
+            if not self.core:
+                return
+
+            # Update main tab parameters from core config
+            if hasattr(self, 'resol'):
+                self.resol.set(str(self.core.config.get('resol', 100)))
+            if hasattr(self, 'epochs'):
+                self.epochs.set(str(self.core.config.get('epochs', 100)))
+            if hasattr(self, 'gain'):
+                self.gain.set(str(self.core.config.get('gain', 2.0)))
+            if hasattr(self, 'margin'):
+                self.margin.set(str(self.core.config.get('margin', 0.2)))
+            if hasattr(self, 'patience'):
+                self.patience.set(str(self.core.config.get('patience', 10)))
+
+            self.log("Configuration synchronized from loaded model")
+
+        except Exception as e:
+            self.log(f"Error applying core configuration: {e}")
 
     def show_processing_indicator(self, message="Processing..."):
         """Show a spinning color wheel processing indicator"""
@@ -2395,7 +3155,7 @@ class EnhancedDBNNInterface:
             return False
 
     def test_model(self):
-        """Test the model on separate data"""
+        """Test the model on separate data using the model's configuration"""
         if not self.core or not getattr(self.core, 'is_trained', False):
             messagebox.showerror("Error", "No trained model available")
             return
@@ -2407,198 +3167,70 @@ class EnhancedDBNNInterface:
 
         if test_file:
             try:
-                self.log(f"=== Testing Model on: {test_file} ===")
+                self.log(f"=== TESTING MODEL on: {test_file} ===")
 
-                # Load test data
-                if test_file.endswith('.csv') and hasattr(self, 'target_col') and self.target_col.get():
-                    target_column = self.target_col.get()
-                    feature_columns = self.get_selected_features()
-                    features_batches, targets_batches, _, original_targets_batches = self.core.load_data(
-                        test_file, target_column, feature_columns
-                    )
+                # Use the trained model's configuration
+                if hasattr(self.core, 'feature_columns') and self.core.feature_columns:
+                    training_features = self.core.feature_columns
+                    self.log(f"Using feature columns from trained model: {training_features}")
                 else:
-                    features_batches, targets_batches, _, original_targets_batches = self.core.load_data(test_file)
+                    self.log("❌ No feature configuration found in trained model")
+                    return
+
+                # Load test data using model's feature configuration
+                # For testing, we need the target column to evaluate accuracy
+                target_column = self.core.target_column if hasattr(self.core, 'target_column') else ""
+
+                features_batches, targets_batches, _, original_targets_batches = self.core.load_data(
+                    test_file,
+                    target_column=target_column,
+                    feature_columns=training_features
+                )
 
                 if not features_batches:
                     self.log("No test data loaded")
                     return
 
-                # Encode targets
+                # Verify feature dimensions
+                if features_batches and len(features_batches[0]) > 0:
+                    actual_feature_count = features_batches[0].shape[1]
+                    expected_feature_count = len(training_features)
+
+                    if actual_feature_count != expected_feature_count:
+                        self.log(f"❌ Feature dimension mismatch in test data!")
+                        self.log(f"   Model expects: {expected_feature_count} features")
+                        self.log(f"   Test data has: {actual_feature_count} features")
+                        return
+                    else:
+                        self.log(f"✅ Feature dimensions match: {actual_feature_count} features")
+
+                # Encode targets using the model's encoder
                 encoded_targets_batches = []
                 for batch in original_targets_batches:
                     encoded_batch = self.core.class_encoder.transform(batch)
                     encoded_targets_batches.append(encoded_batch)
 
-                # Evaluate
+                # Evaluate using model's configuration
                 accuracy, correct_predictions, predictions = self.core.evaluate(features_batches, encoded_targets_batches)
                 total_samples = sum(len(batch) for batch in features_batches)
 
-                self.log(f"Test Results:")
+                self.log(f"📊 TEST RESULTS:")
                 self.log(f"  Accuracy: {accuracy:.2f}%")
                 self.log(f"  Correct: {correct_predictions}/{total_samples}")
                 self.log(f"  Error Rate: {100-accuracy:.2f}%")
 
-                # Show confusion matrix-like summary
-                unique_preds = np.unique(predictions)
-                self.log(f"  Prediction distribution: {len(unique_preds)} unique values")
+                # Show class-wise performance if available
+                if hasattr(self.core, 'best_accuracy'):
+                    training_accuracy = self.core.best_accuracy
+                    accuracy_diff = accuracy - training_accuracy
+                    self.log(f"  Training accuracy: {training_accuracy:.2f}%")
+                    self.log(f"  Generalization: {accuracy_diff:+.2f}%")
 
                 self.log("=== Testing Completed ===")
 
             except Exception as e:
                 self.log(f"Test error: {e}")
                 self.log(traceback.format_exc())
-
-    def predict(self):
-        """Make predictions using resource-aware optimization"""
-        if not self.core or not getattr(self.core, 'is_trained', False):
-            messagebox.showerror("Error", "No trained model available")
-            return
-
-        predict_file = filedialog.askopenfilename(
-            title="Select Prediction File",
-            filetypes=[("CSV files", "*.csv"), ("DAT files", "*.dat"), ("All files", "*.*")]
-        )
-
-        if not predict_file:
-            return
-
-        output_file = filedialog.asksaveasfilename(
-            title="Save Predictions As",
-            defaultextension=".csv",
-            filetypes=[("CSV files", "*.csv")]
-        )
-
-        if not output_file:
-            return
-
-        try:
-            self.show_processing_indicator("Analyzing system resources...")
-
-            # Detect resources and calculate optimal parameters
-            resources = self.core.detect_system_resources()
-            opt_params = self.core.calculate_optimal_parameters(resources, "prediction")
-
-            self.log("=== RESOURCE-AWARE PREDICTION ===")
-            self.log(f"System: {resources['cpu_cores']} CPU cores, {resources['system_memory_gb']:.1f}GB RAM")
-            if resources['has_gpu']:
-                self.log(f"GPU: {resources.get('gpu_name', 'Unknown')} with {resources['gpu_memory_gb']:.1f}GB")
-            self.log(f"Optimization: {opt_params['optimization_level']} mode")
-            self.log(f"Batch size: {opt_params['batch_size']}, Concurrent: {opt_params['max_concurrent_batches']}")
-
-            # Get training feature columns
-            if hasattr(self.core, 'feature_columns') and self.core.feature_columns:
-                training_features = self.core.feature_columns
-                self.log(f"Using feature columns: {training_features}")
-            else:
-                self.log("❌ No feature configuration found")
-                self.hide_processing_indicator()
-                return
-
-            # Load data with optimized batch size
-            self.show_processing_indicator("Loading data with optimized parameters...")
-
-            if predict_file.endswith('.csv'):
-                features_batches, _, feature_columns_used, _ = self.core.load_data(
-                    predict_file, None, training_features, batch_size=opt_params['batch_size']
-                )
-            else:
-                features_batches, _, feature_columns_used, _ = self.core.load_data(
-                    predict_file, batch_size=opt_params['batch_size']
-                )
-
-            if not features_batches:
-                self.log("❌ No prediction data loaded")
-                self.hide_processing_indicator()
-                return
-
-            total_batches = len(features_batches)
-            total_samples = sum(len(batch) for batch in features_batches)
-            self.log(f"Loaded {total_samples} samples in {total_batches} batches")
-
-            # Initialize output file
-            self._initialize_output_file(output_file, predict_file)
-
-            # Initialize performance monitoring
-            import time
-            start_time = time.time()
-            performance_stats = {
-                'batch_times': [],
-                'memory_usage': [],
-                'samples_processed': 0
-            }
-
-            # Process batches with resource-aware optimization
-            all_predictions = []
-            all_probabilities = []
-            batch_prediction_times = []
-
-            for batch_idx, features_batch in enumerate(features_batches):
-                batch_start = time.time()
-
-                # Adaptive progress updates based on system load
-                if self._should_update_progress(batch_idx, total_batches, performance_stats):
-                    memory_usage = self._get_memory_usage()
-                    elapsed = time.time() - start_time
-                    rate = performance_stats['samples_processed'] / elapsed if elapsed > 0 else 0
-
-                    self.show_processing_indicator(
-                        f"Batch {batch_idx+1}/{total_batches}\n"
-                        f"Samples: {performance_stats['samples_processed']}/{total_samples}\n"
-                        f"Rate: {rate:.1f} samples/sec\n"
-                        f"Memory: {memory_usage}\n"
-                        f"Mode: {opt_params['optimization_level']}"
-                    )
-
-                # Process batch
-                predictions, probabilities = self.core.predict_batch_optimized(
-                    features_batch,
-                    clear_cache_every=opt_params['clear_cache_every']
-                )
-
-                batch_size = len(predictions)
-                all_predictions.extend(predictions)
-                all_probabilities.extend(probabilities)
-                performance_stats['samples_processed'] += batch_size
-
-                # Monitor batch performance
-                batch_time = time.time() - batch_start
-                batch_prediction_times.append(batch_time)
-                performance_stats['batch_times'].append(batch_time)
-
-                # Adaptive resource management
-                self._adaptive_resource_management(
-                    batch_idx, batch_prediction_times, performance_stats, opt_params
-                )
-
-                # Periodic disk writing and memory cleanup
-                if (batch_idx % opt_params['write_to_disk_every'] == 0 or
-                    batch_idx == total_batches - 1):
-
-                    if all_predictions:
-                        self._write_predictions_batch(
-                            output_file, all_predictions, all_probabilities,
-                            performance_stats['samples_processed'] - len(all_predictions)
-                        )
-                        # Clear memory
-                        all_predictions.clear()
-                        all_probabilities.clear()
-
-                        # Adaptive garbage collection
-                        if self._should_collect_garbage(batch_idx, performance_stats):
-                            import gc
-                            gc.collect()
-
-            # Final processing and summary
-            total_time = time.time() - start_time
-            self._print_performance_summary(performance_stats, total_samples, total_time)
-
-            self.log(f"✅ Predictions saved to: {output_file}")
-            self.hide_processing_indicator()
-
-        except Exception as e:
-            self.hide_processing_indicator()
-            self.log(f"❌ Prediction error: {e}")
-            self.log(traceback.format_exc())
 
     def _clean_console_memory(self):
         """Clean console memory to prevent buildup"""
@@ -2985,7 +3617,7 @@ class EnhancedDBNNInterface:
                 self.hide_processing_indicator()
 
     def visualize(self):
-        """Generate visualizations"""
+        """Generate visualizations and offer to open them"""
         if not self.visualizer or not hasattr(self.visualizer, 'training_history') or not self.visualizer.training_history:
             messagebox.showerror("Error", "No training history available for visualization")
             return
@@ -2995,6 +3627,7 @@ class EnhancedDBNNInterface:
 
             base_name = self.model_name.get()
             viz_count = 0
+            generated_files = []
 
             # Generate accuracy plot
             try:
@@ -3004,6 +3637,7 @@ class EnhancedDBNNInterface:
                     accuracy_fig.write_html(accuracy_file)
                     self.log(f"✓ Accuracy plot: {accuracy_file}")
                     viz_count += 1
+                    generated_files.append(accuracy_file)
             except Exception as e:
                 self.log(f"✗ Accuracy plot failed: {e}")
 
@@ -3016,6 +3650,7 @@ class EnhancedDBNNInterface:
                         feature_fig.write_html(feature_file)
                         self.log(f"✓ Feature space: {feature_file}")
                         viz_count += 1
+                        generated_files.append(feature_file)
             except Exception as e:
                 self.log(f"✗ Feature space failed: {e}")
 
@@ -3027,6 +3662,7 @@ class EnhancedDBNNInterface:
                     weight_fig.write_html(weight_file)
                     self.log(f"✓ Weight distribution: {weight_file}")
                     viz_count += 1
+                    generated_files.append(weight_file)
             except Exception as e:
                 self.log(f"✗ Weight distribution failed: {e}")
 
@@ -3036,6 +3672,7 @@ class EnhancedDBNNInterface:
                 if dashboard_file:
                     self.log(f"✓ Training dashboard: {dashboard_file}")
                     viz_count += 1
+                    generated_files.append(dashboard_file)
             except Exception as e:
                 self.log(f"✗ Dashboard failed: {e}")
 
@@ -3043,12 +3680,137 @@ class EnhancedDBNNInterface:
                 self.log(f"=== Visualization Completed ===")
                 self.log(f"Generated {viz_count} visualization files")
                 self.log("Open the .html files in your web browser to view interactive plots")
+
+                # Ask user if they want to open the files
+                self._ask_to_open_visualizations(generated_files, base_name)
             else:
                 self.log("No visualizations could be generated")
 
         except Exception as e:
             self.log(f"Visualization error: {e}")
             self.log(traceback.format_exc())
+
+    def _ask_to_open_visualizations(self, generated_files, base_name):
+        """Ask user whether to open visualization files or folder"""
+        import webbrowser
+        import os
+        import platform
+
+        # Get the current directory
+        current_dir = os.getcwd()
+
+        # Create a dialog to ask user preference
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Visualizations Generated")
+        dialog.geometry("500x300")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        # Center the dialog
+        dialog.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - 500) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - 300) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        # Content
+        ttk.Label(dialog, text="Visualization Files Generated!",
+                  font=('Arial', 12, 'bold')).pack(pady=10)
+
+        ttk.Label(dialog, text=f"Created {len(generated_files)} visualization files:",
+                  font=('Arial', 10)).pack(pady=5)
+
+        # List generated files
+        file_frame = ttk.Frame(dialog)
+        file_frame.pack(fill='both', expand=True, padx=20, pady=10)
+
+        file_list = scrolledtext.ScrolledText(file_frame, height=6, width=60)
+        file_list.pack(fill='both', expand=True)
+
+        for file in generated_files:
+            file_list.insert(tk.END, f"• {file}\n")
+        file_list.config(state=tk.DISABLED)
+
+        # Buttons frame
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(fill='x', pady=10)
+
+        def open_folder():
+            """Open the folder containing visualization files"""
+            try:
+                if platform.system() == "Windows":
+                    os.startfile(current_dir)
+                elif platform.system() == "Darwin":  # macOS
+                    os.system(f'open "{current_dir}"')
+                else:  # Linux
+                    os.system(f'xdg-open "{current_dir}"')
+                self.log(f"Opened folder: {current_dir}")
+            except Exception as e:
+                self.log(f"Error opening folder: {e}")
+                messagebox.showerror("Error", f"Could not open folder: {e}")
+            finally:
+                dialog.destroy()
+
+        def open_3d_visualizations():
+            """Open the 3D visualization files in web browser"""
+            try:
+                opened_count = 0
+                for file in generated_files:
+                    if 'features' in file.lower() or '3d' in file.lower() or 'dashboard' in file.lower():
+                        # Open in web browser
+                        webbrowser.open(f'file://{os.path.abspath(file)}')
+                        opened_count += 1
+                        # Small delay to prevent browser overload
+                        time.sleep(0.5)
+
+                if opened_count > 0:
+                    self.log(f"Opened {opened_count} visualization files in browser")
+                else:
+                    self.log("No 3D visualization files found to open")
+
+            except Exception as e:
+                self.log(f"Error opening visualizations: {e}")
+                messagebox.showerror("Error", f"Could not open visualizations: {e}")
+            finally:
+                dialog.destroy()
+
+        def open_all_files():
+            """Open all visualization files in browser"""
+            try:
+                opened_count = 0
+                for file in generated_files:
+                    webbrowser.open(f'file://{os.path.abspath(file)}')
+                    opened_count += 1
+                    # Small delay to prevent browser overload
+                    time.sleep(0.5)
+
+                self.log(f"Opened all {opened_count} visualization files")
+            except Exception as e:
+                self.log(f"Error opening files: {e}")
+                messagebox.showerror("Error", f"Could not open files: {e}")
+            finally:
+                dialog.destroy()
+
+        def do_nothing():
+            """Close dialog without opening anything"""
+            self.log("User chose not to open visualizations")
+            dialog.destroy()
+
+        # Button layout
+        ttk.Button(button_frame, text="Open Folder",
+                   command=open_folder).pack(side='left', padx=5)
+
+        ttk.Button(button_frame, text="Open 3D Visualizations",
+                   command=open_3d_visualizations).pack(side='left', padx=5)
+
+        ttk.Button(button_frame, text="Open All Files",
+                   command=open_all_files).pack(side='left', padx=5)
+
+        ttk.Button(button_frame, text="Close",
+                   command=do_nothing).pack(side='right', padx=5)
+
+        # Instructions
+        ttk.Label(dialog, text="Choose an option to view your visualizations:",
+                  font=('Arial', 9)).pack(pady=5)
 
 class DBNNCommandLine:
     """Command Line Interface for DBNN with binary format support"""
@@ -3429,7 +4191,7 @@ Start interactive mode with: python runDBNN_cmd.py --interactive
             return False
 
     def train_model(self, args):
-        """Train model with specified parameters"""
+        """Train model with specified parameters and automatic saving"""
         print("🚀 Starting DBNN Training...")
         print(f"Training file: {args.train}")
         if args.test:
@@ -3451,12 +4213,15 @@ Start interactive mode with: python runDBNN_cmd.py --interactive
                 test_file=args.test,
                 use_csv=use_csv,
                 target_column=args.target,
-                feature_columns=args.features
+                feature_columns=args.features,
+                auto_save_model=True,  # Enable automatic saving
+                model_dir=args.model_dir
             )
 
             training_time = time.time() - start_time
             print(f"⏱️  Training completed in {training_time:.2f} seconds")
 
+            # Manual save if specifically requested (in addition to auto-save)
             if success and args.save_model:
                 use_json = (args.model_format == 'json')
                 self.save_model(args.save_model, use_json=use_json)
@@ -3470,7 +4235,7 @@ Start interactive mode with: python runDBNN_cmd.py --interactive
             return False
 
     def predict_data(self, args):
-        """Make predictions on data - enhanced for prediction mode"""
+        """Make predictions on data using the trained model's configuration"""
         if not self.core.is_trained and not args.model:
             print("❌ Error: No trained model available. Use --train to train a model or --model to load one.")
             return False
@@ -3478,7 +4243,7 @@ Start interactive mode with: python runDBNN_cmd.py --interactive
         print(f"🔮 Making predictions on: {args.predict}")
 
         try:
-            # Get training feature columns
+            # Use the trained model's configuration
             if hasattr(self.core, 'feature_columns') and self.core.feature_columns:
                 training_features = self.core.feature_columns
                 print(f"Using feature columns from trained model: {training_features}")
@@ -3488,7 +4253,7 @@ Start interactive mode with: python runDBNN_cmd.py --interactive
 
             # For prediction mode, use None for target and training features
             target_column = None  # No target in prediction mode
-            feature_columns = training_features  # Use training features
+            feature_columns = training_features  # Use training features from model
 
             # Load prediction data
             features_batches, _, feature_columns_used, _ = self.core.load_data(
@@ -3511,6 +4276,7 @@ Start interactive mode with: python runDBNN_cmd.py --interactive
                     print(f"❌ Feature dimension mismatch!")
                     print(f"   Expected: {expected_feature_count} features")
                     print(f"   Got: {actual_feature_count} features")
+                    print(f"   Expected features: {training_features}")
                     return False
                 else:
                     print(f"✅ Feature dimensions match: {actual_feature_count} features")
