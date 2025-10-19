@@ -5335,6 +5335,18 @@ Start interactive mode with: python runDBNN_cmd.py --interactive
 
 # Example usage
 if __name__ == "__main__":
+    print("""
+    ╔═════════════════════════════════════════════════════════════╗
+    ║              🧠      DBNN CLASSIFIER                        ║
+    ║         Difference Boosting Bayesian Neural Network         ║
+    ║                 author: nsp@airis4d.com                     ║
+    ║  Artificial Intelligence Research and Intelligent Systems   ║
+    ║                 Thelliyoor 689544, India                    ║
+    ║          INCREMENTAL LEARNING + FREEZE MECHANISM            ║
+    ║                 implementation: deepseek                    ║
+    ╚═════════════════════════════════════════════════════════════╝
+    """)
+
     # Example configuration
     config = {
         'resol': 100,
