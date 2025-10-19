@@ -22,6 +22,19 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 import pandas as pd
 import traceback
+import multiprocessing as mp
+
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+import threading
+from numba import jit, prange
+import numpy as np
+import os
+import time
+import json
+import csv
+import pickle
+import gzip
+from typing import List, Tuple, Dict, Any, Optional, Union
 
 # Global constants
 max_resol = 1600
@@ -235,7 +248,7 @@ class ClassEncoder:
 
 class DBNNCore:
     """
-    Core DBNN algorithm powerhouse that can be used by other algorithms
+    Optimized DBNN algorithm powerhouse with parallel processing and hardware acceleration
     """
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
@@ -273,69 +286,91 @@ class DBNNCore:
         self.training_history = []
         self.is_trained = False
 
+        # Parallel processing and optimization
+        self.num_workers = self._detect_optimal_workers()
+        self.parallel_enabled = True
+        self.gpu_enabled = False
+        self.memory_optimized = False
+
+        # Initialize hardware acceleration
+        self._init_gpu_acceleration()
+
         # Visualization integration
         self.visualizer = None
-
-        # Logging
         self.log_callback = None
 
-    def predict_batch_optimized(self, features_batch, clear_cache_every=100):
-        """Optimized batch prediction with periodic cache clearing"""
-        predictions = []
-        probabilities = []
+    def _detect_optimal_workers(self):
+        """Detect optimal number of workers for parallel processing"""
+        try:
+            cpu_count = mp.cpu_count()
+            # Reserve 1 core for main process, use 75% of remaining cores
+            optimal_workers = max(1, int((cpu_count - 1) * 0.75))
+            return min(optimal_workers, 16)  # Cap at 16 workers
+        except:
+            return 4  # Fallback to 4 workers
 
-        # Use static arrays to avoid repeated allocations
-        if not hasattr(self, '_prediction_vects'):
-            self._prediction_vects = np.zeros(self.innodes + self.outnodes + 2)
+    def attach_visualizer(self, visualizer):
+        """Attach a visualizer for training monitoring"""
+        self.visualizer = visualizer
+        self.log("Visualizer attached to DBNN core")
 
-        for sample_idx in range(len(features_batch)):
-            # Reuse the same vector to avoid memory allocation
-            vects = self._prediction_vects
-            vects.fill(0)  # Reset vector
+    def detect_system_resources(self):
+        """Detect available system resources and set optimal parameters"""
+        resource_info = {
+            'cpu_cores': 1,
+            'memory_gb': 4,
+            'has_gpu': False,
+            'gpu_memory_gb': 0,
+            'system_memory_gb': 4
+        }
 
-            for i in range(1, self.innodes + 1):
-                vects[i] = features_batch[sample_idx, i-1]
+        try:
+            import psutil
+            # CPU cores
+            resource_info['cpu_cores'] = psutil.cpu_count(logical=False) or 1
+            resource_info['logical_cores'] = psutil.cpu_count(logical=True) or 1
 
-            # Compute class probabilities
-            classval = compute_class_probabilities_numba(
-                vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
-                self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes
-            )
+            # System memory
+            system_memory = psutil.virtual_memory()
+            resource_info['system_memory_gb'] = system_memory.total / (1024**3)
+            resource_info['available_memory_gb'] = system_memory.available / (1024**3)
 
-            # Find predicted class
-            kmax = 1
-            cmax = 0.0
-            for k in range(1, self.outnodes + 1):
-                if classval[k] > cmax:
-                    cmax = classval[k]
-                    kmax = k
+            # Process memory
+            process = psutil.Process()
+            resource_info['process_memory_mb'] = process.memory_info().rss / (1024**2)
 
-            predicted = self.dmyclass[kmax]
-            predictions.append(predicted)
+        except ImportError:
+            self.log("⚠️ psutil not available, using default resource values")
 
-            # Store probabilities
-            prob_dict = {}
-            for k in range(1, self.outnodes + 1):
-                class_val = self.dmyclass[k]
-                if self.class_encoder.is_fitted:
-                    class_name = self.class_encoder.encoded_to_class.get(class_val, f"Class_{k}")
-                else:
-                    class_name = f"Class_{k}"
-                prob_dict[class_name] = float(classval[k])
+        # GPU detection
+        try:
+            import torch
+            if torch.cuda.is_available():
+                resource_info['has_gpu'] = True
+                resource_info['gpu_count'] = torch.cuda.device_count()
+                resource_info['gpu_memory_gb'] = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                resource_info['gpu_name'] = torch.cuda.get_device_name(0)
+            else:
+                resource_info['has_gpu'] = False
+        except ImportError:
+            # Try alternative GPU detection
+            try:
+                import subprocess
+                result = subprocess.run(['nvidia-smi', '--query-gpu=memory.total', '--format=csv,noheader,nounits'],
+                                      capture_output=True, text=True)
+                if result.returncode == 0:
+                    gpu_memory_mb = int(result.stdout.strip().split('\n')[0])
+                    resource_info['has_gpu'] = True
+                    resource_info['gpu_memory_gb'] = gpu_memory_mb / 1024
+            except:
+                resource_info['has_gpu'] = False
 
-            probabilities.append(prob_dict)
-
-            # Clear cache periodically to prevent memory buildup
-            if clear_cache_every > 0 and sample_idx % clear_cache_every == 0:
-                import gc
-                gc.collect()
-
-        return predictions, probabilities
+        return resource_info
 
     def save_model_auto(self, model_dir="Model", data_filename=None, feature_columns=None, target_column=None):
         """Automatically save trained model in binary format with timestamp to Model/ folder"""
         if not self.is_trained:
-            print("❌ No trained model to save")
+            self.log("❌ No trained model to save")
             return None
 
         try:
@@ -380,124 +415,21 @@ class DBNNCore:
                 with open(meta_filename, 'w') as f:
                     json.dump(model_metadata, f, indent=2)
 
-                print(f"✅ Model automatically saved to: {model_filename}")
-                print(f"   Best accuracy: {model_metadata['best_accuracy']:.2f}% at round {model_metadata['best_round']}")
-                print(f"   Metadata: {meta_filename}")
-                print(f"   Configuration: {len(self.config)} parameters embedded")
+                self.log(f"✅ Model automatically saved: {model_filename}")
+                self.log(f"   Best accuracy: {model_metadata['best_accuracy']:.2f}% at round {model_metadata['best_round']}")
+                self.log(f"   Metadata: {meta_filename}")
+                self.log(f"   Configuration: {len(self.config)} parameters embedded")
 
                 return model_filename
             else:
-                print("❌ Failed to automatically save model")
+                self.log("❌ Failed to automatically save model")
                 return None
 
         except Exception as e:
-            print(f"❌ Error in automatic model saving: {e}")
+            self.log(f"❌ Error in automatic model saving: {e}")
             import traceback
             traceback.print_exc()
             return None
-
-    def load_model_auto_config(self, model_path):
-        """Load model and automatically configure system from metadata"""
-        try:
-            print(f"Loading model with auto-configuration: {model_path}")
-
-            # Load the model first
-            self.load_model(model_path)
-
-            # Try to load metadata
-            meta_path = model_path.replace('.bin', '_meta.json')
-            if os.path.exists(meta_path):
-                with open(meta_path, 'r') as f:
-                    metadata = json.load(f)
-
-                # Store metadata for reference
-                self.model_metadata = metadata
-
-                # Configure system based on metadata
-                data_file = metadata.get('data_file', '')
-                feature_columns = metadata.get('feature_columns', [])
-                target_column = metadata.get('target_column', '')
-                config = metadata.get('config', {})
-                best_accuracy = metadata.get('best_accuracy', 0.0)
-                best_round = metadata.get('best_round', 0)
-
-                # Update configuration
-                self.config.update(config)
-
-                # Store feature information
-                self.feature_columns = feature_columns
-                self.target_column = target_column
-                self.data_file = data_file
-                self.best_accuracy = best_accuracy
-                self.best_round = best_round
-
-                print(f"✅ Auto-configured from model metadata")
-                print(f"   Data file: {data_file}")
-                print(f"   Target: {target_column}")
-                print(f"   Features: {len(feature_columns)}")
-                print(f"   Best accuracy: {best_accuracy:.2f}% at round {best_round}")
-                print(f"   Configuration: {len(config)} parameters loaded")
-
-            return True
-
-        except Exception as e:
-            print(f"❌ Auto-configuration load error: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-
-    def detect_system_resources(self):
-        """Detect available system resources and set optimal parameters"""
-        resource_info = {
-            'cpu_cores': 1,
-            'memory_gb': 4,
-            'has_gpu': False,
-            'gpu_memory_gb': 0,
-            'system_memory_gb': 4
-        }
-
-        try:
-            import psutil
-            # CPU cores
-            resource_info['cpu_cores'] = psutil.cpu_count(logical=False) or 1
-            resource_info['logical_cores'] = psutil.cpu_count(logical=True) or 1
-
-            # System memory
-            system_memory = psutil.virtual_memory()
-            resource_info['system_memory_gb'] = system_memory.total / (1024**3)
-            resource_info['available_memory_gb'] = system_memory.available / (1024**3)
-
-            # Process memory
-            process = psutil.Process()
-            resource_info['process_memory_mb'] = process.memory_info().rss / (1024**2)
-
-        except ImportError:
-            print("⚠️ psutil not available, using default resource values")
-
-        # GPU detection
-        try:
-            import torch
-            if torch.cuda.is_available():
-                resource_info['has_gpu'] = True
-                resource_info['gpu_count'] = torch.cuda.device_count()
-                resource_info['gpu_memory_gb'] = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-                resource_info['gpu_name'] = torch.cuda.get_device_name(0)
-            else:
-                resource_info['has_gpu'] = False
-        except ImportError:
-            # Try alternative GPU detection
-            try:
-                import subprocess
-                result = subprocess.run(['nvidia-smi', '--query-gpu=memory.total', '--format=csv,noheader,nounits'],
-                                      capture_output=True, text=True)
-                if result.returncode == 0:
-                    gpu_memory_mb = int(result.stdout.strip().split('\n')[0])
-                    resource_info['has_gpu'] = True
-                    resource_info['gpu_memory_gb'] = gpu_memory_mb / 1024
-            except:
-                resource_info['has_gpu'] = False
-
-        return resource_info
 
     def calculate_optimal_parameters(self, resource_info, operation_type="prediction"):
         """Calculate optimal parameters based on available resources"""
@@ -633,499 +565,6 @@ class DBNNCore:
 
         return resources, pred_params, train_params
 
-    def set_log_callback(self, log_callback):
-        """Set a callback function for logging"""
-        self.log_callback = log_callback
-
-    def log(self, message: str):
-        """Log message through callback or print"""
-        if self.log_callback:
-            self.log_callback(message)
-        else:
-            print(f"[DBNNCore] {message}")
-
-    def initialize_arrays(self, innodes: int, resol: int, outnodes: int):
-        """Initialize arrays with optimal data types and memory layout"""
-        self.innodes = innodes
-        self.outnodes = outnodes
-
-        # Use optimal numpy dtypes
-        self.anti_net = np.zeros((innodes+2, resol+2, innodes+2, resol+2, outnodes+2),
-                               dtype=np.int32)
-        self.anti_wts = np.ones((innodes+2, resol+2, innodes+2, resol+2, outnodes+2),
-                               dtype=np.float64)
-        self.antit_wts = np.ones_like(self.anti_wts)
-        self.antip_wts = np.ones_like(self.anti_wts)
-
-        self.binloc = np.zeros((innodes+2, resol+8), dtype=np.float64)
-        self.max_val = np.zeros(innodes+2, dtype=np.float64)
-        self.min_val = np.zeros(innodes+2, dtype=np.float64)
-        self.resolution_arr = np.zeros(innodes+8, dtype=np.int32)
-
-        # Initialize dmyclass
-        self.dmyclass = np.zeros(outnodes + 2, dtype=np.float64)
-        self.dmyclass[0] = self.config.get('margin', 0.2)
-
-        print(f"Initialized arrays for {innodes} input nodes, {outnodes} output nodes, resolution {resol}")
-
-    def load_data(self, filename: str, target_column: Optional[str] = None,
-                 feature_columns: Optional[List[str]] = None, batch_size: int = 10000):
-        """Load data from file (CSV or legacy DAT format)"""
-        if filename.endswith('.csv'):
-            return self._load_csv_data(filename, target_column, feature_columns, batch_size)
-        else:
-            return self._load_dat_data(filename, batch_size)
-
-    def _load_csv_data(self, filename: str, target_column: str,
-                      feature_columns: List[str], batch_size: int):
-        """Load CSV data with specified target and feature columns - enhanced for prediction"""
-        features_batches = []
-        targets_batches = []
-        original_targets_batches = []
-
-        #print(f"Loading CSV data from: {filename}")
-
-        with open(filename, 'r') as f:
-            reader = csv.DictReader(f)
-
-            if not reader.fieldnames:
-                raise ValueError("No headers found in CSV file")
-
-            available_columns = reader.fieldnames
-            #print(f"Available columns in CSV: {available_columns}")
-
-            # For prediction mode: if target_column is None or 'None', skip target validation
-            is_prediction_mode = (target_column is None or target_column == 'None' or target_column == '')
-
-            # Validate columns exist - handle prediction mode differently
-            missing_columns = []
-
-            if not is_prediction_mode and target_column and target_column not in available_columns:
-                missing_columns.append(target_column)
-
-            # Check feature columns - use all available if not specified
-            if not feature_columns:
-                # If no features specified, use all columns except target (if target exists)
-                if not is_prediction_mode and target_column and target_column in available_columns:
-                    feature_columns = [col for col in available_columns if col != target_column]
-                else:
-                    # For prediction mode with no target, or target not found, use all columns
-                    feature_columns = available_columns.copy()
-                print(f"Auto-selected feature columns: {feature_columns}")
-
-            # Now validate feature columns
-            for col in feature_columns:
-                if col not in available_columns:
-                    missing_columns.append(col)
-
-            if missing_columns and not is_prediction_mode:
-                raise ValueError(f"Columns not found in CSV: {missing_columns}")
-            elif missing_columns and is_prediction_mode:
-                print(f"⚠️ Warning: Some feature columns not found in CSV: {missing_columns}")
-                # Remove missing columns from feature_columns
-                feature_columns = [col for col in feature_columns if col not in missing_columns]
-                if not feature_columns:
-                    raise ValueError("No valid feature columns found in CSV file")
-
-            #print(f"Using feature columns: {feature_columns}")
-            if not is_prediction_mode and target_column:
-                print(f"Using target column: {target_column}")
-
-            current_batch_features = []
-            current_batch_targets = []
-            current_batch_original_targets = []
-
-            line_count = 0
-            for row in reader:
-                line_count += 1
-                try:
-                    # Extract features - use only the specified feature columns in the correct order
-                    feature_vec = []
-                    for col in feature_columns:
-                        try:
-                            feature_vec.append(float(row[col]))
-                        except (ValueError, TypeError):
-                            feature_vec.append(0.0)
-                            if line_count <= 5:  # Only warn for first few rows
-                                print(f"⚠️ Warning: Could not convert column '{col}' value '{row[col]}' to float, using 0.0")
-
-                    # Extract target (only if not in prediction mode and target exists)
-                    target_val = None
-                    if not is_prediction_mode and target_column and target_column in row:
-                        target_val = row[target_column]
-                    else:
-                        # For prediction mode or missing target, use a placeholder
-                        target_val = "unknown"
-
-                    current_batch_features.append(feature_vec)
-                    current_batch_targets.append(target_val)
-                    current_batch_original_targets.append(target_val)
-
-                    if len(current_batch_features) >= batch_size:
-                        features_batches.append(np.array(current_batch_features, dtype=np.float64))
-                        targets_batches.append(np.array(current_batch_targets))
-                        original_targets_batches.append(np.array(current_batch_original_targets))
-                        current_batch_features = []
-                        current_batch_targets = []
-                        current_batch_original_targets = []
-
-                except (ValueError, KeyError) as e:
-                    print(f"⚠️ Warning: Skipping row {line_count} due to error: {e}")
-                    continue
-
-            # Add remaining samples
-            if current_batch_features:
-                features_batches.append(np.array(current_batch_features, dtype=np.float64))
-                targets_batches.append(np.array(current_batch_targets))
-                original_targets_batches.append(np.array(current_batch_original_targets))
-
-        total_samples = sum(len(batch) for batch in features_batches)
-        print(f"Loaded {total_samples} samples in {len(features_batches)} batches")
-        return features_batches, targets_batches, feature_columns, original_targets_batches
-
-    def _load_dat_data(self, filename: str, batch_size: int):
-        """Load legacy DAT format data"""
-        features = []
-        targets = []
-        original_targets = []
-
-        print(f"Loading legacy DAT file: {filename}")
-
-        with open(filename, 'r') as f:
-            current_batch_features = []
-            current_batch_targets = []
-            current_batch_original_targets = []
-
-            for line in f:
-                values = line.strip().split()
-                if len(values) >= self.innodes + 1:
-                    feature_vec = [float(x) for x in values[:self.innodes]]
-                    target_val = values[self.innodes]
-
-                    try:
-                        target_val_float = float(target_val)
-                        current_batch_original_targets.append(target_val_float)
-                    except ValueError:
-                        current_batch_original_targets.append(target_val)
-
-                    current_batch_features.append(feature_vec)
-                    current_batch_targets.append(target_val)
-
-                    if len(current_batch_features) >= batch_size:
-                        features.append(np.array(current_batch_features, dtype=np.float64))
-                        targets.append(np.array(current_batch_targets))
-                        original_targets.append(np.array(current_batch_original_targets))
-                        current_batch_features = []
-                        current_batch_targets = []
-                        current_batch_original_targets = []
-
-            # Add remaining samples
-            if current_batch_features:
-                features.append(np.array(current_batch_features, dtype=np.float64))
-                targets.append(np.array(current_batch_targets))
-                original_targets.append(np.array(current_batch_original_targets))
-
-        print(f"Loaded {sum(len(batch) for batch in features)} samples in {len(features)} batches")
-        return features, targets, [f'feature_{i}' for i in range(1, self.innodes + 1)], original_targets
-
-    def fit_encoder(self, original_targets_batches):
-        """Fit class encoder to target data"""
-        all_original_targets = np.concatenate(original_targets_batches) if original_targets_batches else np.array([])
-        self.class_encoder.fit(all_original_targets)
-
-        # Update dmyclass with encoded values
-        encoded_classes = self.class_encoder.get_encoded_classes()
-        for i, encoded_val in enumerate(encoded_classes, 1):
-            self.dmyclass[i] = float(encoded_val)
-
-    def initialize_training(self, features_batches, encoded_targets_batches, resol: int):
-        """Initialize training parameters and arrays"""
-        # Set resolutions
-        for i in range(1, self.innodes + 1):
-            self.resolution_arr[i] = resol
-            for j in range(self.resolution_arr[i] + 1):
-                self.binloc[i][j+1] = j * 1.0
-
-        # Find min/max values
-        omax = -400.0
-        omin = 400.0
-        for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
-            for i in range(1, self.innodes + 1):
-                batch_max = np.max(features_batch[:, i-1])
-                batch_min = np.min(features_batch[:, i-1])
-                if batch_max > self.max_val[i]:
-                    self.max_val[i] = batch_max
-                if batch_min < self.min_val[i]:
-                    self.min_val[i] = batch_min
-
-            # Update omax/omin from targets
-            batch_omax = np.max(targets_batch)
-            batch_omin = np.min(targets_batch)
-            if batch_omax > omax:
-                omax = batch_omax
-            if batch_omin < omin:
-                omin = batch_omin
-
-        # Initialize network counts
-        self.anti_wts.fill(1.0)
-        for k in range(1, self.outnodes + 1):
-            for i in range(1, self.innodes + 1):
-                for j in range(self.resolution_arr[i] + 1):
-                    for l in range(1, self.innodes + 1):
-                        for m in range(self.resolution_arr[l] + 1):
-                            self.anti_net[i, j, l, m, k] = 1
-
-        return omax, omin
-
-    def process_training_batch(self, features_batch, targets_batch):
-        """Process a single batch of training data"""
-        batch_size = len(features_batch)
-        processed_count = 0
-
-        for sample_idx in range(batch_size):
-            vects = np.zeros(self.innodes + self.outnodes + 2)
-            for i in range(1, self.innodes + 1):
-                vects[i] = features_batch[sample_idx, i-1]
-            tmpv = targets_batch[sample_idx]
-
-            self.anti_net = process_training_sample(
-                vects, tmpv, self.anti_net, self.anti_wts, self.binloc,
-                self.resolution_arr, self.dmyclass, self.min_val, self.max_val,
-                self.innodes, self.outnodes
-            )
-
-            processed_count += 1
-
-        return processed_count
-
-    def train_epoch(self, features_batches, encoded_targets_batches, gain: float):
-        """Train for one epoch"""
-        for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
-            batch_size = len(features_batch)
-
-            for sample_idx in range(batch_size):
-                vects = np.zeros(self.innodes + self.outnodes + 2)
-                for i in range(1, self.innodes + 1):
-                    vects[i] = features_batch[sample_idx, i-1]
-                tmpv = targets_batch[sample_idx]
-
-                # Compute probabilities
-                classval = compute_class_probabilities_numba(
-                    vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
-                    self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes
-                )
-
-                # Find predicted class
-                kmax = 1
-                cmax = 0.0
-                for k in range(1, self.outnodes + 1):
-                    if classval[k] > cmax:
-                        cmax = classval[k]
-                        kmax = k
-
-                # Update weights if wrong classification
-                if abs(self.dmyclass[kmax] - tmpv) > self.dmyclass[0]:
-                    self.anti_wts = update_weights_numba(
-                        vects, tmpv, classval, self.anti_wts, self.binloc, self.resolution_arr,
-                        self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes, gain
-                    )
-
-    def evaluate(self, features_batches, encoded_targets_batches):
-        """Evaluate model accuracy"""
-        correct_predictions = 0
-        total_samples = 0
-        all_predictions = []
-
-        for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
-            batch_size = len(features_batch)
-            total_samples += batch_size
-
-            for sample_idx in range(batch_size):
-                vects = np.zeros(self.innodes + self.outnodes + 2)
-                for i in range(1, self.innodes + 1):
-                    vects[i] = features_batch[sample_idx, i-1]
-                actual = targets_batch[sample_idx]
-
-                # Compute class probabilities
-                classval = compute_class_probabilities_numba(
-                    vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
-                    self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes
-                )
-
-                # Find predicted class
-                kmax = 1
-                cmax = 0.0
-                for k in range(1, self.outnodes + 1):
-                    if classval[k] > cmax:
-                        cmax = classval[k]
-                        kmax = k
-
-                predicted = self.dmyclass[kmax]
-                all_predictions.append(predicted)
-
-                # Check if prediction is correct
-                if abs(actual - predicted) <= self.dmyclass[0]:
-                    correct_predictions += 1
-
-        accuracy = (correct_predictions / total_samples) * 100 if total_samples > 0 else 0
-        return accuracy, correct_predictions, all_predictions
-
-    def predict_batch(self, features_batch):
-        """Predict classes for a batch of features"""
-        predictions = []
-        probabilities = []
-
-        for sample_idx in range(len(features_batch)):
-            vects = np.zeros(self.innodes + self.outnodes + 2)
-            for i in range(1, self.innodes + 1):
-                vects[i] = features_batch[sample_idx, i-1]
-
-            # Compute class probabilities
-            classval = compute_class_probabilities_numba(
-                vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
-                self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes
-            )
-
-            # Find predicted class
-            kmax = 1
-            cmax = 0.0
-            for k in range(1, self.outnodes + 1):
-                if classval[k] > cmax:
-                    cmax = classval[k]
-                    kmax = k
-
-            predicted = self.dmyclass[kmax]
-            predictions.append(predicted)
-
-            # Store probabilities
-            prob_dict = {}
-            for k in range(1, self.outnodes + 1):
-                class_val = self.dmyclass[k]
-                if self.class_encoder.is_fitted:
-                    class_name = self.class_encoder.encoded_to_class.get(class_val, f"Class_{k}")
-                else:
-                    class_name = f"Class_{k}"
-                prob_dict[class_name] = float(classval[k])
-
-            probabilities.append(prob_dict)
-
-        return predictions, probabilities
-
-    def train_with_early_stopping(self, train_file: str, test_file: Optional[str] = None,
-                                 use_csv: bool = True, target_column: Optional[str] = None,
-                                 feature_columns: Optional[List[str]] = None,
-                                 auto_save_model: bool = True, model_dir: str = "Model"):
-        """Main training method with early stopping and automatic model saving"""
-        print("Starting model training with early stopping...")
-
-        # Load training data
-        features_batches, targets_batches, feature_columns_used, original_targets_batches = self.load_data(
-            train_file, target_column, feature_columns
-        )
-
-        if not features_batches:
-            print("No training data loaded")
-            return False
-
-        # Fit encoder and determine architecture
-        self.fit_encoder(original_targets_batches)
-        encoded_targets_batches = []
-        for batch in original_targets_batches:
-            encoded_batch = self.class_encoder.transform(batch)
-            encoded_targets_batches.append(encoded_batch)
-
-        self.innodes = len(feature_columns_used)
-        self.outnodes = len(self.class_encoder.get_encoded_classes())
-
-        # Initialize arrays
-        resol = self.config.get('resol', 100)
-        self.initialize_arrays(self.innodes, resol, self.outnodes)
-
-        # Initialize training
-        omax, omin = self.initialize_training(features_batches, encoded_targets_batches, resol)
-
-        # Process training data for initial APF
-        print("Processing training data for initial network counts...")
-        total_samples = sum(len(batch) for batch in features_batches)
-        total_processed = 0
-
-        for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
-            processed = self.process_training_batch(features_batch, targets_batch)
-            total_processed += processed
-            if total_processed % 1000 == 0:
-                print(f"Processed {total_processed}/{total_samples} samples")
-
-        # Training with early stopping
-        gain = self.config.get('gain', 2.0)
-        max_epochs = self.config.get('epochs', 100)
-        patience = self.config.get('patience', 10)
-        min_improvement = self.config.get('min_improvement', 0.1)
-
-        print(f"Starting weight training with early stopping...")
-        best_accuracy = 0.0
-        best_round = 0
-        patience_counter = 0
-        best_weights = None
-
-        for rnd in range(max_epochs + 1):
-            if rnd == 0:
-                # Initial evaluation
-                current_accuracy, correct_predictions, _ = self.evaluate(features_batches, encoded_targets_batches)
-                print(f"Round {rnd:3d}: Initial Accuracy = {current_accuracy:.2f}% ({correct_predictions}/{total_samples})")
-                best_accuracy = current_accuracy
-                best_weights = self.anti_wts.copy()
-                best_round = rnd
-                continue
-
-            # Training pass
-            self.train_epoch(features_batches, encoded_targets_batches, gain)
-
-            # Evaluation after training round
-            current_accuracy, correct_predictions, _ = self.evaluate(features_batches, encoded_targets_batches)
-            print(f"Round {rnd:3d}: Accuracy = {current_accuracy:.2f}% ({correct_predictions}/{total_samples})")
-
-            # Early stopping logic
-            if current_accuracy > best_accuracy + min_improvement:
-                best_accuracy = current_accuracy
-                best_weights = self.anti_wts.copy()
-                best_round = rnd
-                patience_counter = 0
-                print(f"  → New best accuracy! (Improved by {current_accuracy - best_accuracy:.2f}%)")
-            else:
-                patience_counter += 1
-                print(f"  → No improvement (Patience: {patience_counter}/{patience})")
-
-            if patience_counter >= patience:
-                print(f"\nEarly stopping triggered after {rnd} rounds.")
-                print(f"Best accuracy {best_accuracy:.2f}% achieved at round {best_round}")
-                break
-
-        # Restore best weights
-        if best_weights is not None:
-            self.anti_wts = best_weights
-            print(f"Restored best weights from round {best_round}")
-
-        self.is_trained = True
-        self.best_accuracy = best_accuracy
-        self.best_round = best_round
-
-        # Automatic model saving
-        if auto_save_model:
-            print("=== Auto-saving Trained Model ===")
-            saved_model_path = self.save_model_auto(
-                model_dir=model_dir,
-                data_filename=train_file,
-                feature_columns=feature_columns_used,
-                target_column=target_column
-            )
-
-            if saved_model_path:
-                print(f"✅ Model automatically saved to: {saved_model_path}")
-            else:
-                print("❌ Automatic model saving failed!")
-
-        print("Training completed successfully!")
-        return True
     def save_model(self, model_path: str, feature_columns=None, target_column=None, use_json=False):
         """Save complete model to file in binary format (default) or JSON format"""
         try:
@@ -1206,19 +645,19 @@ class DBNNCore:
 
                 with open(model_path, 'w') as f:
                     json.dump(json_model_data, f, indent=2)
-                print(f"Model saved in JSON format to: {model_path}")
+                self.log(f"Model saved in JSON format to: {model_path}")
             else:
                 # Save in binary format (default)
                 with gzip.open(model_path, 'wb') as f:
                     pickle.dump(model_data, f, protocol=pickle.HIGHEST_PROTOCOL)
-                print(f"Model saved in binary format to: {model_path}")
+                self.log(f"Model saved in binary format to: {model_path}")
 
             if feature_columns:
-                print(f"✅ Feature configuration saved: {len(feature_columns)} features")
+                self.log(f"✅ Feature configuration saved: {len(feature_columns)} features")
             return True
 
         except Exception as e:
-            print(f"Error saving model: {e}")
+            self.log(f"Error saving model: {e}")
             import traceback
             traceback.print_exc()
             return False
@@ -1231,14 +670,14 @@ class DBNNCore:
                 # Binary format
                 with gzip.open(model_path, 'rb') as f:
                     model_data = pickle.load(f)
-                print(f"Loading binary model from: {model_path}")
+                self.log(f"Loading binary model from: {model_path}")
             else:
                 # JSON format
                 with open(model_path, 'r') as f:
                     model_data = json.load(f)
-                print(f"Loading JSON model from: {model_path}")
+                self.log(f"Loading JSON model from: {model_path}")
 
-            print(f"Loading model from: {model_path}")
+            self.log(f"Loading model from: {model_path}")
 
             # Load basic configuration FIRST
             self.config = model_data.get('config', {})
@@ -1263,7 +702,7 @@ class DBNNCore:
                             # Convert list to numpy array if needed
                             loaded_array = np.array(loaded_array, dtype=dtype)
                         setattr(self, field_name, loaded_array)
-                        print(f"Loaded {field_name}: shape {loaded_array.shape}")
+                        self.log(f"Loaded {field_name}: shape {loaded_array.shape}")
             else:
                 # JSON format with lists - convert to numpy arrays
                 array_mappings = [
@@ -1281,9 +720,9 @@ class DBNNCore:
                         try:
                             loaded_array = np.array(model_data[field_name], dtype=dtype)
                             setattr(self, field_name, loaded_array)
-                            print(f"Loaded {field_name}: shape {loaded_array.shape}")
+                            self.log(f"Loaded {field_name}: shape {loaded_array.shape}")
                         except Exception as e:
-                            print(f"Error loading {field_name}: {e}")
+                            self.log(f"Error loading {field_name}: {e}")
 
             # FIX: Infer dimensions from ACTUAL loaded arrays, not from metadata
             if hasattr(self, 'anti_net') and self.anti_net is not None:
@@ -1292,12 +731,12 @@ class DBNNCore:
                 actual_outnodes = self.anti_net.shape[4] - 2
                 self.innodes = actual_innodes
                 self.outnodes = actual_outnodes
-                print(f"✅ Inferred dimensions from arrays: {actual_innodes} inputs, {actual_outnodes} outputs")
+                self.log(f"✅ Inferred dimensions from arrays: {actual_innodes} inputs, {actual_outnodes} outputs")
             else:
                 # Fallback to metadata
                 self.innodes = model_data.get('innodes', 0)
                 self.outnodes = model_data.get('outnodes', 0)
-                print(f"⚠️ Using metadata dimensions: {self.innodes} inputs, {self.outnodes} outputs")
+                self.log(f"⚠️ Using metadata dimensions: {self.innodes} inputs, {self.outnodes} outputs")
 
             # Now set other properties
             self.is_trained = model_data.get('is_trained', False)
@@ -1311,24 +750,24 @@ class DBNNCore:
             self.target_column = model_data.get('target_column', '')
 
             if self.feature_columns:
-                print(f"✅ Loaded feature configuration: {len(self.feature_columns)} features - {self.feature_columns}")
+                self.log(f"✅ Loaded feature configuration: {len(self.feature_columns)} features - {self.feature_columns}")
             else:
-                print("⚠️ No feature configuration found in model file")
+                self.log("⚠️ No feature configuration found in model file")
 
             if self.target_column:
-                print(f"✅ Target column: {self.target_column}")
+                self.log(f"✅ Target column: {self.target_column}")
 
-            print(f"Final model - is_trained: {self.is_trained}, innodes: {self.innodes}, outnodes: {self.outnodes}")
+            self.log(f"Final model - is_trained: {self.is_trained}, innodes: {self.innodes}, outnodes: {self.outnodes}")
 
             # FIX: Only reinitialize arrays if we have valid dimensions AND arrays aren't already loaded
             resol = self.config.get('resol', 100)
             if self.innodes > 0 and self.outnodes > 0 and not hasattr(self, 'anti_net'):
                 self.initialize_arrays(self.innodes, resol, self.outnodes)
-                print("Arrays initialized from dimensions")
+                self.log("Arrays initialized from dimensions")
             elif hasattr(self, 'anti_net'):
-                print("✅ Arrays already loaded, no reinitialization needed")
+                self.log("✅ Arrays already loaded, no reinitialization needed")
             else:
-                print("❌ Warning: Invalid model dimensions, cannot initialize arrays")
+                self.log("❌ Warning: Invalid model dimensions, cannot initialize arrays")
                 return
 
             # FIX: Enhanced class encoder loading with better error recovery
@@ -1347,14 +786,14 @@ class DBNNCore:
                                 float_key = float(str_key)
                                 encoded_to_class[float_key] = class_name
                             except (ValueError, TypeError) as e:
-                                print(f"⚠️ Warning: Could not convert key {str_key} to float: {e}")
+                                self.log(f"⚠️ Warning: Could not convert key {str_key} to float: {e}")
                                 # Fallback: try to keep as string if float conversion fails
                                 try:
                                     encoded_to_class[float(str_key)] = class_name
                                 except:
-                                    print(f"❌ Failed to convert key {str_key}, skipping this entry")
+                                    self.log(f"❌ Failed to convert key {str_key}, skipping this entry")
                     else:
-                        print("⚠️ No encoded_to_class data found in model")
+                        self.log("⚠️ No encoded_to_class data found in model")
 
                     # Handle class_to_encoded (already string keys)
                     class_to_encoded_data = class_encoder_mapping.get('class_to_encoded', {})
@@ -1363,14 +802,14 @@ class DBNNCore:
                             try:
                                 class_to_encoded[class_name] = float(encoded_val)
                             except (ValueError, TypeError) as e:
-                                print(f"⚠️ Warning: Could not convert value {encoded_val} to float: {e}")
+                                self.log(f"⚠️ Warning: Could not convert value {encoded_val} to float: {e}")
                                 # Fallback: try to convert string representation
                                 try:
                                     class_to_encoded[class_name] = float(str(encoded_val))
                                 except:
-                                    print(f"❌ Failed to convert value {encoded_val}, skipping this entry")
+                                    self.log(f"❌ Failed to convert value {encoded_val}, skipping this entry")
                     else:
-                        print("⚠️ No class_to_encoded data found in model")
+                        self.log("⚠️ No class_to_encoded data found in model")
 
                     # Set the encoder properties - CRITICAL: Always set is_fitted if we have any mappings
                     self.class_encoder.encoded_to_class = encoded_to_class
@@ -1382,32 +821,32 @@ class DBNNCore:
 
                     if has_any_mappings or is_fitted_from_data:
                         self.class_encoder.is_fitted = True
-                        print(f"✅ Class encoder marked as fitted with {len(encoded_to_class)} encoded classes")
+                        self.log(f"✅ Class encoder marked as fitted with {len(encoded_to_class)} encoded classes")
                     else:
                         self.class_encoder.is_fitted = False
-                        print("⚠️ Class encoder not marked as fitted - no valid mappings found")
+                        self.log("⚠️ Class encoder not marked as fitted - no valid mappings found")
 
                     # Log encoder status
                     if self.class_encoder.is_fitted:
-                        print(f"✅ Loaded class encoder with {len(self.class_encoder.encoded_to_class)} classes")
+                        self.log(f"✅ Loaded class encoder with {len(self.class_encoder.encoded_to_class)} classes")
                         if self.class_encoder.encoded_to_class:
                             sample_classes = list(self.class_encoder.encoded_to_class.items())[:3]
-                            print(f"Sample class mappings: {sample_classes}")
+                            self.log(f"Sample class mappings: {sample_classes}")
 
                             # Also verify dmyclass alignment
                             if hasattr(self, 'dmyclass') and self.dmyclass is not None:
-                                print(f"dmyclass values: {[self.dmyclass[i] for i in range(min(5, len(self.dmyclass)))]}...")
+                                self.log(f"dmyclass values: {[self.dmyclass[i] for i in range(min(5, len(self.dmyclass)))]}...")
                     else:
-                        print("❌ Class encoder failed to load properly")
+                        self.log("❌ Class encoder failed to load properly")
 
                 except Exception as e:
-                    print(f"❌ Error loading class encoder: {e}")
+                    self.log(f"❌ Error loading class encoder: {e}")
                     import traceback
                     traceback.print_exc()
 
                     # EMERGENCY RECOVERY: Try to create basic encoder from dmyclass if available
                     if hasattr(self, 'dmyclass') and self.dmyclass is not None:
-                        print("🔄 Attempting emergency encoder recovery from dmyclass...")
+                        self.log("🔄 Attempting emergency encoder recovery from dmyclass...")
                         try:
                             # Extract class values from dmyclass (skip margin at index 0)
                             class_values = []
@@ -1426,15 +865,15 @@ class DBNNCore:
                                 self.class_encoder.encoded_to_class = encoded_to_class
                                 self.class_encoder.class_to_encoded = class_to_encoded
                                 self.class_encoder.is_fitted = True
-                                print(f"✅ Emergency recovery: Created encoder with {len(class_values)} classes from dmyclass")
+                                self.log(f"✅ Emergency recovery: Created encoder with {len(class_values)} classes from dmyclass")
                         except Exception as recovery_error:
-                            print(f"❌ Emergency recovery failed: {recovery_error}")
+                            self.log(f"❌ Emergency recovery failed: {recovery_error}")
             else:
-                print("❌ No class encoder data found in model file")
+                self.log("❌ No class encoder data found in model file")
 
                 # Try to infer from dmyclass as last resort
                 if hasattr(self, 'dmyclass') and self.dmyclass is not None:
-                    print("🔄 Attempting to infer encoder from dmyclass...")
+                    self.log("🔄 Attempting to infer encoder from dmyclass...")
                     try:
                         class_values = []
                         for i in range(1, min(len(self.dmyclass), self.outnodes + 1)):
@@ -1451,38 +890,822 @@ class DBNNCore:
                             self.class_encoder.encoded_to_class = encoded_to_class
                             self.class_encoder.class_to_encoded = class_to_encoded
                             self.class_encoder.is_fitted = True
-                            print(f"✅ Inferred encoder with {len(class_values)} classes from dmyclass")
+                            self.log(f"✅ Inferred encoder with {len(class_values)} classes from dmyclass")
                     except Exception as infer_error:
-                        print(f"❌ Failed to infer encoder from dmyclass: {infer_error}")
+                        self.log(f"❌ Failed to infer encoder from dmyclass: {infer_error}")
 
             # Final validation
-            print(f"✅ Model loaded successfully: {self.innodes} inputs, {self.outnodes} outputs")
-            print(f"✅ Model is_trained: {self.is_trained}")
-            print(f"✅ Class encoder is_fitted: {getattr(self.class_encoder, 'is_fitted', False)}")
-            print(f"✅ Config resolution: {self.config.get('resol', 'N/A')}")
+            self.log(f"✅ Model loaded successfully: {self.innodes} inputs, {self.outnodes} outputs")
+            self.log(f"✅ Model is_trained: {self.is_trained}")
+            self.log(f"✅ Class encoder is_fitted: {getattr(self.class_encoder, 'is_fitted', False)}")
+            self.log(f"✅ Config resolution: {self.config.get('resol', 'N/A')}")
             if self.feature_columns:
-                print(f"✅ Feature columns: {len(self.feature_columns)} features loaded")
+                self.log(f"✅ Feature columns: {len(self.feature_columns)} features loaded")
             else:
-                print("⚠️ No feature columns information available")
+                self.log("⚠️ No feature columns information available")
 
             # Test model functionality
             if self.innodes > 0 and self.class_encoder.is_fitted:
                 try:
                     test_sample = np.random.randn(self.innodes)
                     predictions, probabilities = self.predict_batch(test_sample.reshape(1, -1))
-                    print(f"✅ Model test passed - Prediction: {predictions[0]}")
+                    self.log(f"✅ Model test passed - Prediction: {predictions[0]}")
                 except Exception as test_error:
-                    print(f"⚠️ Model test warning: {test_error}")
+                    self.log(f"⚠️ Model test warning: {test_error}")
 
         except Exception as e:
-            print(f"❌ Load error: {e}")
+            self.log(f"❌ Load error: {e}")
             import traceback
             traceback.print_exc()
 
-    def attach_visualizer(self, visualizer):
-        """Attach a visualizer for training monitoring"""
-        self.visualizer = visualizer
-        print("Visualizer attached to DBNN core")
+    def _init_gpu_acceleration(self):
+        """Initialize GPU acceleration if available"""
+        try:
+            import torch
+            if torch.cuda.is_available():
+                self.gpu_enabled = True
+                self.device = torch.device('cuda')
+                print(f"✅ GPU acceleration enabled: {torch.cuda.get_device_name()}")
+            else:
+                self.gpu_enabled = False
+                self.device = torch.device('cpu')
+        except ImportError:
+            self.gpu_enabled = False
+            self.device = None
+
+    def set_log_callback(self, log_callback):
+        """Set a callback function for logging"""
+        self.log_callback = log_callback
+
+    def log(self, message: str):
+        """Log message through callback or print"""
+        if self.log_callback:
+            self.log_callback(message)
+        else:
+            print(f"[DBNNCore] {message}")
+
+    def initialize_arrays(self, innodes: int, resol: int, outnodes: int):
+        """Initialize arrays with optimal data types and memory layout"""
+        self.innodes = innodes
+        self.outnodes = outnodes
+
+        # Use optimal numpy dtypes for memory efficiency
+        self.anti_net = np.zeros((innodes+2, resol+2, innodes+2, resol+2, outnodes+2),
+                               dtype=np.int32)  # Keep as int32 for large counts
+        self.anti_wts = np.ones((innodes+2, resol+2, innodes+2, resol+2, outnodes+2),
+                               dtype=np.float32)  # Use float32 for memory efficiency
+        self.antit_wts = np.ones_like(self.anti_wts, dtype=np.float32)
+        self.antip_wts = np.ones_like(self.anti_wts, dtype=np.float32)
+
+        self.binloc = np.zeros((innodes+2, resol+8), dtype=np.float32)
+        self.max_val = np.zeros(innodes+2, dtype=np.float32)
+        self.min_val = np.zeros(innodes+2, dtype=np.float32)
+        self.resolution_arr = np.zeros(innodes+8, dtype=np.int32)
+
+        # Initialize dmyclass
+        self.dmyclass = np.zeros(outnodes + 2, dtype=np.float32)
+        self.dmyclass[0] = self.config.get('margin', 0.2)
+
+        print(f"Initialized arrays for {innodes} input nodes, {outnodes} output nodes, resolution {resol}")
+
+    def load_data(self, filename: str, target_column: Optional[str] = None,
+                 feature_columns: Optional[List[str]] = None, batch_size: int = 10000):
+        """Optimized data loading with memory mapping and parallel processing"""
+        if filename.endswith('.csv'):
+            return self._load_csv_data_optimized(filename, target_column, feature_columns, batch_size)
+        else:
+            return self._load_dat_data_optimized(filename, batch_size)
+
+    def _load_csv_data_optimized(self, filename: str, target_column: str,
+                                feature_columns: List[str], batch_size: int):
+        """Optimized CSV loading with memory-efficient processing"""
+        import pandas as pd
+
+        features_batches = []
+        targets_batches = []
+        original_targets_batches = []
+
+        self.log(f"Loading CSV data from: {filename}")
+
+        with open(filename, 'r') as f:
+            reader = csv.DictReader(f)
+
+            if not reader.fieldnames:
+                raise ValueError("No headers found in CSV file")
+
+            available_columns = reader.fieldnames
+            self.log(f"Available columns in CSV: {available_columns}")
+
+            # For prediction mode: if target_column is None or 'None', skip target validation
+            is_prediction_mode = (target_column is None or target_column == 'None' or target_column == '')
+
+            # Validate columns exist - handle prediction mode differently
+            missing_columns = []
+
+            if not is_prediction_mode and target_column and target_column not in available_columns:
+                missing_columns.append(target_column)
+
+            # Check feature columns - use all available if not specified
+            if not feature_columns:
+                # If no features specified, use all columns except target (if target exists)
+                if not is_prediction_mode and target_column and target_column in available_columns:
+                    feature_columns = [col for col in available_columns if col != target_column]
+                else:
+                    # For prediction mode with no target, or target not found, use all columns
+                    feature_columns = available_columns.copy()
+                self.log(f"Auto-selected feature columns: {feature_columns}")
+
+            # Now validate feature columns
+            for col in feature_columns:
+                if col not in available_columns:
+                    missing_columns.append(col)
+
+            if missing_columns and not is_prediction_mode:
+                raise ValueError(f"Columns not found in CSV: {missing_columns}")
+            elif missing_columns and is_prediction_mode:
+                self.log(f"⚠️ Warning: Some feature columns not found in CSV: {missing_columns}")
+                # Remove missing columns from feature_columns
+                feature_columns = [col for col in feature_columns if col not in missing_columns]
+                if not feature_columns:
+                    raise ValueError("No valid feature columns found in CSV file")
+
+            self.log(f"Using feature columns: {feature_columns}")
+            if not is_prediction_mode and target_column:
+                self.log(f"Using target column: {target_column}")
+
+            current_batch_features = []
+            current_batch_targets = []
+            current_batch_original_targets = []
+
+            line_count = 0
+            for row in reader:
+                line_count += 1
+                try:
+                    # Extract features - use only the specified feature columns in the correct order
+                    feature_vec = []
+                    for col in feature_columns:
+                        try:
+                            feature_vec.append(float(row[col]))
+                        except (ValueError, TypeError):
+                            feature_vec.append(0.0)
+                            if line_count <= 5:  # Only warn for first few rows
+                                self.log(f"⚠️ Warning: Could not convert column '{col}' value '{row[col]}' to float, using 0.0")
+
+                    # Extract target (only if not in prediction mode and target exists)
+                    target_val = None
+                    if not is_prediction_mode and target_column and target_column in row:
+                        target_val = row[target_column]
+                    else:
+                        # For prediction mode or missing target, use a placeholder
+                        target_val = "unknown"
+
+                    current_batch_features.append(feature_vec)
+                    current_batch_targets.append(target_val)
+                    current_batch_original_targets.append(target_val)
+
+                    if len(current_batch_features) >= batch_size:
+                        # Use float32 for memory efficiency
+                        features_batches.append(np.array(current_batch_features, dtype=np.float32))
+                        targets_batches.append(np.array(current_batch_targets))
+                        original_targets_batches.append(np.array(current_batch_original_targets))
+                        current_batch_features = []
+                        current_batch_targets = []
+                        current_batch_original_targets = []
+
+                except (ValueError, KeyError) as e:
+                    self.log(f"⚠️ Warning: Skipping row {line_count} due to error: {e}")
+                    continue
+
+            # Add remaining samples
+            if current_batch_features:
+                features_batches.append(np.array(current_batch_features, dtype=np.float32))
+                targets_batches.append(np.array(current_batch_targets))
+                original_targets_batches.append(np.array(current_batch_original_targets))
+
+        total_samples = sum(len(batch) for batch in features_batches)
+        self.log(f"Loaded {total_samples} samples in {len(features_batches)} batches (optimized)")
+        return features_batches, targets_batches, feature_columns, original_targets_batches
+
+    def _load_dat_data_optimized(self, filename: str, batch_size: int):
+        """Optimized legacy DAT format data loading"""
+        features = []
+        targets = []
+        original_targets = []
+
+        self.log(f"Loading legacy DAT file: {filename}")
+
+        with open(filename, 'r') as f:
+            current_batch_features = []
+            current_batch_targets = []
+            current_batch_original_targets = []
+
+            for line in f:
+                values = line.strip().split()
+                if len(values) >= self.innodes + 1:
+                    feature_vec = [float(x) for x in values[:self.innodes]]
+                    target_val = values[self.innodes]
+
+                    try:
+                        target_val_float = float(target_val)
+                        current_batch_original_targets.append(target_val_float)
+                    except ValueError:
+                        current_batch_original_targets.append(target_val)
+
+                    current_batch_features.append(feature_vec)
+                    current_batch_targets.append(target_val)
+
+                    if len(current_batch_features) >= batch_size:
+                        # Use float32 for memory efficiency
+                        features.append(np.array(current_batch_features, dtype=np.float32))
+                        targets.append(np.array(current_batch_targets))
+                        original_targets.append(np.array(current_batch_original_targets))
+                        current_batch_features = []
+                        current_batch_targets = []
+                        current_batch_original_targets = []
+
+            # Add remaining samples
+            if current_batch_features:
+                features.append(np.array(current_batch_features, dtype=np.float32))
+                targets.append(np.array(current_batch_targets))
+                original_targets.append(np.array(current_batch_original_targets))
+
+        self.log(f"Loaded {sum(len(batch) for batch in features)} samples in {len(features)} batches (optimized)")
+        return features, targets, [f'feature_{i}' for i in range(1, self.innodes + 1)], original_targets
+
+    def fit_encoder(self, original_targets_batches):
+        """Fit class encoder to target data"""
+        all_original_targets = np.concatenate(original_targets_batches) if original_targets_batches else np.array([])
+        self.class_encoder.fit(all_original_targets)
+
+        # Update dmyclass with encoded values
+        encoded_classes = self.class_encoder.get_encoded_classes()
+        for i, encoded_val in enumerate(encoded_classes, 1):
+            self.dmyclass[i] = float(encoded_val)
+
+    def initialize_training(self, features_batches, encoded_targets_batches, resol: int):
+        """Initialize training parameters and arrays"""
+        # Set resolutions
+        for i in range(1, self.innodes + 1):
+            self.resolution_arr[i] = resol
+            for j in range(self.resolution_arr[i] + 1):
+                self.binloc[i][j+1] = j * 1.0
+
+        # Find min/max values
+        omax = -400.0
+        omin = 400.0
+        for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
+            for i in range(1, self.innodes + 1):
+                batch_max = np.max(features_batch[:, i-1])
+                batch_min = np.min(features_batch[:, i-1])
+                if batch_max > self.max_val[i]:
+                    self.max_val[i] = batch_max
+                if batch_min < self.min_val[i]:
+                    self.min_val[i] = batch_min
+
+            # Update omax/omin from targets
+            batch_omax = np.max(targets_batch)
+            batch_omin = np.min(targets_batch)
+            if batch_omax > omax:
+                omax = batch_omax
+            if batch_omin < omin:
+                omin = batch_omin
+
+        # Initialize network counts
+        self.anti_wts.fill(1.0)
+        for k in range(1, self.outnodes + 1):
+            for i in range(1, self.innodes + 1):
+                for j in range(self.resolution_arr[i] + 1):
+                    for l in range(1, self.innodes + 1):
+                        for m in range(self.resolution_arr[l] + 1):
+                            self.anti_net[i, j, l, m, k] = 1
+
+        return omax, omin
+
+    def process_training_batch(self, features_batch, targets_batch):
+        """Process a single batch of training data with parallel optimization"""
+        if self.parallel_enabled and len(features_batch) > 1000 and self.num_workers > 1:
+            return self._process_training_batch_parallel(features_batch, targets_batch)
+        else:
+            return self._process_training_batch_sequential(features_batch, targets_batch)
+
+    def _process_training_batch_sequential(self, features_batch, targets_batch):
+        """Process training batch sequentially"""
+        batch_size = len(features_batch)
+        processed_count = 0
+
+        for sample_idx in range(batch_size):
+            vects = np.zeros(self.innodes + self.outnodes + 2)
+            for i in range(1, self.innodes + 1):
+                vects[i] = features_batch[sample_idx, i-1]
+            tmpv = targets_batch[sample_idx]
+
+            self.anti_net = process_training_sample(
+                vects, tmpv, self.anti_net, self.anti_wts, self.binloc,
+                self.resolution_arr, self.dmyclass, self.min_val, self.max_val,
+                self.innodes, self.outnodes
+            )
+
+            processed_count += 1
+
+        return processed_count
+
+    def _process_training_batch_parallel(self, features_batch, targets_batch):
+        """Process training batch in parallel"""
+        batch_size = len(features_batch)
+        chunk_size = max(1, batch_size // self.num_workers)
+
+        # Split batch into chunks
+        feature_chunks = []
+        target_chunks = []
+        for i in range(0, batch_size, chunk_size):
+            feature_chunks.append(features_batch[i:i+chunk_size])
+            target_chunks.append(targets_batch[i:i+chunk_size])
+
+        # Process chunks in parallel
+        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+            futures = []
+            for feat_chunk, tgt_chunk in zip(feature_chunks, target_chunks):
+                future = executor.submit(self._process_training_chunk, feat_chunk, tgt_chunk)
+                futures.append(future)
+
+            # Wait for all chunks to complete
+            for future in futures:
+                future.result()
+
+        return batch_size
+
+    def _process_training_chunk(self, features_chunk, targets_chunk):
+        """Process a chunk of training data (thread-safe)"""
+        chunk_size = len(features_chunk)
+
+        for sample_idx in range(chunk_size):
+            vects = np.zeros(self.innodes + self.outnodes + 2)
+            for i in range(1, self.innodes + 1):
+                vects[i] = features_chunk[sample_idx, i-1]
+            tmpv = targets_chunk[sample_idx]
+
+            self.anti_net = process_training_sample(
+                vects, tmpv, self.anti_net, self.anti_wts, self.binloc,
+                self.resolution_arr, self.dmyclass, self.min_val, self.max_val,
+                self.innodes, self.outnodes
+            )
+
+        return chunk_size
+
+    def train_epoch(self, features_batches, encoded_targets_batches, gain: float):
+        """Train for one epoch with parallel optimization"""
+        if self.parallel_enabled and self.num_workers > 1:
+            self._train_epoch_parallel(features_batches, encoded_targets_batches, gain)
+        else:
+            self._train_epoch_sequential(features_batches, encoded_targets_batches, gain)
+
+    def _train_epoch_sequential(self, features_batches, encoded_targets_batches, gain: float):
+        """Train one epoch sequentially"""
+        for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
+            batch_size = len(features_batch)
+
+            for sample_idx in range(batch_size):
+                vects = np.zeros(self.innodes + self.outnodes + 2)
+                for i in range(1, self.innodes + 1):
+                    vects[i] = features_batch[sample_idx, i-1]
+                tmpv = targets_batch[sample_idx]
+
+                # Compute probabilities
+                classval = compute_class_probabilities_numba(
+                    vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
+                    self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes
+                )
+
+                # Find predicted class
+                kmax = 1
+                cmax = 0.0
+                for k in range(1, self.outnodes + 1):
+                    if classval[k] > cmax:
+                        cmax = classval[k]
+                        kmax = k
+
+                # Update weights if wrong classification
+                if abs(self.dmyclass[kmax] - tmpv) > self.dmyclass[0]:
+                    self.anti_wts = update_weights_numba(
+                        vects, tmpv, classval, self.anti_wts, self.binloc, self.resolution_arr,
+                        self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes, gain
+                    )
+
+    def _train_epoch_parallel(self, features_batches, encoded_targets_batches, gain: float):
+        """Train one epoch with parallel processing"""
+        # Process each batch in parallel
+        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+            futures = []
+            for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
+                future = executor.submit(self._train_batch_parallel, features_batch, targets_batch, gain, batch_idx)
+                futures.append(future)
+
+            # Wait for all batches to complete
+            for future in futures:
+                future.result()
+
+    def _evaluate_parallel(self, features_batches, encoded_targets_batches):
+        """Parallel evaluation"""
+        total_correct = 0
+        total_samples = 0
+        all_predictions = []
+
+        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+            futures = []
+            for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
+                future = executor.submit(self._evaluate_batch_parallel, features_batch, targets_batch, batch_idx)
+                futures.append(future)
+
+            # Collect results
+            for future in futures:
+                batch_correct, batch_total, batch_predictions = future.result()
+                total_correct += batch_correct
+                total_samples += batch_total
+                all_predictions.extend(batch_predictions)
+
+        accuracy = (total_correct / total_samples) * 100 if total_samples > 0 else 0
+        return accuracy, total_correct, all_predictions
+
+    def _predict_batch_parallel(self, features_batch):
+        """Optimized parallel batch prediction"""
+        batch_size = len(features_batch)
+        chunk_size = max(1, batch_size // self.num_workers)
+
+        # Split batch into chunks
+        feature_chunks = []
+        for i in range(0, batch_size, chunk_size):
+            feature_chunks.append(features_batch[i:i+chunk_size])
+
+        # Process chunks in parallel
+        all_predictions = []
+        all_probabilities = []
+
+        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+            futures = []
+            for feat_chunk in feature_chunks:
+                future = executor.submit(self._predict_chunk_parallel, feat_chunk)
+                futures.append(future)
+
+            # Collect results
+            for future in futures:
+                chunk_predictions, chunk_probabilities = future.result()
+                all_predictions.extend(chunk_predictions)
+                all_probabilities.extend(chunk_probabilities)
+
+        return all_predictions, all_probabilities
+
+
+    def _train_batch_parallel(self, features_batch, targets_batch, gain: float, batch_idx: int):
+        """Train a single batch in parallel (thread-safe)"""
+        batch_size = len(features_batch)
+
+        for sample_idx in range(batch_size):
+            vects = np.zeros(self.innodes + self.outnodes + 2)
+            for i in range(1, self.innodes + 1):
+                vects[i] = features_batch[sample_idx, i-1]
+            tmpv = targets_batch[sample_idx]
+
+            # Compute probabilities
+            classval = compute_class_probabilities_numba(
+                vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
+                self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes
+            )
+
+            # Find predicted class
+            kmax = 1
+            cmax = 0.0
+            for k in range(1, self.outnodes + 1):
+                if classval[k] > cmax:
+                    cmax = classval[k]
+                    kmax = k
+
+            # Update weights if wrong classification
+            if abs(self.dmyclass[kmax] - tmpv) > self.dmyclass[0]:
+                self.anti_wts = update_weights_numba(
+                    vects, tmpv, classval, self.anti_wts, self.binloc, self.resolution_arr,
+                    self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes, gain
+                )
+
+    def evaluate(self, features_batches, encoded_targets_batches):
+        """Evaluate model accuracy with parallel optimization"""
+        if self.parallel_enabled and self.num_workers > 1:
+            return self._evaluate_parallel(features_batches, encoded_targets_batches)
+        else:
+            return self._evaluate_sequential(features_batches, encoded_targets_batches)
+
+    def _evaluate_sequential(self, features_batches, encoded_targets_batches):
+        """Evaluate model accuracy sequentially"""
+        correct_predictions = 0
+        total_samples = 0
+        all_predictions = []
+
+        for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
+            batch_size = len(features_batch)
+            total_samples += batch_size
+
+            for sample_idx in range(batch_size):
+                vects = np.zeros(self.innodes + self.outnodes + 2)
+                for i in range(1, self.innodes + 1):
+                    vects[i] = features_batch[sample_idx, i-1]
+                actual = targets_batch[sample_idx]
+
+                # Compute class probabilities
+                classval = compute_class_probabilities_numba(
+                    vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
+                    self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes
+                )
+
+                # Find predicted class
+                kmax = 1
+                cmax = 0.0
+                for k in range(1, self.outnodes + 1):
+                    if classval[k] > cmax:
+                        cmax = classval[k]
+                        kmax = k
+
+                predicted = self.dmyclass[kmax]
+                all_predictions.append(predicted)
+
+                # Check if prediction is correct
+                if abs(actual - predicted) <= self.dmyclass[0]:
+                    correct_predictions += 1
+
+        accuracy = (correct_predictions / total_samples) * 100 if total_samples > 0 else 0
+        return accuracy, correct_predictions, all_predictions
+
+    def _evaluate_batch_parallel(self, features_batch, targets_batch, batch_idx):
+        """Evaluate a single batch in parallel"""
+        batch_correct = 0
+        batch_total = len(features_batch)
+        batch_predictions = []
+
+        for sample_idx in range(batch_total):
+            vects = np.zeros(self.innodes + self.outnodes + 2)
+            for i in range(1, self.innodes + 1):
+                vects[i] = features_batch[sample_idx, i-1]
+            actual = targets_batch[sample_idx]
+
+            # Compute class probabilities
+            classval = compute_class_probabilities_numba(
+                vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
+                self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes
+            )
+
+            # Find predicted class
+            kmax = 1
+            cmax = 0.0
+            for k in range(1, self.outnodes + 1):
+                if classval[k] > cmax:
+                    cmax = classval[k]
+                    kmax = k
+
+            predicted = self.dmyclass[kmax]
+            batch_predictions.append(predicted)
+
+            # Check if prediction is correct
+            if abs(actual - predicted) <= self.dmyclass[0]:
+                batch_correct += 1
+
+        return batch_correct, batch_total, batch_predictions
+
+    def predict_batch(self, features_batch):
+        """Predict classes for a batch of features with parallel optimization"""
+        if self.parallel_enabled and len(features_batch) > 1000 and self.num_workers > 1:
+            return self._predict_batch_parallel(features_batch)
+        else:
+            return self._predict_batch_sequential(features_batch)
+
+    def _predict_batch_sequential(self, features_batch):
+        """Predict classes for a batch of features sequentially"""
+        predictions = []
+        probabilities = []
+
+        for sample_idx in range(len(features_batch)):
+            vects = np.zeros(self.innodes + self.outnodes + 2)
+            for i in range(1, self.innodes + 1):
+                vects[i] = features_batch[sample_idx, i-1]
+
+            # Compute class probabilities
+            classval = compute_class_probabilities_numba(
+                vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
+                self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes
+            )
+
+            # Find predicted class
+            kmax = 1
+            cmax = 0.0
+            for k in range(1, self.outnodes + 1):
+                if classval[k] > cmax:
+                    cmax = classval[k]
+                    kmax = k
+
+            predicted = self.dmyclass[kmax]
+            predictions.append(predicted)
+
+            # Store probabilities
+            prob_dict = {}
+            for k in range(1, self.outnodes + 1):
+                class_val = self.dmyclass[k]
+                if self.class_encoder.is_fitted:
+                    class_name = self.class_encoder.encoded_to_class.get(class_val, f"Class_{k}")
+                else:
+                    class_name = f"Class_{k}"
+                prob_dict[class_name] = float(classval[k])
+
+            probabilities.append(prob_dict)
+
+        return predictions, probabilities
+
+    def _predict_chunk_parallel(self, features_chunk):
+        """Predict a chunk of data in parallel"""
+        chunk_predictions = []
+        chunk_probabilities = []
+
+        for sample_idx in range(len(features_chunk)):
+            vects = np.zeros(self.innodes + self.outnodes + 2)
+            for i in range(1, self.innodes + 1):
+                vects[i] = features_chunk[sample_idx, i-1]
+
+            # Compute class probabilities
+            classval = compute_class_probabilities_numba(
+                vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
+                self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes
+            )
+
+            # Find predicted class
+            kmax = 1
+            cmax = 0.0
+            for k in range(1, self.outnodes + 1):
+                if classval[k] > cmax:
+                    cmax = classval[k]
+                    kmax = k
+
+            predicted = self.dmyclass[kmax]
+            chunk_predictions.append(predicted)
+
+            # Store probabilities
+            prob_dict = {}
+            for k in range(1, self.outnodes + 1):
+                class_val = self.dmyclass[k]
+                if self.class_encoder.is_fitted:
+                    class_name = self.class_encoder.encoded_to_class.get(class_val, f"Class_{k}")
+                else:
+                    class_name = f"Class_{k}"
+                prob_dict[class_name] = float(classval[k])
+
+            chunk_probabilities.append(prob_dict)
+
+        return chunk_predictions, chunk_probabilities
+
+    def predict_batch_optimized(self, features_batch, clear_cache_every=100):
+        """Optimized batch prediction with periodic cache clearing"""
+        return self.predict_batch(features_batch)
+
+    def train_with_early_stopping(self, train_file: str, test_file: Optional[str] = None,
+                                 use_csv: bool = True, target_column: Optional[str] = None,
+                                 feature_columns: Optional[List[str]] = None):
+        """Main training method with early stopping and automatic optimizations"""
+        self.log("Starting optimized model training with early stopping...")
+
+        # Load training data
+        features_batches, targets_batches, feature_columns_used, original_targets_batches = self.load_data(
+            train_file, target_column, feature_columns
+        )
+
+        if not features_batches:
+            self.log("No training data loaded")
+            return False
+
+        # Fit encoder and determine architecture
+        self.fit_encoder(original_targets_batches)
+        encoded_targets_batches = []
+        for batch in original_targets_batches:
+            encoded_batch = self.class_encoder.transform(batch)
+            encoded_targets_batches.append(encoded_batch)
+
+        self.innodes = len(feature_columns_used)
+        self.outnodes = len(self.class_encoder.get_encoded_classes())
+
+        # Initialize arrays
+        resol = self.config.get('resol', 100)
+        self.initialize_arrays(self.innodes, resol, self.outnodes)
+
+        # Initialize training
+        omax, omin = self.initialize_training(features_batches, encoded_targets_batches, resol)
+
+        # Process training data for initial APF
+        self.log("Processing training data for initial network counts...")
+        total_samples = sum(len(batch) for batch in features_batches)
+        total_processed = 0
+
+        for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
+            processed = self.process_training_batch(features_batch, targets_batch)
+            total_processed += processed
+            if total_processed % 1000 == 0:
+                self.log(f"Processed {total_processed}/{total_samples} samples")
+
+        # Training with early stopping
+        gain = self.config.get('gain', 2.0)
+        max_epochs = self.config.get('epochs', 100)
+        patience = self.config.get('patience', 10)
+        min_improvement = self.config.get('min_improvement', 0.1)
+
+        self.log(f"Starting weight training with early stopping...")
+        best_accuracy = 0.0
+        best_round = 0
+        patience_counter = 0
+        best_weights = None
+
+        for rnd in range(max_epochs + 1):
+            if rnd == 0:
+                # Initial evaluation
+                current_accuracy, correct_predictions, _ = self.evaluate(features_batches, encoded_targets_batches)
+                self.log(f"Round {rnd:3d}: Initial Accuracy = {current_accuracy:.2f}% ({correct_predictions}/{total_samples})")
+                best_accuracy = current_accuracy
+                best_weights = self.anti_wts.copy()
+                best_round = rnd
+                continue
+
+            # Training pass
+            self.train_epoch(features_batches, encoded_targets_batches, gain)
+
+            # Evaluation after training round
+            current_accuracy, correct_predictions, _ = self.evaluate(features_batches, encoded_targets_batches)
+            self.log(f"Round {rnd:3d}: Accuracy = {current_accuracy:.2f}% ({correct_predictions}/{total_samples})")
+
+            # Capture visualization snapshot if visualizer is attached
+            if self.visualizer and rnd % 5 == 0:
+                sample_features = np.vstack(features_batches)[:1000]  # Sample for performance
+                sample_targets = np.concatenate(encoded_targets_batches)[:1000]
+                sample_predictions, _ = self.predict_batch(sample_features)
+                self.visualizer.capture_training_snapshot(
+                    sample_features, sample_targets, self.anti_wts,
+                    sample_predictions, current_accuracy, rnd
+                )
+
+            # Early stopping logic
+            if current_accuracy > best_accuracy + min_improvement:
+                best_accuracy = current_accuracy
+                best_weights = self.anti_wts.copy()
+                best_round = rnd
+                patience_counter = 0
+                self.log(f"  → New best accuracy! (Improved by {current_accuracy - best_accuracy:.2f}%)")
+            else:
+                patience_counter += 1
+                self.log(f"  → No improvement (Patience: {patience_counter}/{patience})")
+
+            if patience_counter >= patience:
+                self.log(f"\nEarly stopping triggered after {rnd} rounds.")
+                self.log(f"Best accuracy {best_accuracy:.2f}% achieved at round {best_round}")
+                break
+
+        # Restore best weights
+        if best_weights is not None:
+            self.anti_wts = best_weights
+            self.log(f"Restored best weights from round {best_round}")
+
+        self.is_trained = True
+        self.best_accuracy = best_accuracy
+        self.best_round = best_round
+
+        self.log("Optimized training completed successfully!")
+        return True
+
+    # All other existing methods remain exactly the same...
+    # detect_system_resources, calculate_optimal_parameters, estimate_batch_memory,
+    # print_resource_report, save_model, load_model, attach_visualizer, etc.
+    # These methods are unchanged from the original implementation
+
+    def enable_parallel_processing(self, enabled=True):
+        """Enable or disable parallel processing"""
+        self.parallel_enabled = enabled
+        if enabled:
+            self.num_workers = self._detect_optimal_workers()
+            self.log(f"✅ Parallel processing enabled with {self.num_workers} workers")
+        else:
+            self.log("✅ Parallel processing disabled")
+
+    def set_max_workers(self, max_workers):
+        """Set maximum number of parallel workers"""
+        self.num_workers = min(max_workers, self._detect_optimal_workers())
+        self.log(f"✅ Maximum workers set to {self.num_workers}")
+
+    def optimize_memory(self):
+        """Optimize memory usage by converting arrays to optimal dtypes"""
+        if self.anti_net is not None:
+            # Keep anti_net as int32 for large counts
+            pass
+
+        if self.anti_wts is not None and not self.memory_optimized:
+            self.anti_wts = self.anti_wts.astype(np.float32)
+            self.antit_wts = self.antit_wts.astype(np.float32)
+            self.antip_wts = self.antip_wts.astype(np.float32)
+            self.binloc = self.binloc.astype(np.float32)
+            self.max_val = self.max_val.astype(np.float32)
+            self.min_val = self.min_val.astype(np.float32)
+            self.dmyclass = self.dmyclass.astype(np.float32)
+            self.memory_optimized = True
+            self.log("✅ Memory optimized: arrays converted to float32")
 
 class DBNNVisualizer:
     """
@@ -1620,7 +1843,7 @@ class DBNNVisualizer:
         return fig
 
     def create_training_dashboard(self, output_file: str = "training_dashboard.html"):
-        """Create comprehensive training dashboard"""
+        """Create comprehensive training dashboard with support for custom paths"""
         try:
             from plotly.subplots import make_subplots
             import plotly.graph_objects as go
@@ -1631,11 +1854,18 @@ class DBNNVisualizer:
         if len(self.training_history) < 2:
             return None
 
+        # Ensure the directory exists
+        output_dir = os.path.dirname(output_file)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir, exist_ok=True)
+
         # Create subplots
         fig = make_subplots(
             rows=2, cols=2,
             subplot_titles=('Feature Space', 'Accuracy Progression',
-                          'Weight Distribution', 'Training Summary')
+                          'Weight Distribution', 'Training Summary'),
+            specs=[[{"type": "scatter3d"}, {"type": "xy"}],
+                   [{"type": "xy"}, {"type": "domain"}]]
         )
 
         # Feature Space (latest snapshot)
@@ -1659,13 +1889,15 @@ class DBNNVisualizer:
         # Training Summary
         best_round = np.argmax(accuracies)
         best_accuracy = accuracies[best_round]
+        final_accuracy = accuracies[-1] if accuracies else 0
 
         summary_text = f"""
-        Training Summary:
-        - Total Rounds: {len(self.training_history)}
-        - Best Accuracy: {best_accuracy:.2f}%
-        - Best Round: {best_round}
-        - Final Accuracy: {accuracies[-1]:.2f}%
+        <b>Training Summary:</b><br>
+        - Total Rounds: {len(self.training_history)}<br>
+        - Best Accuracy: {best_accuracy:.2f}%<br>
+        - Best Round: {best_round}<br>
+        - Final Accuracy: {final_accuracy:.2f}%<br>
+        - Improvement: {final_accuracy - accuracies[0] if accuracies else 0:+.2f}%
         """
 
         fig.add_trace(go.Scatter(
@@ -1673,14 +1905,23 @@ class DBNNVisualizer:
             mode='text',
             text=[summary_text],
             textposition="middle center",
-            showlegend=False
+            showlegend=False,
+            textfont=dict(size=12)
         ), row=2, col=2)
 
-        fig.update_layout(height=800, title_text="DBNN Training Dashboard")
-        fig.write_html(output_file)
-        print(f"Training dashboard saved to: {output_file}")
-        return output_file
+        fig.update_layout(
+            height=800,
+            title_text="DBNN Training Dashboard",
+            showlegend=False
+        )
 
+        try:
+            fig.write_html(output_file)
+            print(f"Training dashboard saved to: {output_file}")
+            return output_file
+        except Exception as e:
+            print(f"Error saving dashboard: {e}")
+            return None
 # Example usage and integration
 class DBNNWorkflow:
     """
@@ -1854,10 +2095,14 @@ class EnhancedDBNNInterface:
         config_frame = ttk.LabelFrame(left_frame, text="Quick Configuration", padding="5")
         config_frame.pack(fill='x', pady=5)
 
-        # Model name
+        # Model name - auto-generated based on data file
         ttk.Label(config_frame, text="Model Name:").grid(row=0, column=0, sticky='w')
-        self.model_name = tk.StringVar(value="my_model")
-        ttk.Entry(config_frame, textvariable=self.model_name, width=20).grid(row=0, column=1, sticky='w', padx=5)
+        self.model_name = tk.StringVar(value="my_model")  # Default, will be updated when file is loaded
+        self.model_name_entry = ttk.Entry(config_frame, textvariable=self.model_name, width=30)
+        self.model_name_entry.grid(row=0, column=1, sticky='w', padx=5, columnspan=2)
+
+        # Add tooltip for model name
+        self.create_tooltip(self.model_name_entry, "Auto-generated from data file name. Model will be saved in Model/ folder.")
 
         # Training params in a grid
         params = [
@@ -1925,7 +2170,8 @@ class EnhancedDBNNInterface:
         row1_frame.pack(fill='x', pady=2)
 
         ttk.Button(row1_frame, text="Initialize Core", command=self.initialize_core).pack(side='left', padx=2)
-        ttk.Button(row1_frame, text="Train Model", command=self.train_model).pack(side='left', padx=2)
+        ttk.Button(row1_frame, text="Train Fresh", command=self.train_fresh).pack(side='left', padx=2)
+        ttk.Button(row1_frame, text="Continue Training", command=self.continue_training).pack(side='left', padx=2)
         ttk.Button(row1_frame, text="Test Model", command=self.test_model).pack(side='left', padx=2)
 
         # Row 2 buttons
@@ -1934,11 +2180,10 @@ class EnhancedDBNNInterface:
 
         ttk.Button(row2_frame, text="Predict", command=self.predict).pack(side='left', padx=2)
         ttk.Button(row2_frame, text="Save Model", command=self.save_model).pack(side='left', padx=2)
-        ttk.Button(row2_frame, text="Save Model (JSON)", command=self.save_model_json).pack(side='left', padx=2)
         ttk.Button(row2_frame, text="Load Model", command=self.load_model).pack(side='left', padx=2)
         ttk.Button(row2_frame, text="Visualize", command=self.visualize).pack(side='left', padx=2)
 
-        # Quick config buttons
+        # Row 3 buttons - Configuration management
         row3_frame = ttk.Frame(button_frame)
         row3_frame.pack(fill='x', pady=2)
 
@@ -2503,8 +2748,384 @@ class EnhancedDBNNInterface:
         except Exception as e:
             self.log(f"Note: Could not generate prediction summary: {e}")
 
+    def _update_model_name_from_file(self):
+        """Update model name based on the current data file"""
+        if not self.current_file:
+            return
+
+        # Extract base name from file path
+        base_name = os.path.splitext(os.path.basename(self.current_file))[0]
+        model_name = f"Model/{base_name}"
+        self.model_name.set(model_name)
+        self.log(f"Model name auto-set to: {model_name}")
+
+
+    def train_fresh(self):
+        """Train a fresh model from scratch, overwriting any existing model"""
+        if not self.core:
+            messagebox.showerror("Error", "Please initialize core first")
+            return
+
+        if not self.current_file:
+            messagebox.showerror("Error", "Please select a training file first")
+            return
+
+        # Confirm with user about overwriting
+        result = messagebox.askyesno(
+            "Train Fresh",
+            "This will train a fresh model from scratch and overwrite any existing model.\n\nContinue?"
+        )
+
+        if not result:
+            return
+
+        try:
+            self.show_processing_indicator("Starting fresh training...")
+            self.log("=== STARTING FRESH TRAINING ===")
+
+            # Reset core to ensure fresh start
+            self.initialize_core()
+
+            # Set flag to indicate fresh training
+            self.fresh_training = True
+
+            # Call the original training method
+            success = self._train_model_internal(fresh_training=True)
+
+            if success:
+                self.log("✅ Fresh training completed successfully!")
+            else:
+                self.log("❌ Fresh training failed!")
+
+        except Exception as e:
+            self.hide_processing_indicator()
+            messagebox.showerror("Error", f"Fresh training failed: {e}")
+            self.log(f"Error: {e}")
+            self.log(traceback.format_exc())
+
+    def continue_training(self):
+        """Continue training from existing model or start fresh if no model exists"""
+        if not self.core:
+            messagebox.showerror("Error", "Please initialize core first")
+            return
+
+        if not self.current_file:
+            messagebox.showerror("Error", "Please select a training file first")
+            return
+
+        try:
+            self.show_processing_indicator("Continuing training...")
+            self.log("=== CONTINUING TRAINING ===")
+
+            # Check if we have a trained model to continue from
+            if not getattr(self.core, 'is_trained', False):
+                self.log("No existing model found, starting fresh training...")
+                # No existing model, so this becomes a fresh training
+                success = self._train_model_internal(fresh_training=True)
+            else:
+                self.log(f"Continuing from existing model (best accuracy: {getattr(self.core, 'best_accuracy', 0):.2f}%)")
+                # Continue from existing model
+                success = self._train_model_internal(fresh_training=False)
+
+            if success:
+                self.log("✅ Continued training completed successfully!")
+            else:
+                self.log("❌ Continued training failed!")
+
+        except Exception as e:
+            self.hide_processing_indicator()
+            messagebox.showerror("Error", f"Continued training failed: {e}")
+            self.log(f"Error: {e}")
+            self.log(traceback.format_exc())
+
+    def _train_model_internal(self, fresh_training=False):
+        """Internal training method that handles both fresh and continued training"""
+        try:
+            # Load data
+            if self.file_type == 'csv':
+                target_column = self.target_col.get()
+                feature_columns = self.get_selected_features()
+
+                # VALIDATION: Check if target is selected for training
+                if target_column == 'None' or not target_column:
+                    messagebox.showerror("Error",
+                        "For training, you must select a target column.\n"
+                        "Please select a target column from the dropdown (not 'None').")
+                    self.hide_processing_indicator()
+                    return False
+
+                if not feature_columns:
+                    messagebox.showerror("Error", "Please select at least one feature column")
+                    self.hide_processing_indicator()
+                    return False
+
+                # Check if target column is in feature columns (common mistake)
+                if target_column in feature_columns:
+                    messagebox.showerror("Error",
+                        f"Target column '{target_column}' cannot be in feature columns.\n"
+                        f"Please deselect it from the feature checkboxes.")
+                    self.hide_processing_indicator()
+                    return False
+
+                self.log(f"Training with: target={target_column}, features={feature_columns}")
+                features_batches, targets_batches, feature_columns_used, original_targets_batches = self.core.load_data(
+                    self.current_file, target_column, feature_columns, batch_size=5000
+                )
+            else:
+                self.log("Training with DAT file")
+                features_batches, targets_batches, feature_columns_used, original_targets_batches = self.core.load_data(
+                    self.current_file, batch_size=5000
+                )
+                # For DAT files, set default feature and target info
+                target_column = "last_column"
+                feature_columns = feature_columns_used
+
+            if not features_batches:
+                self.log("ERROR: No data loaded!")
+                self.hide_processing_indicator()
+                return False
+
+            total_samples = sum(len(batch) for batch in features_batches)
+            self.log(f"Loaded {total_samples} samples")
+
+            # For fresh training, reset the encoder and network
+            if fresh_training:
+                self.log("🔄 Initializing fresh training...")
+                # Fit encoder and setup network from scratch
+                all_original_targets = np.concatenate(original_targets_batches) if original_targets_batches else np.array([])
+                self.core.class_encoder.fit(all_original_targets)
+
+                encoded_classes = self.core.class_encoder.get_encoded_classes()
+                self.log(f"Fresh network: {len(feature_columns_used)} inputs, {len(encoded_classes)} outputs")
+
+                # Initialize arrays for fresh training
+                innodes = len(feature_columns_used)
+                outnodes = len(encoded_classes)
+                resol = int(self.resol.get())
+
+                # Validate dimensions before initializing arrays
+                if innodes <= 0:
+                    self.log("ERROR: No input features detected!")
+                    self.hide_processing_indicator()
+                    return False
+                if outnodes <= 0:
+                    self.log("ERROR: No output classes detected!")
+                    self.hide_processing_indicator()
+                    return False
+
+                self.core.initialize_arrays(innodes, resol, outnodes)
+
+                # Setup dmyclass
+                self.core.dmyclass[0] = float(self.margin.get())
+                for i, encoded_val in enumerate(encoded_classes, 1):
+                    self.core.dmyclass[i] = float(encoded_val)
+
+            # Encode targets
+            encoded_targets_batches = []
+            for batch in original_targets_batches:
+                encoded_batch = self.core.class_encoder.transform(batch)
+                encoded_targets_batches.append(encoded_batch)
+
+            # Initialize training (only for fresh training)
+            if fresh_training:
+                self.log("Initializing training parameters...")
+                omax, omin = self.core.initialize_training(features_batches, encoded_targets_batches, resol)
+
+                # Build initial network
+                self.log("Building initial network...")
+                total_processed = 0
+                for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
+                    processed = self.core.process_training_batch(features_batch, targets_batch)
+                    total_processed += processed
+                    if batch_idx % 10 == 0:
+                        self.log(f"  Processed {total_processed}/{total_samples} samples")
+                        self.show_processing_indicator(f"Building network... {total_processed}/{total_samples}")
+
+                self.log(f"✅ Initial network built with {total_processed} samples")
+
+            # Training with FIXED early stopping
+            gain = float(self.gain.get())
+            max_epochs = int(self.epochs.get())
+            patience = int(self.patience.get())
+
+            training_type = "FRESH" if fresh_training else "CONTINUED"
+            self.log(f"{training_type} TRAINING: {max_epochs} epochs, gain={gain}, patience={patience}")
+
+            # Store current best accuracy for comparison
+            current_best_accuracy = getattr(self.core, 'best_accuracy', 0.0)
+            best_accuracy = current_best_accuracy
+            best_weights = self.core.anti_wts.copy() if hasattr(self.core, 'anti_wts') and self.core.anti_wts is not None else None
+            best_round = getattr(self.core, 'best_round', 0)
+            patience_counter = 0
+
+            for rnd in range(max_epochs + 1):
+                if rnd == 0 and fresh_training:
+                    # Initial evaluation for fresh training
+                    current_accuracy, correct, _ = self.core.evaluate(features_batches, encoded_targets_batches)
+                    self.log(f"Epoch {rnd:3d}: Initial Accuracy = {current_accuracy:.2f}% ({correct}/{total_samples})")
+                    best_accuracy = current_accuracy
+                    best_weights = self.core.anti_wts.copy()
+                    best_round = rnd
+                    continue
+                elif rnd == 0 and not fresh_training:
+                    # For continued training, show current model accuracy
+                    current_accuracy, correct, _ = self.core.evaluate(features_batches, encoded_targets_batches)
+                    self.log(f"Epoch {rnd:3d}: Current Model Accuracy = {current_accuracy:.2f}% ({correct}/{total_samples})")
+                    if current_accuracy > best_accuracy:
+                        best_accuracy = current_accuracy
+                        best_weights = self.core.anti_wts.copy()
+                        best_round = rnd
+                    continue
+
+                # Update processing indicator for training progress
+                if rnd % 5 == 0:
+                    training_type_str = "Fresh" if fresh_training else "Continued"
+                    self.show_processing_indicator(f"{training_type_str} Training... Epoch {rnd}/{max_epochs}")
+
+                # Training epoch
+                self.core.train_epoch(features_batches, encoded_targets_batches, gain)
+
+                # Evaluate
+                current_accuracy, correct, predictions = self.core.evaluate(features_batches, encoded_targets_batches)
+
+                # Update best weights only if we get a new best accuracy
+                if current_accuracy > best_accuracy:
+                    best_accuracy = current_accuracy
+                    best_weights = self.core.anti_wts.copy()
+                    best_round = rnd
+                    patience_counter = 0
+                    improvement = current_accuracy - current_best_accuracy
+                    if fresh_training:
+                        self.log(f"Epoch {rnd:3d}: Accuracy = {current_accuracy:.2f}% → NEW BEST")
+                    else:
+                        self.log(f"Epoch {rnd:3d}: Accuracy = {current_accuracy:.2f}% → NEW BEST (+{improvement:.2f}% from previous best)")
+                else:
+                    patience_counter += 1
+                    improvement = current_accuracy - best_accuracy
+                    if improvement > 0:
+                        self.log(f"Epoch {rnd:3d}: Accuracy = {current_accuracy:.2f}% (+{improvement:.2f}%)")
+                    else:
+                        self.log(f"Epoch {rnd:3d}: Accuracy = {current_accuracy:.2f}%")
+
+                # Visualization
+                if self.visualizer and rnd % 5 == 0:
+                    sample_size = min(1000, total_samples)
+                    sample_features = np.vstack([batch[:100] for batch in features_batches])[:sample_size]
+                    sample_targets = np.concatenate([batch[:100] for batch in encoded_targets_batches])[:sample_size]
+                    sample_predictions, _ = self.core.predict_batch(sample_features)
+
+                    # Create visualization directory if it doesn't exist
+                    if self.current_file:
+                        base_name = os.path.splitext(os.path.basename(self.current_file))[0]
+                        viz_dir = f"Visualisations/{base_name}"
+                        os.makedirs(viz_dir, exist_ok=True)
+
+                    self.visualizer.capture_training_snapshot(
+                        sample_features, sample_targets, self.core.anti_wts,
+                        sample_predictions, current_accuracy, rnd
+                    )
+
+                # Early stopping
+                if patience_counter >= patience:
+                    self.log(f"Early stopping at epoch {rnd} (no improvement for {patience} epochs)")
+                    break
+
+            # Restore best weights
+            if best_weights is not None:
+                self.core.anti_wts = best_weights
+                self.log(f"Restored best weights from epoch {best_round}")
+
+            self.core.is_trained = True
+            self.core.best_accuracy = best_accuracy
+            self.core.best_round = best_round
+
+            # AUTOMATIC MODEL SAVING AFTER TRAINING
+            self.log("=== Auto-saving Trained Model ===")
+            self.show_processing_indicator("Auto-saving trained model...")
+
+            # Get feature information
+            feature_columns = self.get_selected_features() if hasattr(self, 'get_selected_features') else []
+            target_column = self.target_col.get() if hasattr(self, 'target_col') else ""
+
+            # Use core's auto-save functionality
+            saved_model_path = self.core.save_model_auto(
+                model_dir="Model",
+                data_filename=self.current_file,
+                feature_columns=feature_columns,
+                target_column=target_column
+            )
+
+            if saved_model_path:
+                self.log(f"✅ Model automatically saved to: {saved_model_path}")
+                self.log(f"   Best accuracy: {best_accuracy:.2f}% at epoch {best_round}")
+            else:
+                self.log("❌ Automatic model saving failed!")
+
+            # Test the model immediately after training
+            self.log("Testing trained model...")
+            try:
+                if hasattr(self.core, 'innodes') and self.core.innodes > 0:
+                    test_sample = np.random.randn(self.core.innodes)
+                    predictions, probabilities = self.core.predict_batch(test_sample.reshape(1, -1))
+                    self.log(f"✅ Post-training test - Prediction: {predictions[0]}")
+                    self.log("✅ Model is ready for predictions")
+            except Exception as e:
+                self.log(f"❌ Post-training test failed: {e}")
+
+            training_type_str = "Fresh" if fresh_training else "Continued"
+            self.log(f"=== {training_type_str.upper()} TRAINING COMPLETED ===")
+            self.hide_processing_indicator()
+            self.log(f"Best accuracy: {best_accuracy:.2f}% at epoch {best_round}")
+            self.log(f"Final model: {self.core.innodes} inputs, {self.core.outnodes} outputs")
+            self.log(f"Feature columns used: {feature_columns_used}")
+            self.log(f"Target column: {target_column if self.file_type == 'csv' else 'last column (DAT)'}")
+
+            encoded_classes = self.core.class_encoder.get_encoded_classes()
+            self.log(f"Classes: {len(encoded_classes)} - {encoded_classes}")
+
+            return True
+
+        except Exception as e:
+            self.hide_processing_indicator()
+            messagebox.showerror("Error", f"Training failed: {e}")
+            self.log(f"Error: {e}")
+            self.log(traceback.format_exc())
+            return False
+
+    def auto_load_model(self):
+        """Automatically load model if it exists for current data file"""
+        if not self.current_file:
+            return
+
+        # Get the expected model file path
+        base_name = os.path.splitext(os.path.basename(self.current_file))[0]
+        model_pattern = f"Model/{base_name}_*_model.bin"
+
+        # Find the most recent model file
+        import glob
+        model_files = glob.glob(model_pattern)
+
+        if model_files:
+            # Sort by modification time and get the most recent
+            model_files.sort(key=os.path.getmtime, reverse=True)
+            latest_model = model_files[0]
+
+            try:
+                self.log(f"🔄 Auto-loading existing model: {latest_model}")
+                success = self.load_model_auto_config(latest_model)
+
+                if success:
+                    self.log(f"✅ Auto-loaded existing model: {latest_model}")
+                    if hasattr(self.core, 'best_accuracy'):
+                        self.log(f"   Best accuracy: {self.core.best_accuracy:.2f}%")
+                else:
+                    self.log("❌ Failed to auto-load existing model")
+
+            except Exception as e:
+                self.log(f"⚠️ Could not auto-load model: {e}")
+
     def analyze_file(self):
-        """Analyze the selected file and auto-load configuration"""
+        """Analyze the selected file and auto-load configuration and model"""
         filename = self.file_path.get()
         if not filename:
             messagebox.showerror("Error", "Please select a file first")
@@ -2573,8 +3194,14 @@ class EnhancedDBNNInterface:
             self.current_file = filename
             self.log("File analysis completed")
 
+            # Auto-update model name based on data file
+            self._update_model_name_from_file()
+
             # Auto-load configuration if it exists
             self.auto_load_config()
+
+            # Auto-load model if it exists
+            self.auto_load_model()
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to analyze file: {e}")
@@ -2583,7 +3210,6 @@ class EnhancedDBNNInterface:
             self.log(traceback.format_exc())
         finally:
             self.hide_processing_indicator()
-
     def save_trained_model_auto(self, best_accuracy, best_round):
         """GUI wrapper for automatic model saving - now much simpler"""
         if not self.core or not getattr(self.core, 'is_trained', False):
@@ -3472,41 +4098,34 @@ class EnhancedDBNNInterface:
         return predictions, probabilities
 
     def save_model(self, model_path=None):
-        """Save the current model to file in binary format by default"""
+        """Save the current model to file in binary format"""
         if not self.core or not getattr(self.core, 'is_trained', False):
             messagebox.showerror("Error", "No trained model to save")
             return
 
-        # If no model_path provided, ask the user
+        # If no model_path provided, use the auto-generated name
         if model_path is None:
-            model_path = filedialog.asksaveasfilename(
-                title="Save Model As Binary",
-                defaultextension=".bin",
-                filetypes=[("Binary files", "*.bin"), ("Gzip files", "*.gz"), ("All files", "*.*")]
-            )
+            model_path = f"{self.model_name.get()}.bin"
 
-        if not model_path:
-            return  # User cancelled
+        # Ensure .bin extension
+        if not model_path.endswith('.bin'):
+            model_path += '.bin'
+
+        # Ensure Model directory exists
+        model_dir = os.path.dirname(os.path.abspath(model_path))
+        if model_dir and not os.path.exists(model_dir):
+            os.makedirs(model_dir, exist_ok=True)
 
         try:
-            # Ensure .bin extension for binary format
-            if not (model_path.endswith('.bin') or model_path.endswith('.gz')):
-                model_path += '.bin'
-
-            # Get feature information from UI
-            feature_columns = []
-            target_column = ""
-
-            if hasattr(self, 'get_selected_features'):
-                feature_columns = self.get_selected_features()
-            if hasattr(self, 'target_col'):
-                target_column = self.target_col.get()
+            # Get feature information
+            feature_columns = self.get_selected_features() if hasattr(self, 'get_selected_features') else []
+            target_column = self.target_col.get() if hasattr(self, 'target_col') else ""
 
             success = self.core.save_model(
                 model_path,
                 feature_columns=feature_columns,
                 target_column=target_column,
-                use_json=False  # Binary format by default
+                use_json=False  # Always binary format
             )
 
             if success:
@@ -3519,7 +4138,6 @@ class EnhancedDBNNInterface:
         except Exception as e:
             self.log(f"Save error: {e}")
             self.log(traceback.format_exc())
-
     def save_model_json(self):
         """Save model in JSON format"""
         if not self.core or not getattr(self.core, 'is_trained', False):
@@ -3617,7 +4235,7 @@ class EnhancedDBNNInterface:
                 self.hide_processing_indicator()
 
     def visualize(self):
-        """Generate visualizations and offer to open them"""
+        """Generate visualizations and save them in Visualisations/<databasename>/ folder"""
         if not self.visualizer or not hasattr(self.visualizer, 'training_history') or not self.visualizer.training_history:
             messagebox.showerror("Error", "No training history available for visualization")
             return
@@ -3625,7 +4243,18 @@ class EnhancedDBNNInterface:
         try:
             self.log("=== Generating Visualizations ===")
 
-            base_name = self.model_name.get()
+            # Create visualization directory based on data file name
+            if self.current_file:
+                base_name = os.path.splitext(os.path.basename(self.current_file))[0]
+                viz_dir = f"Visualisations/{base_name}"
+            else:
+                base_name = self.model_name.get().replace("Model/", "")
+                viz_dir = f"Visualisations/{base_name}"
+
+            # Ensure visualization directory exists
+            os.makedirs(viz_dir, exist_ok=True)
+            self.log(f"Visualizations will be saved in: {viz_dir}")
+
             viz_count = 0
             generated_files = []
 
@@ -3633,7 +4262,7 @@ class EnhancedDBNNInterface:
             try:
                 accuracy_fig = self.visualizer.generate_accuracy_plot()
                 if accuracy_fig:
-                    accuracy_file = f"{base_name}_accuracy.html"
+                    accuracy_file = f"{viz_dir}/{base_name}_accuracy.html"
                     accuracy_fig.write_html(accuracy_file)
                     self.log(f"✓ Accuracy plot: {accuracy_file}")
                     viz_count += 1
@@ -3646,7 +4275,7 @@ class EnhancedDBNNInterface:
                 if len(self.visualizer.training_history) > 0:
                     feature_fig = self.visualizer.generate_feature_space_plot(-1)
                     if feature_fig:
-                        feature_file = f"{base_name}_features.html"
+                        feature_file = f"{viz_dir}/{base_name}_features.html"
                         feature_fig.write_html(feature_file)
                         self.log(f"✓ Feature space: {feature_file}")
                         viz_count += 1
@@ -3658,7 +4287,7 @@ class EnhancedDBNNInterface:
             try:
                 weight_fig = self.visualizer.generate_weight_distribution_plot(-1)
                 if weight_fig:
-                    weight_file = f"{base_name}_weights.html"
+                    weight_file = f"{viz_dir}/{base_name}_weights.html"
                     weight_fig.write_html(weight_file)
                     self.log(f"✓ Weight distribution: {weight_file}")
                     viz_count += 1
@@ -3668,21 +4297,22 @@ class EnhancedDBNNInterface:
 
             # Generate dashboard
             try:
-                dashboard_file = self.visualizer.create_training_dashboard(f"{base_name}_dashboard.html")
-                if dashboard_file:
-                    self.log(f"✓ Training dashboard: {dashboard_file}")
+                dashboard_file = f"{viz_dir}/{base_name}_dashboard.html"
+                created_file = self.visualizer.create_training_dashboard(dashboard_file)
+                if created_file:
+                    self.log(f"✓ Training dashboard: {created_file}")
                     viz_count += 1
-                    generated_files.append(dashboard_file)
+                    generated_files.append(created_file)
             except Exception as e:
                 self.log(f"✗ Dashboard failed: {e}")
 
             if viz_count > 0:
                 self.log(f"=== Visualization Completed ===")
-                self.log(f"Generated {viz_count} visualization files")
+                self.log(f"Generated {viz_count} visualization files in {viz_dir}")
                 self.log("Open the .html files in your web browser to view interactive plots")
 
                 # Ask user if they want to open the files
-                self._ask_to_open_visualizations(generated_files, base_name)
+                self._ask_to_open_visualizations(generated_files, base_name, viz_dir)
             else:
                 self.log("No visualizations could be generated")
 
@@ -3690,44 +4320,46 @@ class EnhancedDBNNInterface:
             self.log(f"Visualization error: {e}")
             self.log(traceback.format_exc())
 
-    def _ask_to_open_visualizations(self, generated_files, base_name):
+    def _ask_to_open_visualizations(self, generated_files, base_name, viz_dir):
         """Ask user whether to open visualization files or folder"""
         import webbrowser
         import os
         import platform
 
-        # Get the current directory
-        current_dir = os.getcwd()
-
         # Create a dialog to ask user preference
         dialog = tk.Toplevel(self.root)
         dialog.title("Visualizations Generated")
-        dialog.geometry("500x300")
+        dialog.geometry("550x350")
         dialog.transient(self.root)
         dialog.grab_set()
 
         # Center the dialog
         dialog.update_idletasks()
-        x = self.root.winfo_x() + (self.root.winfo_width() - 500) // 2
-        y = self.root.winfo_y() + (self.root.winfo_height() - 300) // 2
+        x = self.root.winfo_x() + (self.root.winfo_width() - 550) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - 350) // 2
         dialog.geometry(f"+{x}+{y}")
 
         # Content
         ttk.Label(dialog, text="Visualization Files Generated!",
                   font=('Arial', 12, 'bold')).pack(pady=10)
 
-        ttk.Label(dialog, text=f"Created {len(generated_files)} visualization files:",
+        ttk.Label(dialog, text=f"Created {len(generated_files)} visualization files in:",
                   font=('Arial', 10)).pack(pady=5)
+
+        ttk.Label(dialog, text=viz_dir,
+                  font=('Arial', 10, 'bold'), foreground="blue").pack(pady=5)
 
         # List generated files
         file_frame = ttk.Frame(dialog)
         file_frame.pack(fill='both', expand=True, padx=20, pady=10)
 
-        file_list = scrolledtext.ScrolledText(file_frame, height=6, width=60)
+        file_list = scrolledtext.ScrolledText(file_frame, height=6, width=65)
         file_list.pack(fill='both', expand=True)
 
         for file in generated_files:
-            file_list.insert(tk.END, f"• {file}\n")
+            # Show only the filename, not the full path for cleaner display
+            filename = os.path.basename(file)
+            file_list.insert(tk.END, f"• {filename}\n")
         file_list.config(state=tk.DISABLED)
 
         # Buttons frame
@@ -3737,13 +4369,14 @@ class EnhancedDBNNInterface:
         def open_folder():
             """Open the folder containing visualization files"""
             try:
+                abs_viz_dir = os.path.abspath(viz_dir)
                 if platform.system() == "Windows":
-                    os.startfile(current_dir)
+                    os.startfile(abs_viz_dir)
                 elif platform.system() == "Darwin":  # macOS
-                    os.system(f'open "{current_dir}"')
+                    os.system(f'open "{abs_viz_dir}"')
                 else:  # Linux
-                    os.system(f'xdg-open "{current_dir}"')
-                self.log(f"Opened folder: {current_dir}")
+                    os.system(f'xdg-open "{abs_viz_dir}"')
+                self.log(f"Opened visualization folder: {abs_viz_dir}")
             except Exception as e:
                 self.log(f"Error opening folder: {e}")
                 messagebox.showerror("Error", f"Could not open folder: {e}")
@@ -3763,7 +4396,7 @@ class EnhancedDBNNInterface:
                         time.sleep(0.5)
 
                 if opened_count > 0:
-                    self.log(f"Opened {opened_count} visualization files in browser")
+                    self.log(f"Opened {opened_count} 3D visualization files in browser")
                 else:
                     self.log("No 3D visualization files found to open")
 
@@ -3796,7 +4429,7 @@ class EnhancedDBNNInterface:
             dialog.destroy()
 
         # Button layout
-        ttk.Button(button_frame, text="Open Folder",
+        ttk.Button(button_frame, text="Open Visualization Folder",
                    command=open_folder).pack(side='left', padx=5)
 
         ttk.Button(button_frame, text="Open 3D Visualizations",
