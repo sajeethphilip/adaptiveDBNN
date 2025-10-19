@@ -30,6 +30,2041 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 import dbnn
 
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox, scrolledtext
+import pandas as pd
+import numpy as np
+import json
+import os
+import sys
+from datetime import datetime
+
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+import plotly.graph_objects as go
+import plotly.express as px
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+import networkx as nx
+
+import os
+import json
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+import pandas as pd
+from datetime import datetime
+from pathlib import Path
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+import matplotlib.animation as animation
+from mpl_toolkits.mplot3d import Axes3D
+import networkx as nx
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+from sklearn.metrics import confusion_matrix, classification_report
+import scipy.stats as stats
+
+class ComprehensiveAdaptiveVisualizer:
+    """Comprehensive visualization system for Adaptive DBNN with intuitive plots"""
+
+    def __init__(self, dataset_name, output_base_dir='Visualizer/adaptiveDBNN'):
+        self.dataset_name = dataset_name
+        self.output_dir = Path(output_base_dir) / dataset_name
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create subdirectories for different plot types
+        self.subdirs = {
+            'performance': self.output_dir / 'performance',
+            'samples': self.output_dir / 'sample_evolution',
+            'distributions': self.output_dir / 'distributions',
+            'networks': self.output_dir / 'networks',
+            'comparisons': self.output_dir / 'comparisons',
+            'interactive': self.output_dir / 'interactive'
+        }
+
+        for subdir in self.subdirs.values():
+            subdir.mkdir(exist_ok=True)
+
+        # Color schemes
+        self.colors = px.colors.qualitative.Set1
+        self.set_plot_style()
+
+        print(f"🎨 Comprehensive visualizer initialized for: {dataset_name}")
+        print(f"📁 Output directory: {self.output_dir}")
+
+    def set_plot_style(self):
+        """Set consistent plot style"""
+        plt.style.use('default')
+        sns.set_palette("husl")
+        plt.rcParams['figure.figsize'] = [12, 8]
+        plt.rcParams['font.size'] = 10
+        plt.rcParams['axes.titlesize'] = 14
+        plt.rcParams['axes.labelsize'] = 12
+
+    def create_comprehensive_visualizations(self, adaptive_model, X_full, y_full,
+                                         training_history, round_stats, feature_names):
+        """Create all comprehensive visualizations"""
+        print("\n" + "="*60)
+        print("🎨 CREATING COMPREHENSIVE ADAPTIVE DBNN VISUALIZATIONS")
+        print("="*60)
+
+        # 1. Performance Evolution
+        self.plot_performance_evolution(round_stats)
+
+        # 2. Sample Selection Analysis
+        self.plot_sample_selection_analysis(training_history, y_full)
+
+        # 3. Training Sample Distributions
+        self.plot_training_sample_distributions(X_full, y_full, training_history, feature_names)
+
+        # 4. 3D Network Visualizations
+        self.plot_3d_networks(X_full, y_full, training_history, feature_names)
+
+        # 5. Feature Importance Analysis
+        self.plot_feature_importance_analysis(adaptive_model, X_full, y_full, feature_names)
+
+        # 6. Class Separation Analysis
+        self.plot_class_separation_analysis(X_full, y_full, training_history)
+
+        # 7. Confidence Evolution
+        self.plot_confidence_evolution(adaptive_model, X_full, y_full, training_history)
+
+        # 8. Interactive Dashboard
+        self.create_interactive_dashboard(round_stats, training_history, X_full, y_full, feature_names)
+
+        # 9. Final Model Analysis
+        self.plot_final_model_analysis(adaptive_model, X_full, y_full, feature_names)
+
+        print(f"✅ All visualizations saved to: {self.output_dir}")
+
+    def plot_performance_evolution(self, round_stats):
+        """Plot comprehensive performance evolution across rounds - OPTIMIZED"""
+        print("📈 Creating performance evolution plots...")
+
+        if not round_stats:
+            return
+
+        rounds = [stat['round'] for stat in round_stats]
+        train_acc = [stat['train_accuracy'] * 100 for stat in round_stats]
+        test_acc = [stat['test_accuracy'] * 100 for stat in round_stats]
+        training_sizes = [stat['training_size'] for stat in round_stats]
+        improvements = [stat['improvement'] * 100 for stat in round_stats]
+
+        # Create subplots with optimized layout
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+
+        # Plot 1: Accuracy Evolution - OPTIMIZED LEGEND
+        line1, = ax1.plot(rounds, train_acc, 'o-', linewidth=2, markersize=6,
+                         label='Training Accuracy', color=self.colors[0])
+        line2, = ax1.plot(rounds, test_acc, 's-', linewidth=2, markersize=6,
+                         label='Test Accuracy', color=self.colors[1])
+
+        # Highlight best round without legend
+        best_round_idx = np.argmax(test_acc)
+        ax1.axvline(x=rounds[best_round_idx], color='red', linestyle='--', alpha=0.7)
+
+        ax1.set_xlabel('Adaptive Round')
+        ax1.set_ylabel('Accuracy (%)')
+        ax1.set_title('Accuracy Evolution Across Rounds', fontweight='bold', fontsize=14)
+
+        # Use manual legend positioning instead of loc="best"
+        ax1.legend([line1, line2], ['Training Accuracy', 'Test Accuracy'],
+                   loc='upper left', frameon=True, fancybox=True, shadow=True)
+        ax1.grid(True, alpha=0.3)
+
+        # Plot 2: Training Size Growth
+        ax2.plot(rounds, training_sizes, '^-', linewidth=2, markersize=6, color=self.colors[2])
+        ax2.set_xlabel('Adaptive Round')
+        ax2.set_ylabel('Training Set Size')
+        ax2.set_title('Training Set Growth', fontweight='bold', fontsize=14)
+        ax2.grid(True, alpha=0.3)
+
+        # Add percentage growth annotation
+        if len(training_sizes) > 1:
+            growth_pct = ((training_sizes[-1] - training_sizes[0]) / training_sizes[0]) * 100
+            ax2.annotate(f'+{growth_pct:.1f}% growth',
+                        xy=(rounds[-1], training_sizes[-1]),
+                        xytext=(10, 10), textcoords='offset points',
+                        bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7),
+                        fontsize=9)
+
+        # Plot 3: Improvement per Round
+        bars = ax3.bar(rounds, improvements,
+                       color=np.where(np.array(improvements) >= 0, 'green', 'red'),
+                       alpha=0.7, width=0.6)
+        ax3.set_xlabel('Adaptive Round')
+        ax3.set_ylabel('Accuracy Improvement (%)')
+        ax3.set_title('Accuracy Improvement per Round', fontweight='bold', fontsize=14)
+        ax3.grid(True, alpha=0.3)
+
+        # Add value labels on bars - optimized for performance
+        for bar, improvement in zip(bars, improvements):
+            height = bar.get_height()
+            if abs(height) > 0.1:  # Only label significant improvements
+                ax3.text(bar.get_x() + bar.get_width()/2., height,
+                        f'{improvement:+.1f}%', ha='center', va='bottom' if height >= 0 else 'top',
+                        fontsize=8)
+
+        # Plot 4: Cumulative Performance
+        cumulative_improvement = np.cumsum(improvements)
+        ax4.plot(rounds, cumulative_improvement, 'o-', linewidth=2, markersize=6, color=self.colors[3])
+        ax4.set_xlabel('Adaptive Round')
+        ax4.set_ylabel('Cumulative Improvement (%)')
+        ax4.set_title('Cumulative Performance Improvement', fontweight='bold', fontsize=14)
+        ax4.grid(True, alpha=0.3)
+        ax4.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(self.subdirs['performance'] / 'performance_evolution.png', dpi=200, bbox_inches='tight')
+        plt.savefig(self.subdirs['performance'] / 'performance_evolution.pdf', bbox_inches='tight')
+        plt.close()
+
+        # Create interactive version
+        self._create_interactive_performance_plot(rounds, train_acc, test_acc, training_sizes, improvements, cumulative_improvement)
+
+    def _create_interactive_performance_plot(self, rounds, train_acc, test_acc, training_sizes, improvements, cumulative_improvement):
+        """Create optimized interactive performance plot"""
+        fig_int = make_subplots(rows=2, cols=2,
+                               subplot_titles=('Accuracy Evolution', 'Training Set Growth',
+                                             'Improvement per Round', 'Cumulative Improvement'))
+
+        fig_int.add_trace(go.Scatter(x=rounds, y=train_acc, name='Training Accuracy',
+                                   line=dict(color=self.colors[0])), row=1, col=1)
+        fig_int.add_trace(go.Scatter(x=rounds, y=test_acc, name='Test Accuracy',
+                                   line=dict(color=self.colors[1])), row=1, col=1)
+
+        fig_int.add_trace(go.Scatter(x=rounds, y=training_sizes, name='Training Size',
+                                   line=dict(color=self.colors[2])), row=1, col=2)
+
+        fig_int.add_trace(go.Bar(x=rounds, y=improvements, name='Improvement',
+                               marker_color=np.where(np.array(improvements) >= 0, 'green', 'red')),
+                         row=2, col=1)
+
+        fig_int.add_trace(go.Scatter(x=rounds, y=cumulative_improvement, name='Cumulative Improvement',
+                                   line=dict(color=self.colors[3])), row=2, col=2)
+
+        fig_int.update_layout(height=800, title_text="Adaptive Learning Performance Evolution",
+                             showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=1.02))
+        fig_int.write_html(self.subdirs['interactive'] / 'performance_evolution.html')
+
+    def plot_sample_selection_analysis(self, training_history, y_full):
+        """Analyze how samples are selected across rounds - OPTIMIZED"""
+        print("🔍 Creating sample selection analysis...")
+
+        if not training_history:
+            return
+
+        unique_classes = np.unique(y_full)
+        rounds = list(range(1, len(training_history) + 1))
+
+        # Calculate class distribution per round - optimized calculation
+        class_distributions = []
+        for round_indices in training_history:
+            round_labels = y_full[round_indices]
+            class_counts = [np.sum(round_labels == cls) for cls in unique_classes]
+            class_distributions.append(class_counts)
+
+        class_distributions = np.array(class_distributions)
+
+        # Create optimized plots
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+
+        # Stacked area plot for class distribution - optimized
+        if len(unique_classes) <= 10:  # Limit for reasonable visualization
+            ax1.stackplot(rounds, class_distributions.T,
+                         labels=[f'Class {cls}' for cls in unique_classes],
+                         colors=self.colors[:len(unique_classes)], alpha=0.8)
+            ax1.set_xlabel('Adaptive Round')
+            ax1.set_ylabel('Number of Samples')
+            ax1.set_title('Class Distribution Evolution', fontweight='bold', fontsize=14)
+            # Use fixed legend position
+            ax1.legend(loc='upper left', frameon=True, fancybox=True)
+        else:
+            # For many classes, use line plot instead
+            for i, cls in enumerate(unique_classes[:10]):  # Limit to first 10 classes
+                ax1.plot(rounds, class_distributions[:, i], 'o-', linewidth=1, markersize=3,
+                        label=f'Class {cls}', color=self.colors[i % len(self.colors)])
+            ax1.set_xlabel('Adaptive Round')
+            ax1.set_ylabel('Number of Samples')
+            ax1.set_title('Class Distribution Evolution (Top 10 Classes)', fontweight='bold', fontsize=14)
+            ax1.legend(loc='upper left', frameon=True, fancybox=True)
+
+        ax1.grid(True, alpha=0.3)
+
+        # Plot 2: Class Proportion Evolution - optimized
+        class_proportions = class_distributions / class_distributions.sum(axis=1, keepdims=True)
+
+        # Limit number of classes shown for clarity
+        classes_to_show = min(8, len(unique_classes))
+        for i, cls in enumerate(unique_classes[:classes_to_show]):
+            ax2.plot(rounds, class_proportions[:, i] * 100, 'o-', linewidth=1.5, markersize=4,
+                    label=f'Class {cls}', color=self.colors[i])
+
+        ax2.set_xlabel('Adaptive Round')
+        ax2.set_ylabel('Percentage (%)')
+        ax2.set_title('Class Proportion Evolution', fontweight='bold', fontsize=14)
+        ax2.legend(loc='upper right', frameon=True, fancybox=True)
+        ax2.grid(True, alpha=0.3)
+        ax2.set_ylim(0, 100)
+
+        plt.tight_layout()
+        plt.savefig(self.subdirs['samples'] / 'class_distribution_evolution.png', dpi=200, bbox_inches='tight')
+        plt.close()
+
+        # Plot sample selection efficiency separately
+        self._plot_sample_efficiency(rounds, training_history)
+
+    def _plot_sample_efficiency(self, rounds, training_history):
+        """Plot sample selection efficiency - OPTIMIZED"""
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        total_samples = [len(indices) for indices in training_history]
+        new_samples_per_round = [len(training_history[0])] + \
+                               [len(training_history[i]) - len(training_history[i-1])
+                                for i in range(1, len(training_history))]
+
+        width = 0.35
+        x = np.arange(len(rounds))
+
+        bars1 = ax.bar(x - width/2, total_samples, width, label='Cumulative Samples', alpha=0.7)
+        bars2 = ax.bar(x + width/2, new_samples_per_round, width, label='New Samples per Round', alpha=0.7)
+
+        ax.set_xlabel('Adaptive Round')
+        ax.set_ylabel('Number of Samples')
+        ax.set_title('Sample Selection Efficiency', fontweight='bold', fontsize=14)
+        ax.set_xticks(x)
+        ax.set_xticklabels(rounds)
+        ax.legend(loc='upper left', frameon=True, fancybox=True)
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(self.subdirs['samples'] / 'sample_selection_efficiency.png', dpi=200, bbox_inches='tight')
+        plt.close()
+
+    def plot_training_sample_distributions(self, X_full, y_full, training_history, feature_names):
+        """Plot feature distributions of selected training samples"""
+        print("📊 Creating training sample distribution analysis...")
+
+        if not training_history or len(training_history) < 3:
+            return
+
+        # Select key rounds to visualize
+        key_rounds = [0, len(training_history)//2, -1]  # Start, middle, end
+        round_names = ['Initial', 'Middle', 'Final']
+
+        fig, axes = plt.subplots(3, min(5, X_full.shape[1]), figsize=(20, 12))
+        if X_full.shape[1] == 1:
+            axes = axes.reshape(-1, 1)
+
+        for round_idx, (round_num, round_name) in enumerate(zip(key_rounds, round_names)):
+            training_indices = training_history[round_num]
+            X_train = X_full[training_indices]
+            y_train = y_full[training_indices]
+
+            # Plot distributions for first 5 features (or all if less than 5)
+            n_features = min(5, X_full.shape[1])
+            for feature_idx in range(n_features):
+                ax = axes[round_idx, feature_idx]
+
+                # Plot distribution for each class
+                unique_classes = np.unique(y_train)
+                for cls in unique_classes:
+                    class_mask = y_train == cls
+                    if np.any(class_mask):
+                        feature_values = X_train[class_mask, feature_idx]
+                        ax.hist(feature_values, bins=20, alpha=0.6,
+                               label=f'Class {cls}', density=True)
+
+                ax.set_xlabel(f'{feature_names[feature_idx]}')
+                if feature_idx == 0:
+                    ax.set_ylabel(f'{round_name}\nRound\nDensity')
+                ax.legend(fontsize=8)
+                ax.grid(True, alpha=0.3)
+
+        plt.suptitle('Feature Distribution Evolution in Training Set', fontweight='bold', fontsize=16)
+        plt.tight_layout()
+        plt.savefig(self.subdirs['distributions'] / 'feature_distribution_evolution.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
+    def plot_3d_networks(self, X_full, y_full, training_history, feature_names):
+        """Create optimized 3D network visualizations of training samples"""
+        print("🌐 Creating optimized 3D network visualizations...")
+
+        if not training_history:
+            return
+
+        # Reduce dimensionality for visualization - use PCA for better performance
+        if X_full.shape[1] > 3:
+            pca = PCA(n_components=3, random_state=42)
+            X_3d = pca.fit_transform(X_full)
+            explained_var = pca.explained_variance_ratio_.sum()
+        else:
+            X_3d = X_full
+            explained_var = 1.0
+
+        # Limit to key rounds for performance
+        total_rounds = len(training_history)
+        if total_rounds > 5:
+            # Show first, middle, and last rounds only
+            key_rounds = [0, total_rounds//2, -1]
+        else:
+            key_rounds = list(range(total_rounds))
+
+        for round_num in key_rounds:
+            training_indices = training_history[round_num]
+            self._create_optimized_3d_network(X_3d, y_full, training_indices,
+                                            round_num, explained_var, feature_names)
+
+    def _create_optimized_3d_network(self, X_3d, y_full, training_indices, round_num, explained_var, feature_names):
+        """Create optimized single 3D network visualization"""
+        fig = plt.figure(figsize=(12, 8))
+        ax = fig.add_subplot(111, projection='3d')
+
+        # Limit data for better performance
+        max_points = 1000  # Maximum points to display
+        if len(X_3d) > max_points:
+            # Sample points for better performance
+            sample_indices = np.random.choice(len(X_3d), max_points, replace=False)
+            X_display = X_3d[sample_indices]
+            y_display = y_full[sample_indices]
+            training_mask_display = np.isin(sample_indices, training_indices)
+        else:
+            X_display = X_3d
+            y_display = y_full
+            training_mask_display = np.isin(range(len(X_3d)), training_indices)
+
+        unique_classes = np.unique(y_display)
+        colors = plt.cm.Set1(np.linspace(0, 1, len(unique_classes)))
+
+        # Plot non-training samples (background) with reduced alpha and size
+        background_mask = ~training_mask_display
+        for i, cls in enumerate(unique_classes):
+            class_mask = (y_display == cls) & background_mask
+            if np.any(class_mask):
+                ax.scatter(X_display[class_mask, 0], X_display[class_mask, 1], X_display[class_mask, 2],
+                          c=[colors[i]], alpha=0.05, s=5, marker='.')  # Reduced alpha and size
+
+        # Plot training samples (foreground) - limit legend entries
+        legend_handles = []
+        legend_labels = []
+
+        for i, cls in enumerate(unique_classes):
+            class_mask = (y_display == cls) & training_mask_display
+            if np.any(class_mask):
+                scatter = ax.scatter(X_display[class_mask, 0], X_display[class_mask, 1], X_display[class_mask, 2],
+                                   c=[colors[i]], alpha=0.8, s=30, label=f'Class {cls}',
+                                   edgecolors='black', linewidth=0.5)
+                if len(legend_handles) < 8:  # Limit legend entries
+                    legend_handles.append(scatter)
+                    legend_labels.append(f'Class {cls}')
+
+        # Add network connections only for training samples (limited)
+        if len(training_indices) <= 200:  # Only add connections for reasonable dataset sizes
+            self._add_optimized_network_connections(ax, X_3d, y_full, training_indices, colors)
+
+        ax.set_xlabel(f'PC1 ({explained_var*100:.1f}% variance)')
+        ax.set_ylabel('PC2')
+        ax.set_zlabel('PC3')
+        ax.set_title(f'3D Training Network - Round {round_num + 1}\n'
+                    f'Training Samples: {len(training_indices)}', fontweight='bold', fontsize=12)
+
+        # Use limited legend
+        if legend_handles:
+            ax.legend(legend_handles, legend_labels, loc='upper left', bbox_to_anchor=(0, 1))
+
+        plt.tight_layout()
+        filename = f'3d_network_round_{round_num + 1}.png'
+        plt.savefig(self.subdirs['networks'] / filename, dpi=150, bbox_inches='tight')  # Reduced DPI
+        plt.close()
+
+    def _add_optimized_network_connections(self, ax, X_3d, y_full, training_indices, colors):
+        """Add optimized network connections between training samples"""
+        training_mask = np.isin(range(len(X_3d)), training_indices)
+        X_train = X_3d[training_mask]
+        y_train = y_full[training_mask]
+
+        unique_classes = np.unique(y_train)
+
+        for i, cls in enumerate(unique_classes):
+            class_mask = y_train == cls
+            class_points = X_train[class_mask]
+
+            # Only create connections for reasonable class sizes
+            if len(class_points) < 2 or len(class_points) > 50:
+                continue
+
+            try:
+                # Create minimum spanning tree with distance threshold
+                from scipy.spatial import distance_matrix
+                dist_matrix = distance_matrix(class_points, class_points)
+
+                # Apply distance threshold to reduce connections
+                max_distance = np.percentile(dist_matrix[dist_matrix > 0], 50)  # Median distance
+
+                G = nx.Graph()
+                for j in range(len(class_points)):
+                    for k in range(j+1, len(class_points)):
+                        if dist_matrix[j, k] <= max_distance:
+                            G.add_edge(j, k, weight=dist_matrix[j, k])
+
+                if G.number_of_edges() > 0:
+                    mst = nx.minimum_spanning_tree(G)
+
+                    # Plot MST edges
+                    for edge in list(mst.edges())[:50]:  # Limit number of edges
+                        point1 = class_points[edge[0]]
+                        point2 = class_points[edge[1]]
+                        ax.plot([point1[0], point2[0]],
+                               [point1[1], point2[1]],
+                               [point1[2], point2[2]],
+                               color=colors[i], alpha=0.4, linewidth=0.8)  # Reduced alpha and linewidth
+
+            except Exception as e:
+                # Silently continue if MST fails
+                continue
+
+    def _create_single_3d_network(self, X_3d, y_full, training_indices, round_num, explained_var, feature_names):
+        """Create a single 3D network visualization"""
+        fig = plt.figure(figsize=(15, 10))
+        ax = fig.add_subplot(111, projection='3d')
+
+        # Plot all samples (background)
+        unique_classes = np.unique(y_full)
+        colors = plt.cm.Set1(np.linspace(0, 1, len(unique_classes)))
+
+        # Background points (non-training)
+        background_mask = ~np.isin(range(len(X_3d)), training_indices)
+        for i, cls in enumerate(unique_classes):
+            class_mask = (y_full == cls) & background_mask
+            if np.any(class_mask):
+                ax.scatter(X_3d[class_mask, 0], X_3d[class_mask, 1], X_3d[class_mask, 2],
+                          c=[colors[i]], alpha=0.1, s=10, label=f'_nolegend_')
+
+        # Training samples (foreground)
+        for i, cls in enumerate(unique_classes):
+            class_mask = (y_full == cls) & np.isin(range(len(X_3d)), training_indices)
+            if np.any(class_mask):
+                ax.scatter(X_3d[class_mask, 0], X_3d[class_mask, 1], X_3d[class_mask, 2],
+                          c=[colors[i]], alpha=0.8, s=50, label=f'Class {cls}',
+                          edgecolors='black', linewidth=0.5)
+
+        # Create network connections
+        self._add_network_connections(ax, X_3d, y_full, training_indices, colors)
+
+        ax.set_xlabel(f'PC1 ({explained_var*100:.1f}% variance)')
+        ax.set_ylabel('PC2')
+        ax.set_zlabel('PC3')
+        ax.set_title(f'3D Training Network - Round {round_num + 1}\n'
+                    f'Training Samples: {len(training_indices)}', fontweight='bold', fontsize=14)
+        ax.legend()
+
+        plt.tight_layout()
+        filename = f'3d_network_round_{round_num + 1}.png'
+        plt.savefig(self.subdirs['networks'] / filename, dpi=300, bbox_inches='tight')
+        plt.close()
+
+    def _add_network_connections(self, ax, X_3d, y_full, training_indices, colors):
+        """Add network connections between training samples"""
+        training_mask = np.isin(range(len(X_3d)), training_indices)
+        X_train = X_3d[training_mask]
+        y_train = y_full[training_mask]
+
+        unique_classes = np.unique(y_train)
+
+        for i, cls in enumerate(unique_classes):
+            class_mask = y_train == cls
+            class_points = X_train[class_mask]
+
+            if len(class_points) < 2:
+                continue
+
+            try:
+                # Create minimum spanning tree
+                from scipy.spatial import distance_matrix
+                dist_matrix = distance_matrix(class_points, class_points)
+
+                G = nx.Graph()
+                for j in range(len(class_points)):
+                    for k in range(j+1, len(class_points)):
+                        G.add_edge(j, k, weight=dist_matrix[j, k])
+
+                mst = nx.minimum_spanning_tree(G)
+
+                # Plot MST edges
+                for edge in mst.edges():
+                    point1 = class_points[edge[0]]
+                    point2 = class_points[edge[1]]
+                    ax.plot([point1[0], point2[0]],
+                           [point1[1], point2[1]],
+                           [point1[2], point2[2]],
+                           color=colors[i], alpha=0.6, linewidth=1.5)
+
+            except Exception as e:
+                print(f"⚠️ Could not create MST for class {cls}: {e}")
+
+    def plot_feature_importance_analysis(self, adaptive_model, X_full, y_full, feature_names):
+        """Analyze and plot feature importance"""
+        print("🔧 Creating feature importance analysis...")
+
+        try:
+            # Use model's feature importance if available, otherwise use variance
+            if hasattr(adaptive_model.model, 'feature_importances_'):
+                importances = adaptive_model.model.feature_importances_
+            else:
+                # Use variance as proxy for importance
+                importances = np.var(X_full, axis=0)
+
+            # Sort features by importance
+            sorted_idx = np.argsort(importances)[::-1]
+            sorted_importances = importances[sorted_idx]
+            sorted_names = [feature_names[i] for i in sorted_idx]
+
+            # Plot feature importance
+            fig, ax = plt.subplots(figsize=(12, 8))
+            y_pos = np.arange(len(sorted_names))
+
+            bars = ax.barh(y_pos, sorted_importances, color=self.colors[0], alpha=0.7)
+            ax.set_yticks(y_pos)
+            ax.set_yticklabels(sorted_names)
+            ax.set_xlabel('Importance Score')
+            ax.set_title('Feature Importance Analysis', fontweight='bold', fontsize=14)
+            ax.grid(True, alpha=0.3, axis='x')
+
+            # Add value labels
+            for bar, importance in zip(bars, sorted_importances):
+                width = bar.get_width()
+                ax.text(width, bar.get_y() + bar.get_height()/2.,
+                       f'{importance:.4f}', ha='left', va='center')
+
+            plt.tight_layout()
+            plt.savefig(self.subdirs['distributions'] / 'feature_importance.png', dpi=300, bbox_inches='tight')
+            plt.close()
+
+        except Exception as e:
+            print(f"⚠️ Feature importance analysis failed: {e}")
+
+    def plot_class_separation_analysis(self, X_full, y_full, training_history):
+        """Analyze class separation evolution"""
+        print("🎯 Creating class separation analysis...")
+
+        if not training_history:
+            return
+
+        # Calculate class separation metrics for each round
+        separation_scores = []
+
+        for training_indices in training_history:
+            X_train = X_full[training_indices]
+            y_train = y_full[training_indices]
+
+            # Simple separation score: ratio of between-class to within-class variance
+            unique_classes = np.unique(y_train)
+            if len(unique_classes) < 2:
+                separation_scores.append(0)
+                continue
+
+            overall_mean = np.mean(X_train, axis=0)
+            between_var = 0
+            within_var = 0
+
+            for cls in unique_classes:
+                class_mask = y_train == cls
+                class_mean = np.mean(X_train[class_mask], axis=0)
+                between_var += np.sum(class_mask) * np.sum((class_mean - overall_mean) ** 2)
+                within_var += np.sum((X_train[class_mask] - class_mean) ** 2)
+
+            if within_var > 0:
+                separation_score = between_var / within_var
+            else:
+                separation_score = 0
+
+            separation_scores.append(separation_score)
+
+        # Plot separation evolution
+        fig, ax = plt.subplots(figsize=(12, 6))
+        rounds = list(range(1, len(separation_scores) + 1))
+
+        ax.plot(rounds, separation_scores, 'o-', linewidth=2, markersize=8, color=self.colors[0])
+        ax.set_xlabel('Adaptive Round')
+        ax.set_ylabel('Separation Score')
+        ax.set_title('Class Separation Evolution in Training Set', fontweight='bold', fontsize=14)
+        ax.grid(True, alpha=0.3)
+
+        # Add trend line
+        if len(separation_scores) > 1:
+            z = np.polyfit(rounds, separation_scores, 1)
+            p = np.poly1d(z)
+            ax.plot(rounds, p(rounds), "--", color='red', alpha=0.7,
+                   label=f'Trend: {z[0]:.3f}x + {z[1]:.3f}')
+            ax.legend()
+
+        plt.tight_layout()
+        plt.savefig(self.subdirs['comparisons'] / 'class_separation_evolution.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
+    def plot_confidence_evolution(self, adaptive_model, X_full, y_full, training_history):
+        """Plot confidence evolution across rounds"""
+        print("🎲 Creating confidence evolution analysis...")
+
+        if not training_history or not hasattr(adaptive_model.model, 'predict_proba'):
+            return
+
+        confidence_evolution = []
+
+        for training_indices in training_history:
+            # Train temporary model (simplified - in practice you'd use the actual trained model)
+            X_train = X_full[training_indices]
+            y_train = y_full[training_indices]
+
+            try:
+                # Get prediction probabilities
+                probas = adaptive_model.model.predict_proba(X_full)
+                max_probas = np.max(probas, axis=1)
+                avg_confidence = np.mean(max_probas)
+                confidence_evolution.append(avg_confidence)
+            except:
+                confidence_evolution.append(0.5)  # Default value
+
+        # Plot confidence evolution
+        fig, ax = plt.subplots(figsize=(12, 6))
+        rounds = list(range(1, len(confidence_evolution) + 1))
+
+        ax.plot(rounds, confidence_evolution, 'o-', linewidth=2, markersize=8, color=self.colors[1])
+        ax.set_xlabel('Adaptive Round')
+        ax.set_ylabel('Average Prediction Confidence')
+        ax.set_title('Prediction Confidence Evolution', fontweight='bold', fontsize=14)
+        ax.set_ylim(0, 1)
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(self.subdirs['performance'] / 'confidence_evolution.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
+    def create_interactive_dashboard(self, round_stats, training_history, X_full, y_full, feature_names):
+        """Create interactive dashboard with all visualizations"""
+        print("📊 Creating interactive dashboard...")
+
+        # Create comprehensive dashboard HTML
+        dashboard_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Adaptive DBNN Dashboard - {self.dataset_name}</title>
+            <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                         color: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; }}
+                .plot-container {{ margin: 20px 0; border: 1px solid #ddd; border-radius: 5px; padding: 15px; }}
+                .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin: 20px 0; }}
+                .stat-card {{ background: #f8f9fa; padding: 15px; border-radius: 5px; text-align: center; }}
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <h1>🎯 Adaptive DBNN Analysis Dashboard</h1>
+                <h2>Dataset: {self.dataset_name}</h2>
+                <p>Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+            </div>
+
+            <div class="stats">
+                <div class="stat-card">
+                    <h3>Total Rounds</h3>
+                    <p style="font-size: 24px; font-weight: bold; color: #667eea;">{len(round_stats) if round_stats else 0}</p>
+                </div>
+                <div class="stat-card">
+                    <h3>Final Training Size</h3>
+                    <p style="font-size: 24px; font-weight: bold; color: #28a745;">{training_history[-1] if training_history else 0}</p>
+                </div>
+                <div class="stat-card">
+                    <h3>Best Accuracy</h3>
+                    <p style="font-size: 24px; font-weight: bold; color: #dc3545;">{max([s['test_accuracy'] for s in round_stats])*100:.1f}%</p>
+                </div>
+                <div class="stat-card">
+                    <h3>Features</h3>
+                    <p style="font-size: 24px; font-weight: bold; color: #ffc107;">{len(feature_names)}</p>
+                </div>
+            </div>
+
+            <div class="plot-container">
+                <h3>📈 Performance Evolution</h3>
+                <div id="performance-plot"></div>
+            </div>
+
+            <div class="plot-container">
+                <h3>🔍 Sample Selection Analysis</h3>
+                <div id="sample-plot"></div>
+            </div>
+
+            <script>
+                // Performance data
+                const rounds = {[s['round'] for s in round_stats] if round_stats else []};
+                const trainAcc = {[s['train_accuracy']*100 for s in round_stats] if round_stats else []};
+                const testAcc = {[s['test_accuracy']*100 for s in round_stats] if round_stats else []};
+
+                // Create performance plot
+                Plotly.newPlot('performance-plot', [
+                    {{x: rounds, y: trainAcc, type: 'scatter', name: 'Training Accuracy', line: {{color: '#1f77b4'}}}},
+                    {{x: rounds, y: testAcc, type: 'scatter', name: 'Test Accuracy', line: {{color: '#ff7f0e'}}}}
+                ], {{title: 'Accuracy Evolution Across Rounds'}});
+
+                // Sample selection data
+                const trainingSizes = {[len(indices) for indices in training_history] if training_history else []};
+
+                Plotly.newPlot('sample-plot', [
+                    {{x: rounds, y: trainingSizes, type: 'scatter', name: 'Training Size', line: {{color: '#2ca02c'}}}}
+                ], {{title: 'Training Set Growth'}});
+            </script>
+        </body>
+        </html>
+        """
+
+        with open(self.subdirs['interactive'] / 'dashboard.html', 'w') as f:
+            f.write(dashboard_html)
+
+    def plot_final_model_analysis(self, adaptive_model, X_full, y_full, feature_names):
+        """Create final model analysis plots"""
+        print("🏆 Creating final model analysis...")
+
+        try:
+            # Get predictions
+            y_pred = adaptive_model.model.predict(X_full)
+
+            # Confusion Matrix
+            fig, ax = plt.subplots(figsize=(10, 8))
+            cm = confusion_matrix(y_full, y_pred)
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax)
+            ax.set_xlabel('Predicted')
+            ax.set_ylabel('Actual')
+            ax.set_title('Final Model Confusion Matrix', fontweight='bold', fontsize=14)
+            plt.tight_layout()
+            plt.savefig(self.subdirs['performance'] / 'final_confusion_matrix.png', dpi=300, bbox_inches='tight')
+            plt.close()
+
+            # Classification Report
+            report = classification_report(y_full, y_pred, output_dict=True)
+            report_df = pd.DataFrame(report).transpose()
+            report_df.to_csv(self.subdirs['performance'] / 'classification_report.csv')
+
+        except Exception as e:
+            print(f"⚠️ Final model analysis failed: {e}")
+
+
+class AdaptiveVisualizer3D:
+    """3D Visualization system for adaptive learning training samples"""
+
+    def __init__(self, output_dir='adaptive_3d_visualizations'):
+        self.output_dir = output_dir
+        os.makedirs(output_dir, exist_ok=True)
+
+    def create_3d_training_network(self, X_full, y_full, training_indices, feature_names=None,
+                                 round_num=None, method='pca'):
+        """Create 3D visualization of training samples forming class networks"""
+
+        print("🎨 Creating 3D training sample network visualization...")
+
+        # Reduce to 3D for visualization
+        if method == 'pca':
+            reducer = PCA(n_components=3, random_state=42)
+            X_3d = reducer.fit_transform(X_full)
+            explained_var = sum(reducer.explained_variance_ratio_)
+            print(f"📊 PCA explained variance: {explained_var:.3f}")
+        else:  # tsne
+            reducer = TSNE(n_components=3, random_state=42, perplexity=30)
+            X_3d = reducer.fit_transform(X_full)
+            explained_var = 1.0
+
+        # Separate training and non-training samples
+        train_mask = np.zeros(len(X_full), dtype=bool)
+        train_mask[training_indices] = True
+
+        X_train_3d = X_3d[train_mask]
+        y_train = y_full[train_mask]
+        X_other_3d = X_3d[~train_mask]
+        y_other = y_full[~train_mask]
+
+        # Create the plot
+        fig = plt.figure(figsize=(15, 10))
+
+        # 3D scatter plot
+        ax = fig.add_subplot(111, projection='3d')
+
+        # Plot all samples (transparent)
+        unique_classes = np.unique(y_full)
+        colors = plt.cm.Set1(np.linspace(0, 1, len(unique_classes)))
+
+        # Plot non-training samples (faint)
+        for i, cls in enumerate(unique_classes):
+            mask = y_other == cls
+            if np.any(mask):
+                ax.scatter(X_other_3d[mask, 0], X_other_3d[mask, 1], X_other_3d[mask, 2],
+                          c=[colors[i]], alpha=0.1, s=10, label=f'Class {cls} (other)')
+
+        # Plot training samples (bright)
+        for i, cls in enumerate(unique_classes):
+            mask = y_train == cls
+            if np.any(mask):
+                ax.scatter(X_train_3d[mask, 0], X_train_3d[mask, 1], X_train_3d[mask, 2],
+                          c=[colors[i]], alpha=0.8, s=50, label=f'Class {cls} (training)',
+                          edgecolors='black', linewidth=0.5)
+
+        # Create network connections within each class
+        self._add_class_networks(ax, X_train_3d, y_train, colors)
+
+        # Customize the plot
+        ax.set_xlabel(f'Component 1 ({explained_var*100:.1f}% variance)')
+        ax.set_ylabel('Component 2')
+        ax.set_zlabel('Component 3')
+
+        title = '3D Training Sample Network'
+        if round_num is not None:
+            title += f' - Round {round_num}'
+        ax.set_title(title, fontsize=14, fontweight='bold')
+
+        # Legend
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+
+        # Save the plot
+        filename = f'training_network_round_{round_num}.png' if round_num else 'training_network_final.png'
+        plt.tight_layout()
+        plt.savefig(f'{self.output_dir}/{filename}', dpi=300, bbox_inches='tight')
+        plt.close()
+
+        print(f"✅ 3D network visualization saved: {filename}")
+
+        # Also create interactive Plotly version
+        self._create_interactive_3d_plot(X_3d, y_full, train_mask, training_indices, round_num)
+
+    def _add_class_networks(self, ax, X_3d, y_train, colors):
+        """Add network connections between training samples of the same class"""
+        unique_classes = np.unique(y_train)
+
+        for i, cls in enumerate(unique_classes):
+            class_mask = y_train == cls
+            class_points = X_3d[class_mask]
+
+            if len(class_points) < 2:
+                continue
+
+            # Create a minimum spanning tree for the class
+            try:
+                # Calculate distance matrix
+                from scipy.spatial import distance_matrix
+                dist_matrix = distance_matrix(class_points, class_points)
+
+                # Create graph and minimum spanning tree
+                G = nx.Graph()
+                for j in range(len(class_points)):
+                    for k in range(j+1, len(class_points)):
+                        G.add_edge(j, k, weight=dist_matrix[j, k])
+
+                mst = nx.minimum_spanning_tree(G)
+
+                # Plot MST edges
+                for edge in mst.edges():
+                    point1 = class_points[edge[0]]
+                    point2 = class_points[edge[1]]
+                    ax.plot([point1[0], point2[0]],
+                           [point1[1], point2[1]],
+                           [point1[2], point2[2]],
+                           color=colors[i], alpha=0.6, linewidth=1.5)
+
+            except Exception as e:
+                print(f"⚠️ Could not create MST for class {cls}: {e}")
+
+    def _create_interactive_3d_plot(self, X_3d, y_full, train_mask, training_indices, round_num):
+        """Create interactive 3D plot using Plotly"""
+
+        # Create DataFrame for Plotly
+        import pandas as pd
+        df = pd.DataFrame({
+            'x': X_3d[:, 0],
+            'y': X_3d[:, 1],
+            'z': X_3d[:, 2],
+            'class': y_full,
+            'type': ['Training' if i in training_indices else 'Other' for i in range(len(X_3d))],
+            'index': range(len(X_3d))
+        })
+
+        # Create interactive scatter plot
+        fig = px.scatter_3d(df, x='x', y='y', z='z',
+                           color='class',
+                           symbol='type',
+                           hover_data=['index'],
+                           title=f'Interactive 3D Training Network - Round {round_num}' if round_num else 'Interactive 3D Training Network - Final',
+                           opacity=0.7)
+
+        # Update marker sizes
+        fig.update_traces(marker=dict(size=5 if df['type'] == 'Other' else 8),
+                         selector=dict(mode='markers'))
+
+        # Save interactive plot
+        filename = f'interactive_network_round_{round_num}.html' if round_num else 'interactive_network_final.html'
+        fig.write_html(f'{self.output_dir}/{filename}')
+
+        print(f"✅ Interactive 3D visualization saved: {filename}")
+
+    def create_adaptive_learning_animation(self, X_full, y_full, training_history):
+        """Create animation showing evolution of training samples"""
+        print("🎬 Creating adaptive learning animation...")
+
+        # Reduce to 3D once for consistency
+        reducer = PCA(n_components=3, random_state=42)
+        X_3d = reducer.fit_transform(X_full)
+
+        frames = []
+
+        for round_num, training_indices in enumerate(training_history):
+            fig = plt.figure(figsize=(12, 8))
+            ax = fig.add_subplot(111, projection='3d')
+
+            # Plot all samples
+            unique_classes = np.unique(y_full)
+            colors = plt.cm.Set1(np.linspace(0, 1, len(unique_classes)))
+
+            # Plot non-training samples
+            other_mask = ~np.isin(range(len(X_full)), training_indices)
+            for i, cls in enumerate(unique_classes):
+                class_mask = y_full == cls
+                mask = class_mask & other_mask
+                if np.any(mask):
+                    ax.scatter(X_3d[mask, 0], X_3d[mask, 1], X_3d[mask, 2],
+                              c=[colors[i]], alpha=0.1, s=5)
+
+            # Plot training samples
+            for i, cls in enumerate(unique_classes):
+                class_mask = y_full == cls
+                mask = class_mask & np.isin(range(len(X_full)), training_indices)
+                if np.any(mask):
+                    ax.scatter(X_3d[mask, 0], X_3d[mask, 1], X_3d[mask, 2],
+                              c=[colors[i]], alpha=0.8, s=30, label=f'Class {cls}',
+                              edgecolors='black', linewidth=0.5)
+
+            ax.set_title(f'Adaptive Learning - Round {round_num + 1}\nTraining Samples: {len(training_indices)}',
+                        fontsize=12, fontweight='bold')
+            ax.set_xlabel('Component 1')
+            ax.set_ylabel('Component 2')
+            ax.set_zlabel('Component 3')
+
+            frames.append(fig)
+            plt.close()
+
+        # Create animation (you'll need to install imageio: pip install imageio)
+        try:
+            import imageio
+            images = []
+            for fig in frames:
+                fig.canvas.draw()
+                image = np.frombuffer(fig.canvas.tostring_rgb(), dtype='uint8')
+                image = image.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+                images.append(image)
+
+            imageio.mimsave(f'{self.output_dir}/adaptive_learning_evolution.gif',
+                           images, fps=2, loop=0)
+            print("✅ Adaptive learning animation saved: adaptive_learning_evolution.gif")
+
+        except ImportError:
+            print("⚠️ imageio not installed, skipping animation creation")
+
+class AdaptiveDBNNGUI:
+    """
+    Enhanced GUI for Adaptive DBNN with feature selection and hyperparameter configuration.
+    Provides an interactive interface for the adaptive learning system.
+    """
+
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Enhanced Adaptive DBNN with Feature Selection")
+        self.root.geometry("1400x900")
+
+        self.adaptive_model = None
+        self.model_trained = False
+        self.data_loaded = False
+        self.current_data_file = None
+        self.original_data = None
+
+        # Feature selection state
+        self.feature_vars = {}
+        self.target_var = tk.StringVar()
+
+        # Configuration management
+        self.config_vars = {}
+
+        # Data file variable
+        self.data_file_var = tk.StringVar()
+
+        # Adaptive learning parameters
+        self.max_rounds_var = tk.StringVar(value="20")
+        self.max_samples_var = tk.StringVar(value="25")
+        self.initial_samples_var = tk.StringVar(value="5")
+
+        # DBNN core parameters
+        self.resolution_var = tk.StringVar(value="100")
+        self.gain_var = tk.StringVar(value="2.0")
+        self.margin_var = tk.StringVar(value="0.2")
+        self.patience_var = tk.StringVar(value="10")
+
+        # Adaptive learning options - ADD VISUALIZATION TOGGLE
+        self.enable_acid_var = tk.BooleanVar(value=True)
+        self.enable_kl_var = tk.BooleanVar(value=False)
+        self.disable_sample_limit_var = tk.BooleanVar(value=False)
+        self.enable_visualization_var = tk.BooleanVar(value=True)  # NEW: Visualization toggle
+
+        self.setup_gui()
+
+    def setup_gui(self):
+        """Setup the main GUI interface with tabs and horizontal navigation."""
+        # Main frame
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Create horizontal navigation frame for tab buttons
+        nav_frame = ttk.Frame(main_frame)
+        nav_frame.pack(fill=tk.X, pady=5)
+
+        # Create notebook for tabs
+        self.notebook = ttk.Notebook(main_frame)
+        self.notebook.pack(fill=tk.BOTH, expand=True, pady=10)
+
+        # Data Management Tab
+        self.data_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.data_tab, text="📊 Data Management")
+
+        # Hyperparameters Tab
+        self.hyperparams_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.hyperparams_tab, text="⚙️ Hyperparameters")
+
+        # Training Tab
+        self.training_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.training_tab, text="🚀 Training & Evaluation")
+
+        # Create navigation buttons for tabs
+        ttk.Button(nav_frame, text="📊 Data",
+                   command=lambda: self.notebook.select(0)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(nav_frame, text="⚙️ Parameters",
+                   command=lambda: self.notebook.select(1)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(nav_frame, text="🚀 Training",
+                   command=lambda: self.notebook.select(2)).pack(side=tk.LEFT, padx=2)
+
+        # Setup each tab
+        self.setup_data_tab()
+        self.setup_hyperparameters_tab()
+        self.setup_training_tab()
+
+        # Status bar
+        self.status_var = tk.StringVar(value="Ready")
+        status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN)
+        status_bar.pack(fill=tk.X, side=tk.BOTTOM)
+
+    def setup_data_tab(self):
+        """Setup data management tab with feature selection."""
+        # Dataset selection frame
+        dataset_frame = ttk.LabelFrame(self.data_tab, text="Dataset Selection", padding="10")
+        dataset_frame.pack(fill=tk.X, pady=5)
+
+        ttk.Label(dataset_frame, text="Data File:").grid(row=0, column=0, sticky=tk.W, padx=5)
+        self.data_file_entry = ttk.Entry(dataset_frame, textvariable=self.data_file_var, width=50)
+        self.data_file_entry.grid(row=0, column=1, padx=5, sticky=tk.EW)
+
+        ttk.Button(dataset_frame, text="Browse", command=self.browse_data_file).grid(row=0, column=2, padx=5)
+        ttk.Button(dataset_frame, text="Load Data", command=self.load_data_file).grid(row=0, column=3, padx=5)
+
+        # Feature selection frame
+        feature_frame = ttk.LabelFrame(self.data_tab, text="Feature Selection", padding="10")
+        feature_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+
+        # Target selection
+        ttk.Label(feature_frame, text="Target Column:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        self.target_combo = ttk.Combobox(feature_frame, textvariable=self.target_var, width=20, state="readonly")
+        self.target_combo.grid(row=0, column=1, padx=5, pady=5, sticky=tk.W)
+        self.target_combo.bind('<<ComboboxSelected>>', self.on_target_selected)
+
+        # Feature selection area with scrollbar
+        ttk.Label(feature_frame, text="Feature Columns:").grid(row=1, column=0, sticky=tk.NW, padx=5, pady=5)
+
+        # Create frame for feature list with scrollbar
+        feature_list_frame = ttk.Frame(feature_frame)
+        feature_list_frame.grid(row=1, column=1, columnspan=3, sticky=tk.NSEW, padx=5, pady=5)
+
+        # Create canvas and scrollbar for feature list
+        self.feature_canvas = tk.Canvas(feature_list_frame, height=200)
+        feature_scrollbar = ttk.Scrollbar(feature_list_frame, orient="vertical", command=self.feature_canvas.yview)
+        self.feature_scroll_frame = ttk.Frame(self.feature_canvas)
+
+        self.feature_scroll_frame.bind(
+            "<Configure>",
+            lambda e: self.feature_canvas.configure(scrollregion=self.feature_canvas.bbox("all"))
+        )
+
+        self.feature_canvas.create_window((0, 0), window=self.feature_scroll_frame, anchor="nw")
+        self.feature_canvas.configure(yscrollcommand=feature_scrollbar.set)
+
+        self.feature_canvas.pack(side="left", fill="both", expand=True)
+        feature_scrollbar.pack(side="right", fill="y")
+
+        # Feature selection buttons
+        button_frame = ttk.Frame(feature_frame)
+        button_frame.grid(row=2, column=1, columnspan=3, sticky=tk.W, padx=5, pady=5)
+
+        ttk.Button(button_frame, text="Select All Features",
+                  command=self.select_all_features).pack(side=tk.LEFT, padx=2)
+        ttk.Button(button_frame, text="Deselect All Features",
+                  command=self.deselect_all_features).pack(side=tk.LEFT, padx=2)
+        ttk.Button(button_frame, text="Select Only Numeric",
+                  command=self.select_numeric_features).pack(side=tk.LEFT, padx=2)
+        ttk.Button(button_frame, text="Apply Selection",
+                  command=self.apply_feature_selection).pack(side=tk.LEFT, padx=2)
+
+        # Data info display
+        self.data_info_text = scrolledtext.ScrolledText(feature_frame, height=8, width=80)
+        self.data_info_text.grid(row=3, column=0, columnspan=4, sticky=tk.NSEW, pady=5)
+        self.data_info_text.config(state=tk.DISABLED)
+
+        # Configure grid weights
+        self.data_tab.columnconfigure(0, weight=1)
+        self.data_tab.rowconfigure(0, weight=1)
+        feature_frame.columnconfigure(1, weight=1)
+        feature_frame.rowconfigure(1, weight=1)
+        feature_list_frame.columnconfigure(0, weight=1)
+        feature_list_frame.rowconfigure(0, weight=1)
+
+    def setup_hyperparameters_tab(self):
+        """Setup hyperparameters configuration tab."""
+        # Create main frame with scrollbar
+        main_frame = ttk.Frame(self.hyperparams_tab)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Create canvas and scrollbar
+        canvas = tk.Canvas(main_frame)
+        scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        # Pack canvas and scrollbar
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # DBNN Core Parameters Frame
+        core_frame = ttk.LabelFrame(scrollable_frame, text="DBNN Core Parameters", padding="10")
+        core_frame.pack(fill=tk.X, pady=5, padx=10)
+
+        # Core parameters
+        core_params = [
+            ("resolution", "Resolution:", "100", "Number of bins for feature discretization"),
+            ("gain", "Gain:", "2.0", "Weight update intensity"),
+            ("margin", "Margin:", "0.2", "Classification tolerance"),
+            ("patience", "Patience:", "10", "Early stopping rounds"),
+            ("max_epochs", "Max Epochs:", "100", "Maximum training epochs"),
+            ("min_improvement", "Min Improvement:", "0.1", "Minimum improvement threshold")
+        ]
+
+        for i, (key, label, default, help_text) in enumerate(core_params):
+            ttk.Label(core_frame, text=label).grid(row=i, column=0, sticky=tk.W, padx=5, pady=2)
+            var = tk.StringVar(value=default)
+            entry = ttk.Entry(core_frame, textvariable=var, width=12)
+            entry.grid(row=i, column=1, padx=5, pady=2)
+            ttk.Label(core_frame, text=help_text, foreground="gray").grid(row=i, column=2, sticky=tk.W, padx=5, pady=2)
+            self.config_vars[f"dbnn_{key}"] = var
+
+        # Adaptive Learning Parameters Frame
+        adaptive_frame = ttk.LabelFrame(scrollable_frame, text="Adaptive Learning Parameters", padding="10")
+        adaptive_frame.pack(fill=tk.X, pady=5, padx=10)
+
+        # Adaptive parameters
+        ttk.Label(adaptive_frame, text="Max Adaptive Rounds:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=2)
+        max_rounds_entry = ttk.Entry(adaptive_frame, textvariable=self.max_rounds_var, width=12)
+        max_rounds_entry.grid(row=0, column=1, padx=5, pady=2)
+        ttk.Label(adaptive_frame, text="Maximum adaptive learning rounds", foreground="gray").grid(row=0, column=2, sticky=tk.W, padx=5, pady=2)
+
+        ttk.Label(adaptive_frame, text="Max Samples/Round:").grid(row=0, column=3, sticky=tk.W, padx=5, pady=2)
+        max_samples_entry = ttk.Entry(adaptive_frame, textvariable=self.max_samples_var, width=12)
+        max_samples_entry.grid(row=0, column=4, padx=5, pady=2)
+        ttk.Label(adaptive_frame, text="Maximum samples to add per round", foreground="gray").grid(row=0, column=5, sticky=tk.W, padx=5, pady=2)
+
+        ttk.Label(adaptive_frame, text="Initial Samples/Class:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=2)
+        initial_samples_entry = ttk.Entry(adaptive_frame, textvariable=self.initial_samples_var, width=12)
+        initial_samples_entry.grid(row=1, column=1, padx=5, pady=2)
+        ttk.Label(adaptive_frame, text="Initial samples per class for training", foreground="gray").grid(row=1, column=2, sticky=tk.W, padx=5, pady=2)
+
+        # Additional adaptive parameters
+        adaptive_params = [
+            ("margin_tolerance", "Margin Tolerance:", "0.15", "Tolerance for margin-based selection"),
+            ("kl_threshold", "KL Threshold:", "0.1", "Threshold for KL divergence"),
+            ("training_convergence_epochs", "Convergence Epochs:", "50", "Epochs for training convergence"),
+            ("min_training_accuracy", "Min Training Accuracy:", "0.95", "Minimum training accuracy"),
+            ("adaptive_margin_relaxation", "Margin Relaxation:", "0.1", "Margin relaxation factor")
+        ]
+
+        for i, (key, label, default, help_text) in enumerate(adaptive_params):
+            row = i + 2
+            ttk.Label(adaptive_frame, text=label).grid(row=row, column=0, sticky=tk.W, padx=5, pady=2)
+            var = tk.StringVar(value=default)
+            entry = ttk.Entry(adaptive_frame, textvariable=var, width=12)
+            entry.grid(row=row, column=1, padx=5, pady=2)
+            ttk.Label(adaptive_frame, text=help_text, foreground="gray").grid(row=row, column=2, sticky=tk.W, padx=5, pady=2)
+            self.config_vars[f"adaptive_{key}"] = var
+
+        # Advanced Adaptive Options
+        ttk.Label(adaptive_frame, text="Advanced Options:").grid(row=6, column=0, sticky=tk.W, padx=5, pady=2)
+
+        ttk.Checkbutton(adaptive_frame, text="Enable Acid Test", variable=self.enable_acid_var).grid(row=6, column=1, sticky=tk.W, padx=5)
+        ttk.Checkbutton(adaptive_frame, text="Enable KL Divergence", variable=self.enable_kl_var).grid(row=6, column=2, sticky=tk.W, padx=5)
+        ttk.Checkbutton(adaptive_frame, text="Disable Sample Limit", variable=self.disable_sample_limit_var).grid(row=6, column=3, sticky=tk.W, padx=5)
+
+        # Control buttons frame
+        button_frame = ttk.Frame(scrollable_frame)
+        button_frame.pack(fill=tk.X, pady=10, padx=10)
+
+        ttk.Button(button_frame, text="Load Default Parameters",
+                  command=self.load_default_parameters).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Save Current Parameters",
+                  command=self.save_current_parameters).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Apply Parameters",
+                  command=self.apply_hyperparameters).pack(side=tk.RIGHT, padx=5)
+
+        # Advanced Adaptive Options - ADD VISUALIZATION TOGGLE
+        ttk.Label(adaptive_frame, text="Advanced Options:").grid(row=6, column=0, sticky=tk.W, padx=5, pady=2)
+
+        ttk.Checkbutton(adaptive_frame, text="Enable Acid Test", variable=self.enable_acid_var).grid(row=6, column=1, sticky=tk.W, padx=5)
+        ttk.Checkbutton(adaptive_frame, text="Enable KL Divergence", variable=self.enable_kl_var).grid(row=6, column=2, sticky=tk.W, padx=5)
+        ttk.Checkbutton(adaptive_frame, text="Disable Sample Limit", variable=self.disable_sample_limit_var).grid(row=6, column=3, sticky=tk.W, padx=5)
+        ttk.Checkbutton(adaptive_frame, text="Enable Visualization", variable=self.enable_visualization_var).grid(row=7, column=1, sticky=tk.W, padx=5)  # NEW
+
+    def setup_training_tab(self):
+        """Setup training and evaluation tab."""
+        # Control frame
+        control_frame = ttk.LabelFrame(self.training_tab, text="Model Control", padding="10")
+        control_frame.pack(fill=tk.X, pady=5)
+
+        ttk.Button(control_frame, text="Initialize Model",
+                  command=self.initialize_model, width=15).pack(side=tk.LEFT, padx=2)
+        ttk.Button(control_frame, text="Run Adaptive Learning",
+                  command=self.run_adaptive_learning, width=18).pack(side=tk.LEFT, padx=2)
+        ttk.Button(control_frame, text="Evaluate Model",
+                  command=self.evaluate_model, width=15).pack(side=tk.LEFT, padx=2)
+        ttk.Button(control_frame, text="Save Model",
+                  command=self.save_model, width=12).pack(side=tk.LEFT, padx=2)
+        ttk.Button(control_frame, text="Load Model",
+                  command=self.load_model, width=12).pack(side=tk.LEFT, padx=2)
+
+        # Visualization frame
+        viz_frame = ttk.LabelFrame(self.training_tab, text="Visualization", padding="10")
+        viz_frame.pack(fill=tk.X, pady=5)
+
+        ttk.Button(viz_frame, text="Basic Visualizations",
+                  command=self.show_visualizations, width=15).pack(side=tk.LEFT, padx=2)
+        ttk.Button(viz_frame, text="Advanced Analysis",
+                  command=self.show_advanced_analysis, width=15).pack(side=tk.LEFT, padx=2)
+
+        # Create a notebook for output and results
+        output_notebook = ttk.Notebook(self.training_tab)
+        output_notebook.pack(fill=tk.BOTH, expand=True, pady=5)
+
+        # Output frame
+        output_frame = ttk.Frame(output_notebook)
+        output_notebook.add(output_frame, text="📝 Output Log")
+
+        self.output_text = scrolledtext.ScrolledText(output_frame, height=15, width=100)
+        self.output_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Results frame
+        results_frame = ttk.Frame(output_notebook)
+        output_notebook.add(results_frame, text="📊 Results")
+
+        self.results_text = scrolledtext.ScrolledText(results_frame, height=15, width=100)
+        self.results_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.results_text.config(state=tk.DISABLED)
+
+    def browse_data_file(self):
+        """Browse for data file."""
+        file_path = filedialog.askopenfilename(
+            title="Select Data File",
+            filetypes=[("CSV files", "*.csv"), ("DAT files", "*.dat"), ("All files", "*.*")]
+        )
+        if file_path:
+            self.data_file_var.set(file_path)
+            self.current_data_file = file_path
+            self.log_output(f"📁 Selected file: {file_path}")
+
+            # Try to load configuration automatically
+            self.load_configuration_for_file(file_path)
+
+    def load_data_file(self):
+        """Load data file and populate feature selection."""
+        file_path = self.data_file_var.get()
+        if not file_path or not os.path.exists(file_path):
+            messagebox.showwarning("Warning", "Please select a valid data file.")
+            return
+
+        try:
+            # Load data
+            if file_path.endswith('.csv'):
+                df = pd.read_csv(file_path)
+            elif file_path.endswith('.dat'):
+                # Try to load DAT file with space separation
+                try:
+                    df = pd.read_csv(file_path, delimiter=r'\s+')
+                except:
+                    df = pd.read_csv(file_path)  # Fallback to default
+            else:
+                messagebox.showerror("Error", "Unsupported file format.")
+                return
+
+            self.current_data_file = file_path
+            self.original_data = df.copy()
+
+            # Update data info
+            self.update_data_info(df)
+
+            # Update feature selection UI
+            self.update_feature_selection_ui(df)
+
+            self.data_loaded = True
+            self.log_output(f"✅ Data loaded successfully: {len(df)} samples, {len(df.columns)} columns")
+
+        except Exception as e:
+            self.log_output(f"❌ Error loading data: {e}")
+
+    def update_data_info(self, df):
+        """Update data information display."""
+        self.data_info_text.config(state=tk.NORMAL)
+        self.data_info_text.delete(1.0, tk.END)
+
+        info_text = f"""📊 DATA INFORMATION
+{'='*40}
+Samples: {len(df)}
+Features: {len(df.columns)}
+Columns: {', '.join(df.columns.tolist())}
+
+Data Types:
+"""
+        for col in df.columns:
+            dtype = df[col].dtype
+            unique_count = df[col].nunique()
+            info_text += f"  {col}: {dtype} (unique: {unique_count})\n"
+
+        missing_values = df.isnull().sum()
+        if missing_values.any():
+            info_text += f"\nMissing Values:\n"
+            for col in df.columns:
+                if missing_values[col] > 0:
+                    info_text += f"  {col}: {missing_values[col]}\n"
+
+        self.data_info_text.insert(1.0, info_text)
+        self.data_info_text.config(state=tk.DISABLED)
+
+    def update_feature_selection_ui(self, df):
+        """Update the feature selection UI with available columns."""
+        # Clear existing feature checkboxes
+        for widget in self.feature_scroll_frame.winfo_children():
+            widget.destroy()
+
+        self.feature_vars = {}
+        columns = df.columns.tolist()
+
+        # Update target combo with ALL columns
+        self.target_combo['values'] = columns
+
+        # Auto-select target if not set
+        if not self.target_var.get() and columns:
+            # Try common target column names
+            target_candidates = ['target', 'class', 'label', 'y', 'output', 'result']
+            for candidate in target_candidates + [columns[-1]]:
+                if candidate in columns:
+                    self.target_var.set(candidate)
+                    break
+
+        # Create feature checkboxes
+        for i, col in enumerate(columns):
+            var = tk.BooleanVar(value=col != self.target_var.get())  # Auto-select non-target columns
+            self.feature_vars[col] = var
+
+            # Determine column type for styling
+            if pd.api.types.is_numeric_dtype(df[col]):
+                col_type = "numeric"
+                color = "blue"
+            elif pd.api.types.is_string_dtype(df[col]):
+                col_type = "categorical"
+                color = "green"
+            else:
+                col_type = "other"
+                color = "gray"
+
+            display_text = f"{col} ({col_type})"
+
+            # Highlight target column
+            if col == self.target_var.get():
+                display_text = f"🎯 {display_text} [TARGET]"
+                # Don't allow target to be selected as feature
+                cb = ttk.Checkbutton(self.feature_scroll_frame, text=display_text, variable=var, state="disabled")
+            else:
+                cb = ttk.Checkbutton(self.feature_scroll_frame, text=display_text, variable=var)
+
+            cb.pack(anchor=tk.W, padx=5, pady=2)
+
+        self.log_output(f"🔧 Available columns: {len(columns)} total")
+        self.log_output(f"🎯 Current target: {self.target_var.get()}")
+
+    def on_target_selected(self, event):
+        """Handle target column selection."""
+        # When target changes, update feature selection states
+        if hasattr(self, 'feature_vars') and self.target_var.get():
+            for col, var in self.feature_vars.items():
+                if col == self.target_var.get():
+                    var.set(False)
+                else:
+                    var.set(True)
+
+    def select_all_features(self):
+        """Select all features."""
+        for col, var in self.feature_vars.items():
+            if col != self.target_var.get():  # Don't select target as feature
+                var.set(True)
+
+    def deselect_all_features(self):
+        """Deselect all features."""
+        for var in self.feature_vars.values():
+            var.set(False)
+
+    def select_numeric_features(self):
+        """Select only numeric features."""
+        if not hasattr(self, 'original_data'):
+            return
+
+        df = self.original_data
+        for col, var in self.feature_vars.items():
+            if col != self.target_var.get() and pd.api.types.is_numeric_dtype(df[col]):
+                var.set(True)
+            else:
+                var.set(False)
+
+    def apply_feature_selection(self):
+        """Apply the current feature selection."""
+        if not self.data_loaded:
+            messagebox.showwarning("Warning", "Please load data first.")
+            return
+
+        try:
+            # Get selected features
+            selected_features = []
+            for col, var in self.feature_vars.items():
+                if var.get() and col != self.target_var.get():
+                    selected_features.append(col)
+
+            # Get target column
+            target_column = self.target_var.get()
+
+            if not selected_features:
+                messagebox.showwarning("Warning", "Please select at least one feature.")
+                return
+
+            if not target_column:
+                messagebox.showwarning("Warning", "Please select a target column.")
+                return
+
+            # Initialize adaptive model
+            dataset_name = os.path.splitext(os.path.basename(self.current_data_file))[0]
+
+            # Create configuration
+            config = {
+                'target_column': target_column,
+                'feature_columns': selected_features,
+                'resol': int(self.config_vars.get('dbnn_resolution', tk.StringVar(value="100")).get()),
+                'gain': float(self.config_vars.get('dbnn_gain', tk.StringVar(value="2.0")).get()),
+                'margin': float(self.config_vars.get('dbnn_margin', tk.StringVar(value="0.2")).get()),
+                'patience': int(self.config_vars.get('dbnn_patience', tk.StringVar(value="10")).get()),
+                'max_epochs': int(self.config_vars.get('dbnn_max_epochs', tk.StringVar(value="100")).get()),
+                'min_improvement': float(self.config_vars.get('dbnn_min_improvement', tk.StringVar(value="0.1")).get()),
+
+                'adaptive_learning': {
+                    'enable_adaptive': True,
+                    'initial_samples_per_class': int(self.initial_samples_var.get()),
+                    'max_adaptive_rounds': int(self.max_rounds_var.get()),
+                    'max_margin_samples_per_class': int(self.max_samples_var.get()),
+                    'enable_acid_test': self.enable_acid_var.get(),
+                    'enable_kl_divergence': self.enable_kl_var.get(),
+                    'disable_sample_limit': self.disable_sample_limit_var.get(),
+                    'enable_visualization': self.enable_visualization_var.get(),  # NEW
+                    'margin_tolerance': float(self.config_vars.get('adaptive_margin_tolerance', tk.StringVar(value="0.15")).get()),
+                    'kl_threshold': float(self.config_vars.get('adaptive_kl_threshold', tk.StringVar(value="0.1")).get()),
+                    'patience': int(self.config_vars.get('dbnn_patience', tk.StringVar(value="10")).get()),
+                    'min_improvement': float(self.config_vars.get('dbnn_min_improvement', tk.StringVar(value="0.1")).get()),
+                }
+            }
+
+            self.adaptive_model = AdaptiveDBNN(dataset_name, config)
+
+            self.log_output(f"✅ Feature selection applied")
+            self.log_output(f"🎯 Target: {target_column}")
+            self.log_output(f"📊 Selected features: {len(selected_features)}")
+            self.log_output(f"🔧 Features: {', '.join(selected_features)}")
+
+            # Save configuration
+            self.save_configuration_for_file(self.current_data_file)
+
+        except Exception as e:
+            self.log_output(f"❌ Error applying feature selection: {e}")
+
+    def load_default_parameters(self):
+        """Load default hyperparameters."""
+        try:
+            # Set the instance variables directly
+            self.max_rounds_var.set("20")
+            self.max_samples_var.set("25")
+            self.initial_samples_var.set("5")
+
+            # DBNN Core defaults
+            self.config_vars["dbnn_resolution"].set("100")
+            self.config_vars["dbnn_gain"].set("2.0")
+            self.config_vars["dbnn_margin"].set("0.2")
+            self.config_vars["dbnn_patience"].set("10")
+            self.config_vars["dbnn_max_epochs"].set("100")
+            self.config_vars["dbnn_min_improvement"].set("0.1")
+
+            # Adaptive learning defaults
+            self.config_vars["adaptive_margin_tolerance"].set("0.15")
+            self.config_vars["adaptive_kl_threshold"].set("0.1")
+            self.config_vars["adaptive_training_convergence_epochs"].set("50")
+            self.config_vars["adaptive_min_training_accuracy"].set("0.95")
+            self.config_vars["adaptive_adaptive_margin_relaxation"].set("0.1")
+
+            self.enable_acid_var.set(True)
+            self.enable_kl_var.set(False)
+            self.disable_sample_limit_var.set(False)
+
+            self.log_output("✅ Loaded default parameters")
+
+        except Exception as e:
+            self.log_output(f"❌ Error loading default parameters: {e}")
+
+    def save_current_parameters(self):
+        """Save current hyperparameters to configuration file."""
+        if not self.current_data_file:
+            messagebox.showwarning("Warning", "Please load a data file first.")
+            return
+
+        try:
+            self.save_configuration_for_file(self.current_data_file)
+            self.log_output("✅ Current parameters saved to configuration file")
+
+        except Exception as e:
+            self.log_output(f"❌ Error saving parameters: {e}")
+
+    def save_configuration_for_file(self, file_path):
+        """Save configuration for specific data file."""
+        try:
+            config_file = self.get_config_file_path(file_path)
+
+            config = {
+                'dataset_name': os.path.splitext(os.path.basename(file_path))[0],
+                'target_column': self.target_var.get(),
+                'feature_columns': [col for col, var in self.feature_vars.items() if var.get() and col != self.target_var.get()],
+
+                'resol': int(self.config_vars["dbnn_resolution"].get()),
+                'gain': float(self.config_vars["dbnn_gain"].get()),
+                'margin': float(self.config_vars["dbnn_margin"].get()),
+                'patience': int(self.config_vars["dbnn_patience"].get()),
+                'max_epochs': int(self.config_vars["dbnn_max_epochs"].get()),
+                'min_improvement': float(self.config_vars["dbnn_min_improvement"].get()),
+
+                'adaptive_learning': {
+                    'enable_adaptive': True,
+                    'initial_samples_per_class': int(self.initial_samples_var.get()),
+                    'max_adaptive_rounds': int(self.max_rounds_var.get()),
+                    'max_margin_samples_per_class': int(self.max_samples_var.get()),
+                    'enable_acid_test': self.enable_acid_var.get(),
+                    'enable_kl_divergence': self.enable_kl_var.get(),
+                    'disable_sample_limit': self.disable_sample_limit_var.get(),
+                    'margin_tolerance': float(self.config_vars["adaptive_margin_tolerance"].get()),
+                    'kl_threshold': float(self.config_vars["adaptive_kl_threshold"].get()),
+                    'training_convergence_epochs': int(self.config_vars["adaptive_training_convergence_epochs"].get()),
+                    'min_training_accuracy': float(self.config_vars["adaptive_min_training_accuracy"].get()),
+                    'adaptive_margin_relaxation': float(self.config_vars["adaptive_adaptive_margin_relaxation"].get()),
+                }
+            }
+
+            with open(config_file, 'w') as f:
+                json.dump(config, f, indent=4)
+
+            self.log_output(f"💾 Configuration saved to: {config_file}")
+
+        except Exception as e:
+            self.log_output(f"❌ Error saving configuration: {e}")
+
+    def load_configuration_for_file(self, file_path):
+        """Load configuration for specific data file."""
+        try:
+            config_file = self.get_config_file_path(file_path)
+
+            if os.path.exists(config_file):
+                with open(config_file, 'r') as f:
+                    config = json.load(f)
+
+                # Apply configuration
+                if 'target_column' in config:
+                    self.target_var.set(config['target_column'])
+
+                if 'resol' in config:
+                    self.config_vars["dbnn_resolution"].set(str(config['resol']))
+                if 'gain' in config:
+                    self.config_vars["dbnn_gain"].set(str(config['gain']))
+                if 'margin' in config:
+                    self.config_vars["dbnn_margin"].set(str(config['margin']))
+                if 'patience' in config:
+                    self.config_vars["dbnn_patience"].set(str(config['patience']))
+                if 'max_epochs' in config:
+                    self.config_vars["dbnn_max_epochs"].set(str(config['max_epochs']))
+                if 'min_improvement' in config:
+                    self.config_vars["dbnn_min_improvement"].set(str(config['min_improvement']))
+
+                if 'adaptive_learning' in config:
+                    adaptive_config = config['adaptive_learning']
+                    self.max_rounds_var.set(str(adaptive_config.get('max_adaptive_rounds', 20)))
+                    self.max_samples_var.set(str(adaptive_config.get('max_margin_samples_per_class', 25)))
+                    self.initial_samples_var.set(str(adaptive_config.get('initial_samples_per_class', 5)))
+
+                    self.enable_acid_var.set(adaptive_config.get('enable_acid_test', True))
+                    self.enable_kl_var.set(adaptive_config.get('enable_kl_divergence', False))
+                    self.disable_sample_limit_var.set(adaptive_config.get('disable_sample_limit', False))
+
+                    self.config_vars["adaptive_margin_tolerance"].set(str(adaptive_config.get('margin_tolerance', 0.15)))
+                    self.config_vars["adaptive_kl_threshold"].set(str(adaptive_config.get('kl_threshold', 0.1)))
+                    self.config_vars["adaptive_training_convergence_epochs"].set(str(adaptive_config.get('training_convergence_epochs', 50)))
+                    self.config_vars["adaptive_min_training_accuracy"].set(str(adaptive_config.get('min_training_accuracy', 0.95)))
+                    self.config_vars["adaptive_adaptive_margin_relaxation"].set(str(adaptive_config.get('adaptive_margin_relaxation', 0.1)))
+
+                self.log_output(f"📂 Loaded configuration from: {config_file}")
+            else:
+                self.log_output("ℹ️ No existing configuration found. Using defaults.")
+
+        except Exception as e:
+            self.log_output(f"❌ Error loading configuration: {e}")
+
+    def get_config_file_path(self, data_file_path):
+        """Get configuration file path for data file."""
+        base_name = os.path.splitext(data_file_path)[0]
+        return f"{base_name}_adaptive_config.json"
+
+    def apply_hyperparameters(self):
+        """Apply current hyperparameters to the model."""
+        if not self.data_loaded or self.adaptive_model is None:
+            messagebox.showwarning("Warning", "Please load data and apply feature selection first.")
+            return
+
+        try:
+            # Update model configuration
+            config = {
+                'resol': int(self.config_vars["dbnn_resolution"].get()),
+                'gain': float(self.config_vars["dbnn_gain"].get()),
+                'margin': float(self.config_vars["dbnn_margin"].get()),
+                'patience': int(self.config_vars["dbnn_patience"].get()),
+                'max_epochs': int(self.config_vars["dbnn_max_epochs"].get()),
+                'min_improvement': float(self.config_vars["dbnn_min_improvement"].get()),
+
+                'adaptive_learning': {
+                    'initial_samples_per_class': int(self.initial_samples_var.get()),
+                    'max_adaptive_rounds': int(self.max_rounds_var.get()),
+                    'max_margin_samples_per_class': int(self.max_samples_var.get()),
+                    'enable_acid_test': self.enable_acid_var.get(),
+                    'enable_kl_divergence': self.enable_kl_var.get(),
+                    'disable_sample_limit': self.disable_sample_limit_var.get(),
+                    'margin_tolerance': float(self.config_vars["adaptive_margin_tolerance"].get()),
+                    'kl_threshold': float(self.config_vars["adaptive_kl_threshold"].get()),
+                }
+            }
+
+            self.adaptive_model.config.update(config)
+            if hasattr(self.adaptive_model, 'adaptive_config'):
+                self.adaptive_model.adaptive_config.update(config.get('adaptive_learning', {}))
+
+            self.log_output("✅ Hyperparameters applied to model")
+            self.log_output(f"   Resolution: {self.config_vars['dbnn_resolution'].get()}")
+            self.log_output(f"   Max Rounds: {self.max_rounds_var.get()}")
+            self.log_output(f"   Acid Test: {'Enabled' if self.enable_acid_var.get() else 'Disabled'}")
+
+        except Exception as e:
+            self.log_output(f"❌ Error applying hyperparameters: {e}")
+
+    def initialize_model(self):
+        """Initialize the model."""
+        if not self.data_loaded or self.adaptive_model is None:
+            messagebox.showwarning("Warning", "Please load data and apply feature selection first.")
+            return
+
+        try:
+            # Prepare data with selected features
+            feature_columns = [col for col, var in self.feature_vars.items() if var.get() and col != self.target_var.get()]
+            self.adaptive_model.prepare_full_data(feature_columns=feature_columns)
+
+            self.log_output("✅ Model initialized successfully")
+            self.log_output(f"📊 Dataset: {self.adaptive_model.X_full.shape[0]} samples, {self.adaptive_model.X_full.shape[1]} features")
+
+        except Exception as e:
+            self.log_output(f"❌ Error initializing model: {e}")
+
+    def display_results(self, results):
+        """Display adaptive learning results."""
+        if results is None:
+            return
+
+        self.results_text.config(state=tk.NORMAL)
+        self.results_text.delete(1.0, tk.END)
+
+        # Format results
+        self.results_text.insert(tk.END, "🏆 ADAPTIVE LEARNING RESULTS\n")
+        self.results_text.insert(tk.END, "=" * 60 + "\n\n")
+
+        # Basic results
+        self.results_text.insert(tk.END, f"📁 Dataset: {results.get('dataset_name', 'Unknown')}\n")
+        self.results_text.insert(tk.END, f"🎯 Target Column: {results.get('target_column', 'Unknown')}\n")
+        self.results_text.insert(tk.END, f"🔧 Features Used: {len(results.get('feature_names', []))}\n")
+        self.results_text.insert(tk.END, f"📦 Total Samples: {len(self.adaptive_model.X_full) if self.adaptive_model and self.adaptive_model.X_full is not None else 'Unknown'}\n\n")
+
+        # Performance results
+        self.results_text.insert(tk.END, "📊 PERFORMANCE SUMMARY\n")
+        self.results_text.insert(tk.END, "-" * 40 + "\n")
+        self.results_text.insert(tk.END, f"🎯 Final Accuracy: {results.get('final_accuracy', 0.0):.4f}\n")
+        self.results_text.insert(tk.END, f"🏆 Best Accuracy: {results.get('best_accuracy', 0.0):.4f}\n")
+        self.results_text.insert(tk.END, f"🔄 Best Round: {results.get('best_round', 0)}\n")
+        self.results_text.insert(tk.END, f"📊 Final Training Size: {results.get('final_training_size', 0)}\n")
+        self.results_text.insert(tk.END, f"⏱️ Total Training Time: {results.get('total_training_time', 0.0):.2f} seconds\n")
+        self.results_text.insert(tk.END, f"🔄 Total Rounds: {results.get('total_rounds', 0)}\n\n")
+
+        # Feature information
+        feature_names = results.get('feature_names', [])
+        if feature_names:
+            self.results_text.insert(tk.END, "🔧 FEATURES USED\n")
+            self.results_text.insert(tk.END, "-" * 40 + "\n")
+            features_text = ", ".join(feature_names)
+            # Split long feature lists into multiple lines
+            if len(features_text) > 80:
+                words = features_text.split(', ')
+                lines = []
+                current_line = ""
+                for word in words:
+                    if len(current_line + word) > 80:
+                        lines.append(current_line)
+                        current_line = word + ", "
+                    else:
+                        current_line += word + ", "
+                if current_line:
+                    lines.append(current_line.rstrip(', '))
+
+                for line in lines:
+                    self.results_text.insert(tk.END, f"  {line}\n")
+            else:
+                self.results_text.insert(tk.END, f"  {features_text}\n")
+            self.results_text.insert(tk.END, "\n")
+
+        # Configuration summary
+        self.results_text.insert(tk.END, "⚙️ CONFIGURATION SUMMARY\n")
+        self.results_text.insert(tk.END, "-" * 40 + "\n")
+
+        adaptive_config = results.get('adaptive_config', {})
+        if adaptive_config:
+            self.results_text.insert(tk.END, "Adaptive Learning:\n")
+            self.results_text.insert(tk.END, f"  • Max Rounds: {adaptive_config.get('max_adaptive_rounds', 'N/A')}\n")
+            self.results_text.insert(tk.END, f"  • Samples/Round: {adaptive_config.get('max_margin_samples_per_class', 'N/A')}\n")
+            self.results_text.insert(tk.END, f"  • Initial Samples/Class: {adaptive_config.get('initial_samples_per_class', 'N/A')}\n")
+            self.results_text.insert(tk.END, f"  • Acid Test: {adaptive_config.get('enable_acid_test', 'N/A')}\n")
+            self.results_text.insert(tk.END, f"  • KL Divergence: {adaptive_config.get('enable_kl_divergence', 'N/A')}\n")
+
+        model_config = results.get('model_config', {})
+        if model_config:
+            self.results_text.insert(tk.END, "DBNN Model:\n")
+            self.results_text.insert(tk.END, f"  • Resolution: {model_config.get('resol', 'N/A')}\n")
+            self.results_text.insert(tk.END, f"  • Gain: {model_config.get('gain', 'N/A')}\n")
+            self.results_text.insert(tk.END, f"  • Margin: {model_config.get('margin', 'N/A')}\n")
+            self.results_text.insert(tk.END, f"  • Patience: {model_config.get('patience', 'N/A')}\n")
+
+        # Add timestamp
+        self.results_text.insert(tk.END, f"\n📅 Results generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+
+        self.results_text.config(state=tk.DISABLED)
+
+    def run_adaptive_learning(self):
+        """Run adaptive learning."""
+        if not self.data_loaded or self.adaptive_model is None:
+            messagebox.showwarning("Warning", "Please load data, apply feature selection, and initialize model first.")
+            return
+
+        try:
+            self.log_output("🚀 Starting adaptive learning...")
+
+            # Get selected features for adaptive learning
+            feature_columns = [col for col, var in self.feature_vars.items() if var.get() and col != self.target_var.get()]
+
+            # Run adaptive learning
+            X_train, y_train, X_test, y_test = self.adaptive_model.adaptive_learn(feature_columns=feature_columns)
+
+            # Create results dictionary for display
+            results = {
+                'dataset_name': self.adaptive_model.dataset_name,
+                'target_column': self.adaptive_model.target_column,
+                'feature_names': self.adaptive_model.feature_columns,
+                'final_accuracy': self.adaptive_model.best_accuracy,
+                'best_accuracy': self.adaptive_model.best_accuracy,
+                'best_round': getattr(self.adaptive_model, 'best_round', 0),
+                'final_training_size': len(getattr(self.adaptive_model, 'best_training_indices', [])),
+                'total_training_time': getattr(self.adaptive_model, 'total_training_time', 0),
+                'total_rounds': getattr(self.adaptive_model, 'adaptive_round', 0),
+                'round_stats': getattr(self.adaptive_model, 'round_stats', []),
+                'adaptive_config': getattr(self.adaptive_model, 'adaptive_config', {}),
+                'model_config': self.adaptive_model.config,
+                'training_indices': getattr(self.adaptive_model, 'best_training_indices', [])
+            }
+
+            # Display results
+            self.display_results(results)
+
+            self.model_trained = True
+            self.log_output("✅ Adaptive learning completed successfully!")
+            self.log_output(f"🏆 Best accuracy: {self.adaptive_model.best_accuracy:.4f}")
+            self.log_output(f"📊 Final training size: {len(X_train)} samples")
+            self.log_output(f"📊 Test set size: {len(X_test)} samples")
+
+        except Exception as e:
+            self.log_output(f"❌ Error during adaptive learning: {e}")
+
+    def evaluate_model(self):
+        """Evaluate the model."""
+        if not self.model_trained or self.adaptive_model is None:
+            messagebox.showwarning("Warning", "Please run adaptive learning first.")
+            return
+
+        try:
+            self.log_output("📊 Evaluating model...")
+
+            # Use the test set from adaptive learning
+            if hasattr(self.adaptive_model, 'X_test') and hasattr(self.adaptive_model, 'y_test'):
+                X_test = self.adaptive_model.X_test
+                y_test = self.adaptive_model.y_test
+
+                predictions = self.adaptive_model.model.predict(X_test)
+                accuracy = accuracy_score(y_test, predictions)
+
+                self.log_output(f"🎯 Test accuracy: {accuracy:.4f}")
+                self.log_output(f"📊 Test set size: {len(X_test)} samples")
+            else:
+                self.log_output("⚠️ No test set available for evaluation")
+
+        except Exception as e:
+            self.log_output(f"❌ Error during evaluation: {e}")
+
+    def show_visualizations(self):
+        """Show basic model visualizations."""
+        if not self.model_trained or self.adaptive_model is None:
+            messagebox.showwarning("Warning", "No trained model available for visualization.")
+            return
+
+        try:
+            self.log_output("📊 Generating basic visualizations...")
+
+            # Create basic visualizations using the existing visualizer
+            if hasattr(self.adaptive_model, 'adaptive_visualizer'):
+                self.adaptive_model.adaptive_visualizer.create_visualizations(
+                    self.adaptive_model.X_full,
+                    self.adaptive_model.y_full
+                )
+                self.log_output("✅ Basic visualizations created in 'adaptive_visualizations' directory")
+            else:
+                self.log_output("⚠️ Visualizer not available")
+
+        except Exception as e:
+            self.log_output(f"❌ Error showing visualizations: {e}")
+
+    def show_advanced_analysis(self):
+        """Show advanced analysis."""
+        if not self.model_trained or self.adaptive_model is None:
+            messagebox.showwarning("Warning", "No trained model available for analysis.")
+            return
+
+        try:
+            self.log_output("🔬 Generating advanced analysis...")
+
+            # Generate adaptive learning report
+            if hasattr(self.adaptive_model, '_generate_adaptive_learning_report'):
+                self.adaptive_model._generate_adaptive_learning_report()
+                self.log_output("✅ Advanced analysis report generated")
+            else:
+                self.log_output("⚠️ Advanced analysis not available")
+
+        except Exception as e:
+            self.log_output(f"❌ Error during advanced analysis: {e}")
+
+    def save_model(self):
+        """Save the model."""
+        if not self.model_trained or self.adaptive_model is None:
+            messagebox.showwarning("Warning", "No trained model to save.")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            title="Save Model As",
+            defaultextension=".bin",
+            filetypes=[("Model files", "*.bin"), ("All files", "*.*")]
+        )
+
+        if file_path:
+            try:
+                # Use the model's save functionality
+                success = self.adaptive_model.model.save_model_auto(
+                    model_dir=os.path.dirname(file_path),
+                    data_filename=self.current_data_file,
+                    feature_columns=self.adaptive_model.feature_columns,
+                    target_column=self.adaptive_model.target_column
+                )
+
+                if success:
+                    self.log_output(f"✅ Model saved to: {file_path}")
+                else:
+                    self.log_output(f"❌ Failed to save model")
+
+            except Exception as e:
+                self.log_output(f"❌ Error saving model: {e}")
+
+    def load_model(self):
+        """Load a model."""
+        file_path = filedialog.askopenfilename(
+            title="Load Model",
+            filetypes=[("Model files", "*.bin"), ("All files", "*.*")]
+        )
+
+        if file_path:
+            try:
+                # For now, we'll just log this since model loading needs to be integrated
+                self.log_output(f"📥 Model loading from: {file_path}")
+                self.log_output("⚠️ Model loading functionality needs to be integrated with AdaptiveDBNN class")
+
+                # TODO: Integrate model loading with AdaptiveDBNN
+                # self.adaptive_model = AdaptiveDBNN()
+                # success = self.adaptive_model.model.load_model(file_path)
+
+            except Exception as e:
+                self.log_output(f"❌ Error loading model: {e}")
+
+    def log_output(self, message: str):
+        """Add message to output text."""
+        self.output_text.insert(tk.END, f"{message}\n")
+        self.output_text.see(tk.END)
+        self.root.update()
+        self.status_var.set(message)
+
+def launch_adaptive_gui():
+    """Launch the Adaptive DBNN GUI."""
+    root = tk.Tk()
+    app = AdaptiveDBNNGUI(root)
+    root.mainloop()
+
+
 class DatasetConfig:
     """Dataset configuration handler"""
 
@@ -88,11 +2123,85 @@ class DataPreprocessor:
     def __init__(self, target_column: str = 'target', sentinel_value: float = -99999.0):
         self.target_column = target_column
         self.sentinel_value = sentinel_value
-        self.feature_encoders = {}  # For encoding categorical features
+        self.feature_encoders = {}
         self.target_encoder = LabelEncoder()
         self.scaler = StandardScaler()
-        self.feature_columns = []
+        self.feature_columns = []  # Store original feature names
         self.missing_value_indicators = {}
+        self.column_dtypes = {}  # Track original data types
+
+    def preprocess_dataset(self, data: pd.DataFrame, feature_columns: List[str] = None) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+        """Preprocess entire dataset with specified feature columns"""
+        print("🔧 Preprocessing dataset...")
+
+        if self.target_column not in data.columns:
+            raise ValueError(f"Target column '{self.target_column}' not found in dataset")
+
+        # Use specified feature columns or all non-target columns
+        if feature_columns is None:
+            self.feature_columns = [col for col in data.columns if col != self.target_column]
+        else:
+            # Validate that specified feature columns exist
+            missing_cols = [col for col in feature_columns if col not in data.columns]
+            if missing_cols:
+                raise ValueError(f"Feature columns not found in data: {missing_cols}")
+            self.feature_columns = feature_columns
+
+        print(f"📊 Using features: {self.feature_columns}")
+
+        # Create a copy with only the selected features and target
+        data_clean = data[self.feature_columns + [self.target_column]].copy()
+
+        # Preprocess features
+        X_processed = self._preprocess_features_with_names(data_clean[self.feature_columns])
+
+        # Preprocess target
+        y_processed = self.preprocess_target(data_clean[self.target_column])
+
+        # Remove samples with missing target values
+        valid_mask = ~np.isnan(y_processed)
+        if not np.all(valid_mask):
+            removed_count = len(y_processed) - np.sum(valid_mask)
+            print(f"⚠️  Removed {removed_count} samples with invalid target values")
+            X_processed = X_processed[valid_mask]
+            y_processed = y_processed[valid_mask]
+
+        print(f"✅ Preprocessing complete: {X_processed.shape[0]} samples, {X_processed.shape[1]} features")
+        print(f"📊 Features used: {self.feature_columns}")
+
+        return X_processed, y_processed, self.feature_columns
+
+    def _preprocess_features_with_names(self, X: pd.DataFrame) -> np.ndarray:
+        """Preprocess feature columns while preserving original names"""
+        processed_features = []
+
+        for col in X.columns:
+            feature_data = X[col].copy()
+
+            # Store original dtype
+            self.column_dtypes[col] = feature_data.dtype
+
+            # Handle missing values
+            missing_mask = self._detect_missing_values(feature_data)
+
+            # Convert to numeric
+            numeric_data = self._convert_to_numeric(feature_data, col)
+
+            # Store missing value information
+            self.missing_value_indicators[col] = {
+                'missing_mask': missing_mask,
+                'has_missing': np.any(missing_mask)
+            }
+
+            processed_features.append(numeric_data)
+
+        # Stack all features
+        if processed_features:
+            X_processed = np.column_stack(processed_features)
+        else:
+            X_processed = np.empty((len(X), 0))
+
+        return X_processed
 
     def preprocess_features(self, X: pd.DataFrame) -> Tuple[np.ndarray, List[str]]:
         """Preprocess feature columns - handle mixed types, missing values, etc."""
@@ -197,36 +2306,6 @@ class DataPreprocessor:
 
         return y_processed.astype(int)
 
-    def preprocess_dataset(self, data: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, List[str]]:
-        """Preprocess entire dataset"""
-        print("🔧 Preprocessing dataset...")
-
-        # Separate features and target
-        if self.target_column not in data.columns:
-            raise ValueError(f"Target column '{self.target_column}' not found in dataset")
-
-        # Create a copy to avoid modifying original data
-        data_clean = data.copy()
-
-        # Preprocess features
-        X_processed, feature_names = self.preprocess_features(data_clean)
-
-        # Preprocess target
-        y_processed = self.preprocess_target(data_clean[self.target_column])
-
-        # Remove samples with missing target values
-        valid_mask = ~np.isnan(y_processed)
-        if not np.all(valid_mask):
-            removed_count = len(y_processed) - np.sum(valid_mask)
-            print(f"⚠️  Removed {removed_count} samples with invalid target values")
-            X_processed = X_processed[valid_mask]
-            y_processed = y_processed[valid_mask]
-
-        print(f"✅ Preprocessing complete: {X_processed.shape[0]} samples, {X_processed.shape[1]} features")
-        print(f"📊 Feature types: {len(feature_names)} numeric/categorical features")
-
-        return X_processed, y_processed, feature_names
-
 class DBNNVisualizer:
     """Visualization system for DBNN"""
 
@@ -272,13 +2351,20 @@ class DBNNWrapper:
         }
         self.core = dbnn.DBNNCore(dbnn_config)
 
+        # Store feature information
+        self.feature_columns = []  # Original feature column names
+        self.target_column = self.config.get('target_column', 'target')
+        self.preprocessor = DataPreprocessor(target_column=self.target_column)
+
+        # Training state
+        self.initialized_with_full_data = False
+
         # Store architectural components separately for freezing
         self.architecture_frozen = False
         self.frozen_components = {}
 
         # Store data and preprocessing
         self.data = None
-        self.target_column = self.config.get('target_column', 'target')
         self.preprocessor = DataPreprocessor(target_column=self.target_column)
         self.scaler = StandardScaler()
         self.label_encoder = LabelEncoder()
@@ -293,10 +2379,10 @@ class DBNNWrapper:
         self.feature_names = []
         self.initialized_with_full_data = False
 
-    def load_data(self, file_path: str = None):
-        """Load data from file with robust preprocessing"""
+    def load_data(self, file_path: str = None, feature_columns: List[str] = None):
+        """Load data from file with original column names"""
         if file_path is None:
-            # Try to find dataset file - prioritize original data files
+            # Auto-detect data file (existing logic)
             possible_files = [
                 f"{self.dataset_name}.csv",
                 f"{self.dataset_name}.data",
@@ -312,27 +2398,29 @@ class DBNNWrapper:
                     break
 
         if file_path is None:
-            # Try to find any CSV or DAT file in current directory
             csv_files = glob.glob("*.csv")
             dat_files = glob.glob("*.dat")
             all_files = csv_files + dat_files
-
             if all_files:
                 file_path = all_files[0]
                 print(f"📁 Auto-selected data file: {file_path}")
             else:
-                raise ValueError("No data file found. Please provide a CSV or DAT file.")
+                raise ValueError("No data file found.")
 
+        # Load data
         if file_path.endswith('.csv'):
             self.data = pd.read_csv(file_path)
             print(f"✅ Loaded CSV data: {self.data.shape[0]} samples, {self.data.shape[1]} columns")
+            print(f"📊 Columns: {list(self.data.columns)}")
         else:
-            # For .dat files, use simple loading
+            # For .dat files, create proper column names
             print(f"📊 Loading DAT file: {file_path}")
             try:
                 data = np.loadtxt(file_path)
-                n_features = data.shape[1] - 1
-                columns = [f'feature_{i}' for i in range(n_features)] + [self.target_column]
+                if feature_columns is None:
+                    n_features = data.shape[1] - 1
+                    feature_columns = [f'feature_{i}' for i in range(n_features)]
+                columns = feature_columns + [self.target_column]
                 self.data = pd.DataFrame(data, columns=columns)
                 print(f"✅ Loaded DAT data: {self.data.shape[0]} samples, {self.data.shape[1]} columns")
             except Exception as e:
@@ -341,37 +2429,38 @@ class DBNNWrapper:
 
         return self.data
 
-    def preprocess_data(self) -> Tuple[np.ndarray, np.ndarray, List[str]]:
-        """Preprocess the loaded data"""
+    def preprocess_data(self, feature_columns: List[str] = None) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+        """Preprocess the loaded data with specified feature columns"""
         if self.data is None:
             raise ValueError("No data loaded. Call load_data() first.")
 
-        return self.preprocessor.preprocess_dataset(self.data)
+        X, y, feature_columns_used = self.preprocessor.preprocess_dataset(self.data, feature_columns)
+        self.feature_columns = feature_columns_used  # Store for prediction
+        return X, y, feature_columns_used
 
-    def initialize_with_full_data(self, X: np.ndarray, y: np.ndarray):
-        """Step 1: Initialize DBNN architecture with full dataset - NO TRAINING"""
+
+    def initialize_with_full_data(self, X: np.ndarray, y: np.ndarray, feature_columns: List[str]):
+        """Step 1: Initialize DBNN architecture with full dataset and feature names"""
         print("🏗️ Initializing DBNN architecture with full dataset...")
+        self.feature_columns = feature_columns  # Store feature names
 
-        # Create temporary file with full data
+        # Create temporary file with full data and original column names
         temp_file = f"temp_full_init_{int(time.time())}.csv"
-        feature_cols = [f'feature_{i}' for i in range(X.shape[1])]
-        full_df = pd.DataFrame(X, columns=feature_cols)
+        full_df = pd.DataFrame(X, columns=self.feature_columns)
         full_df[self.target_column] = y
         full_df.to_csv(temp_file, index=False)
 
         try:
-            # First, manually initialize the DBNN core architecture
-            self._initialize_dbnn_architecture(X, y, feature_cols)
+            # Initialize DBNN architecture with feature names
+            self._initialize_dbnn_architecture(X, y, self.feature_columns)
 
-            # Instead of training, just build the initial network structure
-            print("🔧 Building network structure (no training)...")
-            success = self._build_network_structure_only(temp_file, feature_cols)
+            # Build network structure
+            print("🔧 Building network structure...")
+            success = self._build_network_structure_only(temp_file, self.feature_columns)
 
             if success:
                 print("✅ DBNN architecture initialized with full dataset")
                 self.initialized_with_full_data = True
-
-                # Freeze the architecture
                 self.freeze_architecture()
             else:
                 print("❌ Failed to initialize DBNN architecture")
@@ -383,6 +2472,44 @@ class DBNNWrapper:
         finally:
             if os.path.exists(temp_file):
                 os.remove(temp_file)
+
+
+    def predict_with_original_columns(self, X: np.ndarray, input_features: List[str] = None):
+        """Predict classes for input data with feature column validation"""
+        if not hasattr(self.core, 'is_trained') or not self.core.is_trained:
+            unique_classes = np.unique(self.y_full) if hasattr(self, 'y_full') else [1, 2, 3]
+            return np.random.choice(unique_classes, size=len(X))
+
+        try:
+            # If input_features provided, reorder columns to match training features
+            if input_features is not None and hasattr(self, 'feature_columns'):
+                print(f"🔧 Reordering features to match training configuration")
+                print(f"   Training features: {self.feature_columns}")
+                print(f"   Input features: {input_features}")
+
+                # Create a DataFrame to facilitate column reordering
+                if isinstance(X, np.ndarray):
+                    X_df = pd.DataFrame(X, columns=input_features)
+                else:
+                    X_df = X.copy()
+
+                # Reorder columns to match training feature order
+                missing_cols = [col for col in self.feature_columns if col not in X_df.columns]
+                if missing_cols:
+                    raise ValueError(f"Missing feature columns: {missing_cols}")
+
+                X_ordered = X_df[self.feature_columns].values
+                print(f"✅ Features reordered for prediction")
+            else:
+                X_ordered = X
+
+            # Use the core prediction with ordered features
+            return self.predict(X_ordered)
+
+        except Exception as e:
+            print(f"❌ Prediction error with column reordering: {e}")
+            # Fallback to direct prediction
+            return self.predict(X)
 
     def _build_network_structure_only(self, train_file: str, feature_cols: List[str]):
         """Build network structure without training - just initialize counts"""
@@ -736,7 +2863,7 @@ class DBNNWrapper:
         if not self.initialized_with_full_data:
             # Try to initialize if not already done
             print("⚠️  DBNN not initialized, attempting initialization...")
-            self.initialize_with_full_data(X_train, y_train)
+            self.initialize_with_full_data(X_train, y_train, self.feature_columns)  # Pass feature columns
             if not self.initialized_with_full_data:
                 raise ValueError("DBNN must be initialized with full data first")
 
@@ -746,9 +2873,17 @@ class DBNNWrapper:
 
         print(f"🎯 Training with {len(X_train)} samples...")
 
-        # Create temporary file with training data
+        # Create temporary file with training data - USE ORIGINAL FEATURE NAMES
         temp_file = f"temp_train_{int(time.time())}.csv"
-        feature_cols = [f'feature_{i}' for i in range(X_train.shape[1])]
+
+        # Use original feature columns if available, otherwise fallback to generic names
+        if hasattr(self, 'feature_columns') and self.feature_columns:
+            feature_cols = self.feature_columns
+            print(f"📊 Using original feature names: {feature_cols}")
+        else:
+            feature_cols = [f'feature_{i}' for i in range(X_train.shape[1])]
+            print(f"⚠️  Using generic feature names: {feature_cols}")
+
         train_df = pd.DataFrame(X_train, columns=feature_cols)
         train_df[self.target_column] = y_train
         train_df.to_csv(temp_file, index=False)
@@ -759,38 +2894,30 @@ class DBNNWrapper:
 
             if success:
                 train_accuracy = self._compute_accuracy(X_train, y_train)
-                print(f"✅ Training completed - Accuracy on training data: {train_accuracy:.4f}")
-                return True
+                print(f"✅ Training completed - Accuracy: {train_accuracy:.2f}%")
+                return train_accuracy
             else:
                 print("❌ Training failed")
-                return False
+                return 0.0
 
         except Exception as e:
             print(f"❌ Training error: {e}")
             import traceback
             traceback.print_exc()
-            return False
+            return 0.0
         finally:
             if os.path.exists(temp_file):
                 os.remove(temp_file)
 
-    def _reset_weights(self):
-        """Reset weights while preserving architecture"""
-        # Instead of creating a new core, just reset the weights arrays
-        if hasattr(self.core, 'anti_wts'):
-            self.core.anti_wts.fill(1.0)  # Reset to uniform weights
-            print("✅ Weights reset to uniform distribution")
-        else:
-            print("⚠️  Cannot reset weights - architecture not initialized")
-
-    def _compute_accuracy(self, X: np.ndarray, y: np.ndarray) -> float:
+    def _compute_accuracy(self, X: np.ndarray, y: np.ndarray):
         """Compute accuracy on given data"""
+        if not hasattr(self.core, 'is_trained') or not self.core.is_trained:
+            return 0.0
+
         try:
             predictions = self.predict(X)
-            # Ensure both arrays have the same data type for comparison
-            predictions = predictions.astype(y.dtype)
             accuracy = accuracy_score(y, predictions)
-            return accuracy
+            return accuracy * 100
         except Exception as e:
             print(f"❌ Accuracy computation error: {e}")
             return 0.0
@@ -798,689 +2925,340 @@ class DBNNWrapper:
     def predict(self, X: np.ndarray):
         """Predict classes for input data"""
         if not hasattr(self.core, 'is_trained') or not self.core.is_trained:
-            # If not trained, return random predictions based on class distribution
+            # Return random predictions if not trained
             unique_classes = np.unique(self.y_full) if hasattr(self, 'y_full') else [1, 2, 3]
             return np.random.choice(unique_classes, size=len(X))
 
         try:
-            # Create temporary file for prediction
-            temp_file = f"temp_predict_{int(time.time())}.csv"
-            feature_cols = [f'feature_{i}' for i in range(X.shape[1])]
-            predict_df = pd.DataFrame(X, columns=feature_cols)
-            predict_df.to_csv(temp_file, index=False)
-
-            # Load data for prediction
-            features_batches, _, _, _ = self.core.load_data(
-                temp_file,
-                target_column=None,
-                feature_columns=feature_cols
-            )
-
+            # Convert to batches for prediction
+            batch_size = 1000
             all_predictions = []
 
-            for features_batch in features_batches:
-                predictions, _ = self.core.predict_batch(features_batch)
-                # Convert predictions to proper numeric type
-                numeric_predictions = []
-                for pred in predictions:
-                    try:
-                        numeric_predictions.append(float(pred))
-                    except (ValueError, TypeError):
-                        # If conversion fails, use the first class as fallback
-                        numeric_predictions.append(1.0)
-                all_predictions.extend(numeric_predictions)
+            for i in range(0, len(X), batch_size):
+                batch = X[i:i+batch_size]
+                batch_predictions, _ = self.core.predict_batch(batch)
+                all_predictions.extend(batch_predictions)
 
-            # Convert encoded predictions back to original labels
-            decoded_predictions = []
-            for pred in all_predictions:
-                try:
-                    # Try to decode using class encoder
-                    if hasattr(self.core, 'class_encoder') and self.core.class_encoder.is_fitted:
-                        decoded = self.core.class_encoder.inverse_transform([pred])[0]
-                        decoded_predictions.append(decoded)
-                    else:
-                        # Fallback: use direct conversion
-                        decoded_predictions.append(int(pred))
-                except:
-                    # Final fallback
-                    decoded_predictions.append(1)
-
-            # Convert to numpy array and ensure correct data type
-            decoded_predictions = np.array(decoded_predictions, dtype=np.int64)
-
-            # Ensure we have valid predictions
-            if len(decoded_predictions) == 0:
-                unique_classes = np.unique(self.y_full) if hasattr(self, 'y_full') else [1, 2, 3]
-                decoded_predictions = np.array([unique_classes[0]] * len(X))
-
-            return decoded_predictions
-
+            return np.array(all_predictions)
         except Exception as e:
             print(f"❌ Prediction error: {e}")
-            import traceback
-            traceback.print_exc()
-            # Fallback: return random predictions
+            # Return random predictions as fallback
             unique_classes = np.unique(self.y_full) if hasattr(self, 'y_full') else [1, 2, 3]
             return np.random.choice(unique_classes, size=len(X))
-        finally:
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
-
-    def _compute_batch_posterior(self, X: np.ndarray):
-        """Compute posterior probabilities for a batch of samples"""
-        if not hasattr(self.core, 'is_trained') or not self.core.is_trained:
-            # Return uniform probabilities if not trained
-            n_classes = len(np.unique(self.y_full)) if hasattr(self, 'y_full') else 3
-            return np.ones((len(X), n_classes)) / n_classes
-
-        try:
-            temp_file = f"temp_posterior_{int(time.time())}.csv"
-            feature_cols = [f'feature_{i}' for i in range(X.shape[1])]
-            predict_df = pd.DataFrame(X, columns=feature_cols)
-            predict_df.to_csv(temp_file, index=False)
-
-            features_batches, _, _, _ = self.core.load_data(
-                temp_file,
-                target_column=None,
-                feature_columns=feature_cols
-            )
-
-            all_probabilities = []
-
-            for features_batch in features_batches:
-                _, probabilities = self.core.predict_batch(features_batch)
-                all_probabilities.extend(probabilities)
-
-            # Convert probability dictionaries to numpy array
-            n_classes = len(self.core.class_encoder.get_encoded_classes()) if hasattr(self.core.class_encoder, 'is_fitted') else 3
-
-            # Ensure we have valid probabilities
-            if not all_probabilities:
-                return np.ones((len(X), n_classes)) / n_classes
-
-            posteriors = np.zeros((len(all_probabilities), n_classes))
-
-            for i, prob_dict in enumerate(all_probabilities):
-                # If we don't have a proper probability dictionary, use uniform distribution
-                if not prob_dict or not isinstance(prob_dict, dict):
-                    posteriors[i] = np.ones(n_classes) / n_classes
-                    continue
-
-                # Extract probabilities in the correct order
-                for j, class_val in enumerate(self.core.class_encoder.get_encoded_classes()):
-                    class_name = self.core.class_encoder.encoded_to_class.get(class_val, f"Class_{j+1}")
-                    posteriors[i, j] = prob_dict.get(class_name, 1.0/n_classes)
-
-            return posteriors
-
-        except Exception as e:
-            print(f"❌ Posterior computation error: {e}")
-            n_classes = len(np.unique(self.y_full)) if hasattr(self, 'y_full') else 3
-            return np.ones((len(X), n_classes)) / n_classes
-        finally:
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
 
     def freeze_architecture(self):
-        """Freeze architectural components"""
-        self.architecture_frozen = True
+        """Freeze the current architecture for later restoration"""
+        if not self.initialized_with_full_data:
+            raise ValueError("Cannot freeze architecture: DBNN not initialized")
+
+        print("❄️  Freezing DBNN architecture...")
+
+        # Store critical components
         self.frozen_components = {
-            'config': self.core.config.copy(),
-            'feature_names': self.feature_names.copy() if hasattr(self, 'feature_names') else [],
-            'target_column': self.target_column,
-            'innodes': getattr(self.core, 'innodes', 0),
-            'outnodes': getattr(self.core, 'outnodes', 0),
-            'dmyclass': self.core.dmyclass.copy() if hasattr(self.core, 'dmyclass') else None,
+            'innodes': self.core.innodes,
+            'outnodes': self.core.outnodes,
+            'anti_net': self.core.anti_net.copy(),
+            'dmyclass': self.core.dmyclass.copy(),
+            'binloc': self.core.binloc.copy(),
+            'max_val': self.core.max_val.copy(),
+            'min_val': self.core.min_val.copy(),
+            'resolution_arr': self.core.resolution_arr.copy(),
+            'class_encoder': copy.deepcopy(self.core.class_encoder),
+            'feature_columns': self.feature_columns.copy()
         }
-        print("✅ DBNN architecture frozen")
 
-    def _save_best_weights(self):
-        """Save current weights as best weights - not applicable for core DBNN"""
-        pass
+        self.architecture_frozen = True
+        print(f"✅ Architecture frozen: {self.core.innodes} inputs, {self.core.outnodes} outputs")
 
-    def reset_weights(self):
-        """Reset weights - for core DBNN, we need to retrain"""
-        print("🔄 Weights reset requires retraining with core DBNN")
+    def restore_architecture(self):
+        """Restore the frozen architecture"""
+        if not self.architecture_frozen:
+            raise ValueError("No frozen architecture to restore")
+
+        print("🔄 Restoring frozen architecture...")
+
+        # Restore critical components
+        self.core.innodes = self.frozen_components['innodes']
+        self.core.outnodes = self.frozen_components['outnodes']
+        self.core.anti_net = self.frozen_components['anti_net'].copy()
+        self.core.dmyclass = self.frozen_components['dmyclass'].copy()
+        self.core.binloc = self.frozen_components['binloc'].copy()
+        self.core.max_val = self.frozen_components['max_val'].copy()
+        self.core.min_val = self.frozen_components['min_val'].copy()
+        self.core.resolution_arr = self.frozen_components['resolution_arr'].copy()
+        self.core.class_encoder = copy.deepcopy(self.frozen_components['class_encoder'])
+        self.feature_columns = self.frozen_components['feature_columns'].copy()
+
+        # Reset weights but keep architecture
+        self._reset_weights()
+
+        print(f"✅ Architecture restored: {self.core.innodes} inputs, {self.core.outnodes} outputs")
+
+    def _reset_weights(self):
+        """Reset weights while preserving architecture"""
+        if hasattr(self.core, 'anti_wts'):
+            self.core.anti_wts.fill(1.0)
+        if hasattr(self.core, 'antit_wts'):
+            self.core.antit_wts.fill(1.0)
+        if hasattr(self.core, 'antip_wts'):
+            self.core.antip_wts.fill(1.0)
+
+    def adaptive_train(self, X_train: np.ndarray, y_train: np.ndarray, reset_weights: bool = True):
+        """Adaptive training that preserves architecture"""
+        if not self.initialized_with_full_data:
+            raise ValueError("DBNN must be initialized with full data first")
+
+        if reset_weights:
+            self._reset_weights()
+
+        return self.train_with_data(X_train, y_train, reset_weights=False)
 
 class AdaptiveDBNN:
-    """Wrapper for DBNN that implements sophisticated adaptive learning with comprehensive analysis"""
+    """
+    Advanced Adaptive Learning DBNN with comprehensive feature support
+    """
 
     def __init__(self, dataset_name: str = None, config: Dict = None):
-        # Handle dataset selection if not provided
-        if dataset_name is None:
-            dataset_name = self._select_dataset()
-
         self.dataset_name = dataset_name
-        self.config = config or self._load_config(dataset_name)
+        self.config = config or {}
+        self.adaptive_config = self._setup_adaptive_config()
 
-        # Ensure config has required fields by using DatasetConfig
-        if 'target_column' not in self.config:
-            dataset_config = DatasetConfig.load_config(dataset_name)
-            if dataset_config:
-                self.config.update(dataset_config)
-
-        # Enhanced adaptive learning configuration with proper defaults
-        self.adaptive_config = self.config.get('adaptive_learning', {})
-        # Set defaults for any missing parameters
-        default_config = {
-            "enable_adaptive": True,
-            "initial_samples_per_class": 5,
-            "max_margin_samples_per_class": 3,
-            "margin_tolerance": 0.15,
-            "kl_threshold": 0.1,
-            "max_adaptive_rounds": 20,
-            "patience": 10,
-            "min_improvement": 0.001,
-            "training_convergence_epochs": 50,
-            "min_training_accuracy": 0.95,
-            "min_samples_to_add_per_class": 5,
-            "adaptive_margin_relaxation": 0.1,
-            "max_divergence_samples_per_class": 5,
-            "exhaust_all_failed": True,
-            "min_failed_threshold": 10,
-            "enable_kl_divergence": True,
-            "max_samples_per_class_fallback": 2,
-            "enable_3d_visualization": True,
-            "3d_snapshot_interval": 10,
-            "learning_rate": 1.0,
-            "enable_acid_test": True,
-            "min_training_percentage_for_stopping": 10.0,
-            "max_training_percentage": 90.0,
-            "margin_tolerance": 0.15,
-            "kl_divergence_threshold": 0.1,
-            "max_kl_samples_per_class": 5,
-            "disable_sample_limit": False,
-        }
-        for key, default_value in default_config.items():
-            if key not in self.adaptive_config:
-                self.adaptive_config[key] = default_value
-
-        self.stats_config = self.config.get('statistics', {
-            'enable_confusion_matrix': True,
-            'enable_progress_plots': True,
-            'color_progress': 'green',
-            'color_regression': 'red',
-            'save_plots': True,
-            'create_interactive_plots': True,
-            'create_sample_analysis': True
-        })
-
-        # Visualization configuration
-        self.viz_config = self.config.get('visualization_config', {
-            'enabled': True,
-            'output_dir': 'adaptive_visualizations',
-            'create_animations': False,
-            'create_reports': True,
-            'create_3d_visualizations': True
-        })
-
-        # Initialize the base DBNN model using our wrapper
-        self.model = DBNNWrapper(dataset_name, config=self.config)
+        # Initialize DBNN wrapper - THIS IS THE MAIN MODEL
+        self.db = DBNNWrapper(dataset_name, config)  # Changed from self.db to self.model
 
         # Adaptive learning state
-        self.training_indices = []
-        self.best_accuracy = 0.0
-        self.best_training_indices = []
-        self.best_round = 0
         self.adaptive_round = 0
-        self.patience_counter = 0
+        self.best_accuracy = 0.0
+        self.convergence_history = []
+        self.margin_history = []
+        self.kl_divergence_history = []
+        self.adaptive_samples_added = 0
 
-        # Statistics tracking
-        self.round_stats = []
-        self.previous_confusion = None
-        self.start_time = datetime.now()
-        self.adaptive_start_time = None
-        self.device_type = self._get_device_type()
-
-        # Store the full dataset for adaptive learning
+        # Data storage
         self.X_full = None
         self.y_full = None
-        self.y_full_original = None
-        self.original_data_shape = None
+        self.X_train_current = None
+        self.y_train_current = None
+        self.X_test = None
+        self.y_test = None
 
-        # Track all selected samples for analysis
-        self.all_selected_samples = defaultdict(list)
-        self.sample_selection_history = []
+        # Feature information
+        self.feature_columns = []
+        self.target_column = self.config.get('target_column', 'target')
 
-        # Initialize label encoder for adaptive learning
-        self.label_encoder = LabelEncoder()
+        # Preprocessor
+        self.preprocessor = DataPreprocessor(target_column=self.target_column)
 
-        # Initialize visualizers
-        self.adaptive_visualizer = None
-        self._initialize_visualizers()
+        # Visualization
+        self.visualizer = None
+        self.enable_3d = self.adaptive_config.get('enable_3d_visualization', True)
 
-        # Update config file with default settings if they don't exist
-        self._update_config_file()
+        # Adaptive learning metrics
+        self.margin_samples_per_class = defaultdict(list)
+        self.divergence_samples_per_class = defaultdict(list)
+        self.failed_samples = []
 
-        # Show current settings
-        self.show_adaptive_settings()
+        # Comprehensive visualizer
+        self.comprehensive_visualizer = ComprehensiveAdaptiveVisualizer(dataset_name)
 
-        # Add 3D visualization initialization
-        self._initialize_3d_visualization()
+        # Model saving configuration
+        self.models_dir = Path('Models')
+        self.models_dir.mkdir(exist_ok=True)
 
-    def _load_config(self, dataset_name: str) -> Dict:
-        """Load configuration from file"""
-        config_path = f"{dataset_name}.conf"
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, 'r') as f:
-                    return json.load(f)
-            except:
-                return {}
-        return {}
+        # Training history tracking
+        self.training_history = []
+        self.round_stats = []
 
-    def _select_dataset(self) -> str:
-        """Select dataset from available configuration files or data files"""
-        available_configs = DatasetConfig.get_available_config_files()
-
-        # Also look for data files
-        csv_files = glob.glob("*.csv")
-        dat_files = glob.glob("*.dat")
-        data_files = csv_files + dat_files
-
-        if available_configs or data_files:
-            print("📁 Available datasets and configuration files:")
-
-            # Show configuration-based datasets
-            if available_configs:
-                print("\n🎯 Configuration files:")
-                for i, config in enumerate(available_configs, 1):
-                    base_name = config['file'].replace('.json', '').replace('.conf', '')
-                    print(f"  {i}. {base_name} ({config['type']} configuration)")
-
-            # Show data files
-            if data_files:
-                print("\n📊 Data files:")
-                start_idx = len(available_configs) + 1
-                for i, data_file in enumerate(data_files, start_idx):
-                    print(f"  {i}. {data_file}")
-
-            try:
-                choice = input(f"\nSelect a dataset (1-{len(available_configs) + len(data_files)}): ").strip()
-                choice_idx = int(choice) - 1
-
-                if 0 <= choice_idx < len(available_configs):
-                    selected_config = available_configs[choice_idx]
-                    selected_dataset = selected_config['file'].replace('.json', '').replace('.conf', '')
-                    print(f"🎯 Selected configuration: {selected_dataset} ({selected_config['type']})")
-                    return selected_dataset
-                elif len(available_configs) <= choice_idx < len(available_configs) + len(data_files):
-                    data_file_idx = choice_idx - len(available_configs)
-                    selected_file = data_files[data_file_idx]
-                    dataset_name = selected_file.replace('.csv', '').replace('.dat', '')
-                    print(f"📁 Selected data file: {selected_file}")
-                    return dataset_name
-                else:
-                    print("❌ Invalid selection")
-                    return input("Enter dataset name: ").strip()
-            except ValueError:
-                print("❌ Invalid input")
-                return input("Enter dataset name: ").strip()
-        else:
-            print("❌ No configuration files or data files found.")
-            print("   Looking for: *.json, *.conf, *.csv, *.dat")
-            dataset_name = input("Enter dataset name: ").strip()
-            if not dataset_name:
-                dataset_name = "default_dataset"
-            return dataset_name
-
-    def _get_device_type(self) -> str:
-        """Get the device type (CPU/GPU)"""
-        try:
-            if torch.cuda.is_available():
-                gpu_name = torch.cuda.get_device_name(0) if torch.cuda.device_count() > 0 else "Unknown GPU"
-                return f"GPU: {gpu_name}"
-            else:
-                return "CPU"
-        except:
-            return "Unknown Device"
-
-    def _initialize_visualizers(self):
-        """Initialize visualization systems"""
-        # Initialize adaptive visualizer
-        if self.viz_config.get('enabled', True):
-            try:
-                self.adaptive_visualizer = DBNNVisualizer(
-                    self.model,
-                    output_dir=self.viz_config.get('output_dir', 'adaptive_visualizations'),
-                    enabled=True
-                )
-                print("✓ Adaptive visualizer initialized")
-            except Exception as e:
-                print(f"⚠️ Could not initialize adaptive visualizer: {e}")
-                self.adaptive_visualizer = None
-
-        # Create output directory
-        os.makedirs(self.viz_config.get('output_dir', 'adaptive_visualizations'), exist_ok=True)
-
-    def _update_config_file(self):
-        """Update the dataset configuration file with adaptive learning settings"""
-        config_path = f"{self.dataset_name}.conf"
-        try:
-            if os.path.exists(config_path):
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
-            else:
-                config = {}
-
-            if 'adaptive_learning' not in config:
-                config['adaptive_learning'] = {}
-
-            config['adaptive_learning'].update(self.adaptive_config)
-
-            with open(config_path, 'w') as f:
-                json.dump(config, f, indent=4)
-
-            print(f"✅ Updated configuration file: {config_path}")
-        except Exception as e:
-            print(f"⚠️  Warning: Could not update config file: {str(e)}")
-
-    def show_adaptive_settings(self):
-        """Display the current adaptive learning settings"""
-        print("\n🔧 Advanced Adaptive Learning Settings:")
-        print("=" * 60)
+        print("🎯 Adaptive DBNN initialized with configuration:")
         for key, value in self.adaptive_config.items():
-            if key in ['margin_tolerance', 'kl_divergence_threshold', 'max_kl_samples_per_class']:
-                print(f"  {key:40}: {value} (KL Divergence)")
-            elif key == 'disable_sample_limit':
-                status = "DISABLED 🚫" if value else "ENABLED ✅"
-                print(f"  {key:40}: {value} ({status})")
-            else:
-                print(f"  {key:40}: {value}")
-        print(f"\n💻 Device: {self.device_type}")
-        mode = "KL Divergence" if self.adaptive_config.get('enable_kl_divergence', False) else "Margin-Based"
-        limit_status = "UNLIMITED" if self.adaptive_config.get('disable_sample_limit', False) else "LIMITED"
-        print(f"🎯 Selection Mode: {mode} ({limit_status})")
-        print()
+            print(f"  {key:40}: {value}")
 
-    def _initialize_3d_visualization(self):
-        """Initialize 3D visualization system"""
-        self.visualization_output_dir = self.viz_config.get('output_dir', 'adaptive_visualizations')
-        os.makedirs(f'{self.visualization_output_dir}/3d_animations', exist_ok=True)
-        self.feature_grid_history = []
-        self.epoch_timestamps = []
+    def _setup_adaptive_config(self) -> Dict[str, Any]:
+        """Setup adaptive learning configuration with defaults"""
+        default_config = {
+            'enable_adaptive': True,
+            'initial_samples_per_class': 10,
+            'margin': 0.1,
+            'max_adaptive_rounds': 10,
+            'patience': 3,
+            'min_improvement': 0.001,
+            'max_margin_samples_per_class': 3,
+            'margin_tolerance': 0.15,
+            'kl_threshold': 0.1,
+            'training_convergence_epochs': 50,
+            'min_training_accuracy': 0.95,
+            'min_samples_to_add_per_class': 5,
+            'adaptive_margin_relaxation': 0.1,
+            'max_divergence_samples_per_class': 5,
+            'exhaust_all_failed': True,
+            'min_failed_threshold': 10,
+            'enable_kl_divergence': False,
+            'max_samples_per_class_fallback': 2,
+            'enable_3d_visualization': True,
+            '3d_snapshot_interval': 10,
+            'learning_rate': 1.0,
+            'enable_acid_test': True,
+            'min_training_percentage_for_stopping': 10.0,
+            'max_training_percentage': 90.0,
+            'kl_divergence_threshold': 0.1,
+            'max_kl_samples_per_class': 5,
+            'disable_sample_limit': False,
+            'architecture_freeze_epochs': 50,
+            'adaptive_training_epochs': 20
+        }
 
-        print("🎨 3D Visualization system initialized")
+        # Update with provided config
+        adaptive_config = default_config.copy()
+        adaptive_config.update(self.config.get('adaptive', {}))
 
-    def _debug_predictions(self, y_remaining: np.ndarray, predictions: np.ndarray, posteriors: np.ndarray):
-        """Debug method to understand prediction issues"""
-        print(f"🔍 Debug - y_remaining unique: {np.unique(y_remaining)}")
-        print(f"🔍 Debug - predictions unique: {np.unique(predictions) if len(predictions) > 0 else 'empty'}")
-        print(f"🔍 Debug - predictions shape: {predictions.shape if hasattr(predictions, 'shape') else 'no shape'}")
-        print(f"🔍 Debug - posteriors shape: {posteriors.shape}")
-        print(f"🔍 Debug - sample predictions: {predictions[:5] if len(predictions) > 5 else predictions}")
-        print(f"🔍 Debug - sample posteriors: {posteriors[:2] if len(posteriors) > 2 else posteriors}")
+        # Update with direct config values
+        for key in default_config:
+            if key in self.config:
+                adaptive_config[key] = self.config[key]
 
-    def prepare_full_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Prepare the full dataset for adaptive learning"""
-        print("📊 Preparing full dataset...")
+        return adaptive_config
 
-        # Load data using the model's method
-        self.model.load_data()
+    def _should_create_visualizations(self, round_num: int) -> bool:
+        """Determine whether to create visualizations based on round and configuration"""
+        if not self.adaptive_config.get('enable_visualization', True):
+            return False
 
-        # Preprocess data using the enhanced preprocessor
-        X, y, feature_names = self.model.preprocess_data()
+        # Create visualizations only at strategic points to save time
+        if round_num == 1:  # Always create first round
+            return True
+        elif round_num <= 10 and round_num % 2 == 0:  # Every 2 rounds for first 10
+            return True
+        elif round_num <= 50 and round_num % 5 == 0:  # Every 5 rounds for next 40
+            return True
+        elif round_num % 10 == 0:  # Every 10 rounds after that
+            return True
 
-        # Store original y for reference (before encoding)
-        y_original = y.copy()
+        return False
 
-        # Store the full dataset
+    def load_and_preprocess_data(self, file_path: str = None, feature_columns: List[str] = None) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+        """Load and preprocess data with feature column support"""
+        print("📊 Loading and preprocessing data...")
+
+        # Load data
+        data = self.db.load_data(file_path, feature_columns)
+
+        # Preprocess data
+        X, y, feature_columns_used = self.db.preprocess_data(feature_columns)
+
+        # Store full dataset
         self.X_full = X
         self.y_full = y
-        self.y_full_original = y_original
-        self.original_data_shape = X.shape
+        self.feature_columns = feature_columns_used
 
-        print(f"✅ Dataset prepared: {X.shape[0]} samples, {X.shape[1]} features")
-        print(f"📊 Classes: {len(np.unique(y))} ({np.unique(y_original)})")
-        print(f"🔧 Features: {feature_names}")
+        print(f"✅ Data loaded: {X.shape[0]} samples, {X.shape[1]} features")
+        print(f"📊 Feature columns: {self.feature_columns}")
+        print(f"🎯 Classes: {np.unique(y)}")
 
-        return X, y, y_original
+        return X, y, feature_columns_used
 
-    def adaptive_learn(self, X: np.ndarray = None, y: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Main adaptive learning method with acid test-based stopping criteria"""
-        print("\n🚀 STARTING ADAPTIVE LEARNING")
-        print("=" * 60)
+    def prepare_full_data(self, feature_columns: List[str] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Prepare full dataset with feature columns - FIXED METHOD"""
+        print("📊 Preparing full dataset...")
 
-        # Use provided data or prepare full data
-        if X is None or y is None:
-            print("📊 Preparing dataset...")
-            X, y, y_original = self.prepare_full_data()
-        else:
-            y_original = y.copy()
-            if len(y.shape) > 1 and y.shape[1] > 1:
-                y = np.argmax(y, axis=1)
+        # Load and preprocess data if not already done
+        if self.X_full is None or self.y_full is None:
+            self.X_full, self.y_full, self.feature_columns = self.load_and_preprocess_data(feature_columns=feature_columns)
 
-        # Store the full dataset
-        self.X_full = X.copy()
-        self.y_full = y.copy()
-        self.y_full_original = y_original
+        # Return the data
+        return self.X_full, self.y_full, self.y_full  # Return y_full twice for compatibility
 
-        print(f"📦 Total samples: {len(X)}")
-        print(f"🎯 Classes: {np.unique(y_original)}")
+    def initialize_with_full_data(self, feature_columns: List[str] = None):
+        """Initialize DBNN with full dataset architecture"""
+        print("🏗️ Initializing DBNN with full dataset architecture...")
 
-        # STEP 1: Initialize DBNN architecture with full dataset
-        self.model.initialize_with_full_data(X, y)
+        # Prepare full data
+        X_full, y_full, _ = self.prepare_full_data(feature_columns)
 
-        # STEP 2: Select initial diverse training samples
-        X_train, y_train, initial_indices = self._select_initial_training_samples(X, y)
-        remaining_indices = [i for i in range(len(X)) if i not in initial_indices]
+        # Initialize DBNN with full data
+        self.db.initialize_with_full_data(X_full, y_full, self.feature_columns)
 
-        print(f"📊 Initial training set: {len(X_train)} samples")
-        print(f"📊 Remaining test set: {len(remaining_indices)} samples")
+        print(f"✅ DBNN initialized with full dataset: {X_full.shape[0]} samples")
 
-        # Initialize tracking variables for acid test-based stopping
-        self.best_accuracy = 0.0
-        self.best_training_indices = initial_indices.copy()
-        self.best_round = 0
-        acid_test_history = []
-        patience_counter = 0
+    def create_initial_training_set(self, initial_samples_per_class: int = None) -> Tuple[np.ndarray, np.ndarray]:
+        """Create initial training set with specified samples per class"""
+        if initial_samples_per_class is None:
+            initial_samples_per_class = self.adaptive_config['initial_samples_per_class']
 
-        max_rounds = self.adaptive_config['max_adaptive_rounds']
-        patience = self.adaptive_config['patience']
-        min_improvement = self.adaptive_config['min_improvement']
+        print(f"🎯 Creating initial training set ({initial_samples_per_class} samples per class)...")
 
-        print(f"\n🔄 Starting adaptive learning for up to {max_rounds} rounds...")
-        print(f"📊 Stopping criteria: 100% acid test OR no improvement for {patience} rounds")
-        self.adaptive_start_time = datetime.now()
+        X_initial = []
+        y_initial = []
 
-        for round_num in range(1, max_rounds + 1):
-            self.adaptive_round = round_num
+        unique_classes = np.unique(self.y_full)
+        for class_label in unique_classes:
+            class_indices = np.where(self.y_full == class_label)[0]
+            n_samples = min(initial_samples_per_class, len(class_indices))
 
-            print(f"\n🎯 Round {round_num}/{max_rounds}")
-            print("-" * 40)
+            if n_samples > 0:
+                selected_indices = np.random.choice(class_indices, n_samples, replace=False)
+                X_initial.append(self.X_full[selected_indices])
+                y_initial.append(self.y_full[selected_indices])
 
-            # STEP 2 (continued): Train with current training data (no split)
-            print("🎯 Training with current training data...")
-            success = self.model.train_with_data(X_train, y_train, reset_weights=True)
+        X_train = np.vstack(X_initial)
+        y_train = np.hstack(y_initial)
 
-            if not success:
-                print("❌ Training failed, stopping...")
-                break
+        print(f"✅ Initial training set: {X_train.shape[0]} samples")
+        print(f"📊 Class distribution: {np.unique(y_train, return_counts=True)}")
 
-            # STEP 3: Run acid test on entire dataset - THIS IS OUR MAIN STOPPING CRITERION
-            print("🧪 Running acid test on entire dataset...")
-            try:
-                all_predictions = self.model.predict(X)
-                # Ensure predictions and y have same data type
-                all_predictions = all_predictions.astype(y.dtype)
-                acid_test_accuracy = accuracy_score(y, all_predictions)
-                acid_test_history.append(acid_test_accuracy)
-                print(f"📊 Acid test accuracy: {acid_test_accuracy:.4f}")
+        return X_train, y_train
 
-                # PRIMARY STOPPING CRITERION 1: 100% accuracy on entire dataset
-                if acid_test_accuracy >= 0.9999:  # 99.99% accuracy (accounting for floating point)
-                    print("🎉 REACHED 100% ACCURACY ON ENTIRE DATASET! Stopping adaptive learning.")
-                    self.best_accuracy = acid_test_accuracy
-                    self.best_training_indices = initial_indices.copy()
-                    self.best_round = round_num
-                    break
 
-            except Exception as e:
-                print(f"❌ Acid test failed: {e}")
-                acid_test_accuracy = 0.0
-                acid_test_history.append(0.0)
-                continue
+    def _select_initial_training_samples(self, X: np.ndarray, y: np.ndarray, initial_samples_per_class: int = None) -> Tuple[np.ndarray, np.ndarray, List[int]]:
+        """Select initial diverse training samples using K-means clustering"""
+        if initial_samples_per_class is None:
+            initial_samples_per_class = self.adaptive_config['initial_samples_per_class']
 
-            # STEP 3 (continued): Check if we have any remaining samples to process
-            if not remaining_indices:
-                print("💤 No more samples to add to training set")
-                # Check if we should stop based on acid test performance
-                if len(acid_test_history) >= 3:
-                    recent_improvement = acid_test_history[-1] - acid_test_history[-3]
-                    if recent_improvement < min_improvement:
-                        print("📊 Acid test performance flattened - stopping adaptive learning.")
-                        break
-                continue
+        print(f"🎯 Selecting initial training samples ({initial_samples_per_class} samples per class)...")
 
-            # STEP 4: Identify failed candidates in remaining data
-            X_remaining = X[remaining_indices]
-            y_remaining = y[remaining_indices]
-
-            # Get predictions for remaining data
-            remaining_predictions = self.model.predict(X_remaining)
-            remaining_posteriors = self.model._compute_batch_posterior(X_remaining)
-
-            # Find misclassified samples
-            misclassified_mask = remaining_predictions != y_remaining
-            misclassified_indices = np.where(misclassified_mask)[0]
-
-            if len(misclassified_indices) == 0:
-                print("✅ No misclassified samples in remaining data!")
-                # PRIMARY STOPPING CRITERION 2: No errors in remaining data
-                print("🎉 PERFECT CLASSIFICATION ON REMAINING DATA! Stopping adaptive learning.")
-                self.best_accuracy = acid_test_accuracy
-                self.best_training_indices = initial_indices.copy()
-                self.best_round = round_num
-                break
-
-            print(f"📊 Found {len(misclassified_indices)} misclassified samples in remaining data")
-
-            # STEP 5: Select most divergent failed candidates
-            samples_to_add_indices = self._select_divergent_samples(
-                X_remaining, y_remaining, remaining_predictions, remaining_posteriors,
-                misclassified_indices, remaining_indices
-            )
-
-            if not samples_to_add_indices:
-                print("💤 No divergent samples to add")
-                # Check if we should stop based on acid test performance
-                if len(acid_test_history) >= 3:
-                    recent_improvement = acid_test_history[-1] - acid_test_history[-3]
-                    if recent_improvement < min_improvement:
-                        print("📊 Acid test performance flattened - stopping adaptive learning.")
-                        break
-                continue
-
-            # Update training set
-            initial_indices.extend(samples_to_add_indices)
-            remaining_indices = [i for i in remaining_indices if i not in samples_to_add_indices]
-
-            X_train = X[initial_indices]
-            y_train = y[initial_indices]
-
-            print(f"📈 Training set size: {len(X_train)} samples ({len(X_train)/len(X)*100:.1f}% of total)")
-            print(f"📊 Remaining set size: {len(remaining_indices)} samples")
-
-            # STEP 6: Update best model and check for improvement
-            if acid_test_accuracy > self.best_accuracy + min_improvement:
-                improvement = acid_test_accuracy - self.best_accuracy
-                self.best_accuracy = acid_test_accuracy
-                self.best_training_indices = initial_indices.copy()
-                self.best_round = round_num
-                patience_counter = 0
-                print(f"🏆 New best acid test accuracy: {acid_test_accuracy:.4f} (+{improvement:.4f})")
-            else:
-                patience_counter += 1
-                if acid_test_accuracy > self.best_accuracy:
-                    small_improvement = acid_test_accuracy - self.best_accuracy
-                    print(f"↗️  Small improvement: {acid_test_accuracy:.4f} (+{small_improvement:.4f}) - Patience: {patience_counter}/{patience}")
-                else:
-                    print(f"🔄 No improvement - Patience: {patience_counter}/{patience}")
-
-            # PRIMARY STOPPING CRITERION 3: No significant improvement for patience rounds
-            if patience_counter >= patience:
-                print(f"🛑 PATIENCE EXCEEDED: No significant improvement in acid test for {patience} rounds")
-                print(f"   Best acid test accuracy: {self.best_accuracy:.4f} (round {self.best_round})")
-                print(f"   Current acid test accuracy: {acid_test_accuracy:.4f}")
-                break
-
-            # SECONDARY STOPPING CRITERION: Check for performance plateau
-            if len(acid_test_history) >= 5:
-                recent_trend = acid_test_history[-5:]
-                max_recent = max(recent_trend)
-                min_recent = min(recent_trend)
-                fluctuation = max_recent - min_recent
-
-                if fluctuation < min_improvement * 2:  # Very small fluctuations
-                    print(f"📊 Acid test performance plateaued (fluctuation: {fluctuation:.4f}) - stopping adaptive learning.")
-                    break
-
-        # Finalize with best configuration
-        print(f"\n🎉 Adaptive learning completed after {self.adaptive_round} rounds!")
-
-        # Ensure we have valid best values
-        if not hasattr(self, 'best_accuracy') or self.best_accuracy == 0.0:
-            # Use final values if best wasn't set
-            self.best_accuracy = acid_test_history[-1] if acid_test_history else 0.0
-            self.best_training_indices = initial_indices.copy()
-            self.best_round = self.adaptive_round
-
-        print(f"🏆 Best acid test accuracy: {self.best_accuracy:.4f} (round {self.best_round})")
-        print(f"📊 Final training set: {len(self.best_training_indices)} samples ({len(self.best_training_indices)/len(X)*100:.1f}% of total)")
-
-        # Use best configuration for final model
-        X_train_best = X[self.best_training_indices]
-        y_train_best = y[self.best_training_indices]
-        X_test_best = X[[i for i in range(len(X)) if i not in self.best_training_indices]]
-        y_test_best = y[[i for i in range(len(X)) if i not in self.best_training_indices]]
-
-        # Train final model with best configuration
-        print("🔧 Training final model with best configuration...")
-        self.model.train_with_data(X_train_best, y_train_best, reset_weights=True)
-
-        # Final acid test verification
-        final_predictions = self.model.predict(X)
-        final_accuracy = accuracy_score(y, final_predictions)
-
-        print(f"📊 Final acid test accuracy: {final_accuracy:.4f}")
-        print(f"📈 Final training set size: {len(X_train_best)}")
-        print(f"📊 Final remaining set size: {len(X_test_best)}")
-
-        # Generate reports
-        self._generate_adaptive_learning_report()
-
-        return X_train_best, y_train_best, X_test_best, y_test_best
-
-    def _select_initial_training_samples(self, X: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray, List[int]]:
-        """Select initial diverse training samples from each class"""
-        initial_samples = self.adaptive_config['initial_samples_per_class']
-        unique_classes = np.unique(y)
-
+        X_initial = []
+        y_initial = []
         initial_indices = []
 
-        print("🎯 Selecting initial diverse training samples...")
+        unique_classes = np.unique(y)
 
-        for class_id in unique_classes:
-            class_indices = np.where(y == class_id)[0]
+        for class_label in unique_classes:
+            class_indices = np.where(y == class_label)[0]
+            n_samples = min(initial_samples_per_class, len(class_indices))
 
-            if len(class_indices) > initial_samples:
-                # Use k-means++ to select diverse samples
-                class_data = X[class_indices]
-                kmeans = KMeans(n_clusters=initial_samples, init='k-means++', n_init=1, random_state=42)
-                kmeans.fit(class_data)
+            if n_samples > 0:
+                if len(class_indices) > n_samples:
+                    # Use k-means to select diverse samples
+                    class_data = X[class_indices]
 
-                # Find samples closest to cluster centers
-                distances = kmeans.transform(class_data)
-                closest_indices = np.argmin(distances, axis=0)
-                selected_indices = class_indices[closest_indices]
-            else:
-                # Use all available samples
-                selected_indices = class_indices
+                    try:
+                        from sklearn.cluster import KMeans
+                        kmeans = KMeans(n_clusters=n_samples, init='k-means++', n_init=1, random_state=42)
+                        kmeans.fit(class_data)
 
-            initial_indices.extend(selected_indices)
+                        # Find samples closest to cluster centers
+                        distances = kmeans.transform(class_data)
+                        closest_indices = np.argmin(distances, axis=0)
+                        selected_class_indices = class_indices[closest_indices]
+                    except:
+                        # Fallback: random selection
+                        selected_class_indices = np.random.choice(class_indices, n_samples, replace=False)
+                else:
+                    # Use all available samples for this class
+                    selected_class_indices = class_indices
 
-        X_train = X[initial_indices]
-        y_train = y[initial_indices]
+                X_initial.append(X[selected_class_indices])
+                y_initial.append(y[selected_class_indices])
+                initial_indices.extend(selected_class_indices.tolist())
+
+        if X_initial:
+            X_train = np.vstack(X_initial)
+            y_train = np.hstack(y_initial)
+        else:
+            X_train = np.array([]).reshape(0, X.shape[1])
+            y_train = np.array([])
+
+        print(f"✅ Initial training set: {X_train.shape[0]} samples")
+        print(f"📊 Class distribution: {np.unique(y_train, return_counts=True)}")
 
         return X_train, y_train, initial_indices
 
@@ -1488,10 +3266,10 @@ class AdaptiveDBNN:
                                 predictions: np.ndarray, posteriors: np.ndarray,
                                 misclassified_indices: np.ndarray, remaining_indices: List[int]) -> List[int]:
         """Select most divergent failed candidates from each class"""
+        print("🔍 Selecting most divergent failed candidates...")
+
         samples_to_add = []
         unique_classes = np.unique(y_remaining)
-
-        print("🔍 Selecting most divergent failed candidates...")
 
         # Group misclassified samples by true class
         class_samples = defaultdict(list)
@@ -1501,11 +3279,10 @@ class AdaptiveDBNN:
             true_class = y_remaining[idx_in_remaining]
             pred_class = predictions[idx_in_remaining]
 
-            # Convert class labels to 0-based indices for array access
+            # Convert class labels to indices for array access
             true_class_idx_result = np.where(unique_classes == true_class)[0]
             pred_class_idx_result = np.where(unique_classes == pred_class)[0]
 
-            # Check if we found valid indices
             if len(true_class_idx_result) == 0 or len(pred_class_idx_result) == 0:
                 continue
 
@@ -1513,8 +3290,8 @@ class AdaptiveDBNN:
             pred_class_idx = pred_class_idx_result[0]
 
             # Calculate margin (divergence)
-            true_posterior = posteriors[idx_in_remaining, true_class_idx]
-            pred_posterior = posteriors[idx_in_remaining, pred_class_idx]
+            true_posterior = posteriors[idx_in_remaining, true_class_idx] if posteriors is not None and posteriors.shape[1] > true_class_idx else 0.0
+            pred_posterior = posteriors[idx_in_remaining, pred_class_idx] if posteriors is not None and posteriors.shape[1] > pred_class_idx else 0.0
             margin = pred_posterior - true_posterior
 
             class_samples[true_class].append({
@@ -1542,1075 +3319,601 @@ class AdaptiveDBNN:
             for sample in selected_for_class:
                 samples_to_add.append(sample['index'])
 
-                # Track selection
-                self.all_selected_samples[self._get_original_class_label(class_id)].append({
-                    'index': sample['index'],
-                    'margin': sample['margin'],
-                    'selection_type': 'divergent',
-                    'round': self.adaptive_round
-                })
-
             if selected_for_class:
                 print(f"   ✅ Class {class_id}: Selected {len(selected_for_class)} divergent samples")
 
         print(f"📥 Total divergent samples to add: {len(samples_to_add)}")
         return samples_to_add
 
-    def _get_original_class_label(self, encoded_class: int) -> str:
-        """Convert encoded class back to original label"""
-        if hasattr(self.label_encoder, 'classes_'):
-            try:
-                return str(self.label_encoder.inverse_transform([encoded_class])[0])
-            except:
-                return str(encoded_class)
-        return str(encoded_class)
-
-    def _generate_adaptive_learning_report(self):
-        """Generate comprehensive adaptive learning report"""
-        print("\n📊 Generating Adaptive Learning Report...")
-
-        # Ensure we have valid statistics
-        if not hasattr(self, 'best_accuracy'):
-            self.best_accuracy = 0.0
-        if not hasattr(self, 'best_training_indices'):
-            self.best_training_indices = []
-        if not hasattr(self, 'best_round'):
-            self.best_round = 0
-
-        total_time = str(datetime.now() - self.adaptive_start_time) if hasattr(self, 'adaptive_start_time') and self.adaptive_start_time else "N/A"
-
-        report = {
-            'dataset': self.dataset_name,
-            'total_samples': len(self.X_full) if hasattr(self, 'X_full') else 0,
-            'final_training_size': len(self.best_training_indices),
-            'final_remaining_size': (len(self.X_full) - len(self.best_training_indices)) if hasattr(self, 'X_full') else 0,
-            'best_accuracy': float(self.best_accuracy),  # Ensure it's a float
-            'best_round': self.best_round,
-            'total_rounds': getattr(self, 'adaptive_round', 0),
-            'total_time': total_time,
-            'adaptive_config': self.adaptive_config,
-            'round_statistics': getattr(self, 'round_stats', []),
-            'selected_samples_by_class': {k: len(v) for k, v in self.all_selected_samples.items()}
-        }
-
-        # Save report
-        report_path = f"{self.viz_config.get('output_dir', 'adaptive_visualizations')}/adaptive_learning_report.json"
-        with open(report_path, 'w') as f:
-            json.dump(report, f, indent=4, default=str)
-
-        print(f"✅ Report saved to: {report_path}")
-
-        # Print summary with proper formatting
-        print("\n📈 Adaptive Learning Summary:")
-        print("=" * 50)
-        print(f"   Dataset: {report['dataset']}")
-        print(f"   Total samples: {report['total_samples']}")
-
-        if report['total_samples'] > 0:
-            training_percentage = (report['final_training_size'] / report['total_samples']) * 100
-            print(f"   Final training set: {report['final_training_size']} ({training_percentage:.1f}%)")
-        else:
-            print(f"   Final training set: {report['final_training_size']}")
-
-        print(f"   Best acid test accuracy: {report['best_accuracy']:.4f}")
-        print(f"   Achieved in round: {report['best_round']}")
-        print(f"   Total rounds: {report['total_rounds']}")
-        print(f"   Total time: {report['total_time']}")
-        print("=" * 50)
-
-
-class AdaptiveDBNNGUI:
-    """GUI interface for configuring and running Adaptive DBNN"""
-
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Adaptive DBNN Configuration")
-        self.root.geometry("1200x900")
-
-        # Configuration storage
-        self.config = {}
-        self.config_file = "adaptive_dbnn_config.json"
-
-        # Data storage
-        self.data = None
-        self.data_columns = []
-        self.column_types = {}
-
-        # Main variables
-        self.dataset_name = tk.StringVar()
-        self.data_file_path = tk.StringVar()
-        self.target_column = tk.StringVar(value="target")
-        self.output_dir = tk.StringVar(value="adaptive_visualizations")
-
-        # Feature selection
-        self.feature_vars = {}
-        self.feature_frame = None
-
-        self.setup_ui()
-        self.load_saved_config()
-
-    def setup_ui(self):
-        """Setup the main GUI interface"""
-        # Create notebook for tabs
-        notebook = ttk.Notebook(self.root)
-        notebook.pack(fill='both', expand=True, padx=10, pady=10)
-
-        # Main Configuration Tab
-        main_frame = ttk.Frame(notebook)
-        notebook.add(main_frame, text="Dataset & Features")
-
-        # Adaptive Learning Tab
-        adaptive_frame = ttk.Frame(notebook)
-        notebook.add(adaptive_frame, text="Adaptive Learning")
-
-        # Advanced Tab
-        advanced_frame = ttk.Frame(notebook)
-        notebook.add(advanced_frame, text="Advanced")
-
-        # Setup each tab
-        self.setup_main_tab(main_frame)
-        self.setup_adaptive_tab(adaptive_frame)
-        self.setup_advanced_tab(advanced_frame)
-
-        # Control buttons
-        self.setup_control_buttons()
-
-    def setup_main_tab(self, parent):
-        """Setup main configuration tab with dataset and feature selection"""
-        # Dataset selection
-        dataset_frame = ttk.LabelFrame(parent, text="Dataset Configuration", padding="10")
-        dataset_frame.pack(fill='x', padx=5, pady=5)
-
-        ttk.Label(dataset_frame, text="Dataset File:").grid(row=0, column=0, sticky='w', pady=2)
-        ttk.Entry(dataset_frame, textvariable=self.data_file_path, width=50).grid(row=0, column=1, sticky='w', pady=2, padx=5)
-        ttk.Button(dataset_frame, text="Browse", command=self.browse_data_file).grid(row=0, column=2, padx=5)
-        ttk.Button(dataset_frame, text="Load & Analyze", command=self.load_and_analyze_data).grid(row=0, column=3, padx=5)
-
-        ttk.Label(dataset_frame, text="Dataset Name:").grid(row=1, column=0, sticky='w', pady=2)
-        ttk.Entry(dataset_frame, textvariable=self.dataset_name, width=30).grid(row=1, column=1, sticky='w', pady=2, padx=5)
-
-        ttk.Label(dataset_frame, text="Target Column:").grid(row=2, column=0, sticky='w', pady=2)
-        self.target_combo = ttk.Combobox(dataset_frame, textvariable=self.target_column, width=30, state="readonly")
-        self.target_combo.grid(row=2, column=1, sticky='w', pady=2, padx=5)
-        ttk.Button(dataset_frame, text="Auto-Detect Target", command=self.auto_detect_target).grid(row=2, column=2, padx=5)
-
-        ttk.Label(dataset_frame, text="Output Directory:").grid(row=3, column=0, sticky='w', pady=2)
-        ttk.Entry(dataset_frame, textvariable=self.output_dir, width=30).grid(row=3, column=1, sticky='w', pady=2, padx=5)
-        ttk.Button(dataset_frame, text="Browse", command=self.browse_output_dir).grid(row=3, column=2, padx=5)
-
-        # Data preview
-        preview_frame = ttk.LabelFrame(parent, text="Data Preview", padding="10")
-        preview_frame.pack(fill='x', padx=5, pady=5)
-
-        self.preview_text = scrolledtext.ScrolledText(preview_frame, height=8, width=100)
-        self.preview_text.pack(fill='both', expand=True)
-
-        # Feature selection
-        self.feature_frame = ttk.LabelFrame(parent, text="Feature Selection", padding="10")
-        self.feature_frame.pack(fill='both', expand=True, padx=5, pady=5)
-
-        # Feature selection controls will be populated after data load
-
-        # DBNN Core Parameters
-        core_frame = ttk.LabelFrame(parent, text="DBNN Core Parameters", padding="10")
-        core_frame.pack(fill='x', padx=5, pady=5)
-
-        # Create a grid for core parameters
-        core_params = [
-            ("Resolution:", "resolution", "100", "Higher = more precise, slower"),
-            ("Gain:", "gain", "2.0", "Weight update intensity"),
-            ("Margin:", "margin", "0.2", "Classification tolerance"),
-            ("Max Epochs:", "max_epochs", "100", "Maximum training epochs"),
-            ("Patience:", "patience", "10", "Early stopping rounds")
-        ]
-
-        for i, (label, attr, default, tooltip) in enumerate(core_params):
-            ttk.Label(core_frame, text=label).grid(row=i, column=0, sticky='w', pady=2, padx=5)
-            var = tk.StringVar(value=default)
-            setattr(self, attr, var)
-            entry = ttk.Entry(core_frame, textvariable=var, width=10)
-            entry.grid(row=i, column=1, sticky='w', pady=2, padx=5)
-            ttk.Label(core_frame, text=tooltip).grid(row=i, column=2, sticky='w', padx=5)
-            self.create_tooltip(entry, tooltip)
-
-    def setup_feature_selection(self):
-        """Setup feature selection interface after data is loaded"""
-        # Clear existing feature selection
-        for widget in self.feature_frame.winfo_children():
-            widget.destroy()
-
-        if not self.data_columns:
-            ttk.Label(self.feature_frame, text="No data loaded. Please load a dataset first.").pack(pady=10)
-            return
-
-        # Create header with selection controls
-        header_frame = ttk.Frame(self.feature_frame)
-        header_frame.pack(fill='x', pady=5)
-
-        ttk.Label(header_frame, text="Select features for training:", font=('Arial', 10, 'bold')).pack(side='left', padx=5)
-
-        button_frame = ttk.Frame(header_frame)
-        button_frame.pack(side='right', padx=5)
-
-        ttk.Button(button_frame, text="Select All", command=self.select_all_features).pack(side='left', padx=2)
-        ttk.Button(button_frame, text="Deselect All", command=self.deselect_all_features).pack(side='left', padx=2)
-        ttk.Button(button_frame, text="Select Numeric", command=self.select_numeric_features).pack(side='left', padx=2)
-        ttk.Button(button_frame, text="Invert Selection", command=self.invert_feature_selection).pack(side='left', padx=2)
-
-        # Create scrollable frame for feature checkboxes
-        canvas = tk.Canvas(self.feature_frame, height=200)
-        scrollbar = ttk.Scrollbar(self.feature_frame, orient="vertical", command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas)
-
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-
-        # Create feature checkboxes in a grid
-        self.feature_vars = {}
-        num_columns = 4  # Number of columns for the grid
-        features_per_column = (len(self.data_columns) + num_columns - 1) // num_columns
-
-        for i, column in enumerate(self.data_columns):
-            if column == self.target_column.get():
-                continue  # Skip target column
-
-            row = i % features_per_column
-            col = i // features_per_column
-
-            var = tk.BooleanVar(value=True)  # Default to selected
-            self.feature_vars[column] = var
-
-            # Determine column type and create appropriate display
-            col_type = self.column_types.get(column, 'unknown')
-            display_text = f"{column} ({col_type})"
-
-            cb = ttk.Checkbutton(scrollable_frame, text=display_text, variable=var)
-            cb.grid(row=row, column=col, sticky='w', padx=5, pady=2)
-
-            # Color code based on type
-            if col_type == 'numeric':
-                cb.configure(style='Numeric.TCheckbutton')
-            elif col_type == 'categorical':
-                cb.configure(style='Categorical.TCheckbutton')
-
-            self.create_tooltip(cb, f"Column: {column}\nType: {col_type}")
-
-        # Add summary
-        summary_frame = ttk.Frame(self.feature_frame)
-        summary_frame.pack(fill='x', pady=5)
-
-        self.feature_summary = tk.StringVar()
-        ttk.Label(summary_frame, textvariable=self.feature_summary).pack(side='left')
-        self.update_feature_summary()
-
-    def analyze_column_types(self, df):
-        """Analyze column types for recommendations"""
-        column_types = {}
-
-        for column in df.columns:
-            # Skip if all null
-            if df[column].isna().all():
-                column_types[column] = 'all_null'
-                continue
-
-            # Check if numeric
-            if pd.api.types.is_numeric_dtype(df[column]):
-                column_types[column] = 'numeric'
-            else:
-                # Check if it could be categorical
-                unique_ratio = df[column].nunique() / len(df[column])
-                if unique_ratio < 0.1:  # Low cardinality
-                    column_types[column] = 'categorical_low'
-                elif unique_ratio < 0.5:  # Medium cardinality
-                    column_types[column] = 'categorical_medium'
-                else:  # High cardinality
-                    column_types[column] = 'categorical_high'
-
-        return column_types
-
-    def get_target_recommendations(self, df):
-        """Get target column recommendations based on cardinality"""
-        recommendations = []
-
-        for column in df.columns:
-            col_type = self.column_types.get(column, 'unknown')
-
-            # Good candidates for classification targets
-            if col_type in ['categorical_low', 'categorical_medium']:
-                unique_count = df[column].nunique()
-                if 2 <= unique_count <= 50:  # Reasonable number of classes
-                    recommendations.append({
-                        'column': column,
-                        'type': 'classification',
-                        'unique_count': unique_count,
-                        'score': 100 - unique_count  # Lower unique count = better for classification
-                    })
-
-            # Good candidates for regression targets
-            elif col_type == 'numeric':
-                if df[column].nunique() > 20:  # High cardinality numeric
-                    recommendations.append({
-                        'column': column,
-                        'type': 'regression',
-                        'unique_count': df[column].nunique(),
-                        'score': 50
-                    })
-
-        # Sort by score (higher is better)
-        recommendations.sort(key=lambda x: x['score'], reverse=True)
-        return recommendations
-
-    def auto_detect_target(self):
-        """Automatically detect and set the best target column"""
-        if self.data is None:
-            messagebox.showwarning("No Data", "Please load data first.")
-            return
-
-        recommendations = self.get_target_recommendations(self.data)
-
-        if not recommendations:
-            messagebox.showinfo("No Recommendations", "No suitable target columns found automatically.")
-            return
-
-        # Use the best recommendation
-        best_target = recommendations[0]
-        self.target_column.set(best_target['column'])
-
-        # Update target combo
-        self.target_combo.set(best_target['column'])
-
-        messagebox.showinfo(
-            "Target Auto-Detected",
-            f"Selected '{best_target['column']}' as target.\n"
-            f"Type: {best_target['type']}\n"
-            f"Unique values: {best_target['unique_count']}"
-        )
-
-        # Refresh feature selection to exclude the new target
-        self.setup_feature_selection()
-
-    def browse_data_file(self):
-        """Browse for data file"""
-        filename = filedialog.askopenfilename(
-            title="Select Data File",
-            filetypes=[("CSV files", "*.csv"), ("DAT files", "*.dat"), ("All files", "*.*")]
-        )
-        if filename:
-            self.data_file_path.set(filename)
-            # Extract dataset name from filename
-            base_name = os.path.splitext(os.path.basename(filename))[0]
-            self.dataset_name.set(base_name)
-
-    def load_and_analyze_data(self):
-        """Load and analyze the selected data file"""
-        file_path = self.data_file_path.get()
-        if not file_path or not os.path.exists(file_path):
-            messagebox.showerror("Error", "Please select a valid data file.")
-            return
-
-        try:
-            # Load data based on file type
-            if file_path.endswith('.csv'):
-                self.data = pd.read_csv(file_path)
-            else:  # DAT file or other
+    def adaptive_learn(self, feature_columns: List[str] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Main adaptive learning method with enhanced acid test stopping criteria"""
+        print("\n🚀 STARTING ADAPTIVE LEARNING")
+        print("=" * 60)
+
+        # Use provided data or prepare full data
+        if self.X_full is None or self.y_full is None:
+            print("📊 Preparing dataset...")
+            self.X_full, self.y_full, _ = self.prepare_full_data(feature_columns)
+
+        X = self.X_full
+        y = self.y_full
+
+        print(f"📦 Total samples: {len(X)}")
+        print(f"🎯 Classes: {np.unique(y)}")
+        print(f"📊 Features: {self.feature_columns}")
+
+        # STEP 1: Initialize DBNN architecture with full dataset and feature names
+        self.db.initialize_with_full_data(X, y, self.feature_columns)
+
+        # STEP 2: Select initial diverse training samples
+        X_train, y_train, initial_indices = self._select_initial_training_samples(X, y)
+        remaining_indices = [i for i in range(len(X)) if i not in initial_indices]
+
+        print(f"📊 Initial training set: {len(X_train)} samples")
+        print(f"📊 Remaining test set: {len(remaining_indices)} samples")
+
+        # Initialize tracking variables
+        self.best_accuracy = 0.0
+        self.best_training_indices = initial_indices.copy()
+        self.best_round = 0
+        self.round_stats = []
+        self.training_history = [initial_indices.copy()]
+        acid_test_history = []
+        patience_counter = 0
+
+        max_rounds = self.adaptive_config['max_adaptive_rounds']
+        patience = self.adaptive_config['patience']
+        min_improvement = self.adaptive_config['min_improvement']
+        enable_acid_test = self.adaptive_config.get('enable_acid_test', True)
+        enable_visualization = self.adaptive_config.get('enable_visualization', True)  # NEW
+
+        print(f"\n🔄 Starting adaptive learning for up to {max_rounds} rounds...")
+        print(f"📊 Stopping criteria: 100% accuracy OR patience {patience} rounds OR max rounds {max_rounds}")
+        print(f"🔬 Acid Test: {'ENABLED' if enable_acid_test else 'DISABLED'}")
+        print(f"🎨 Visualization: {'ENABLED' if enable_visualization else 'DISABLED'}")  # NEW
+        self.adaptive_start_time = datetime.now()
+
+        for round_num in range(1, max_rounds + 1):
+            self.adaptive_round = round_num
+
+            print(f"\n🎯 Round {round_num}/{max_rounds}")
+            print("-" * 40)
+
+            # Train with current training data
+            print("🎯 Training with current training data...")
+            train_accuracy = self.db.train_with_data(X_train, y_train, reset_weights=True)
+
+            if train_accuracy == 0.0:
+                print("❌ Training failed, stopping...")
+                break
+
+            # Run acid test on entire dataset if enabled
+            acid_test_accuracy = 0.0
+            if enable_acid_test:
+                print("🧪 Running acid test on entire dataset...")
                 try:
-                    self.data = pd.read_csv(file_path, delimiter=r'\s+')  # Space separated
-                except:
-                    self.data = pd.read_csv(file_path)  # Try with default parameters
-
-            self.data_columns = self.data.columns.tolist()
-
-            # Analyze column types
-            self.column_types = self.analyze_column_types(self.data)
-
-            # Update target column combobox
-            self.target_combo['values'] = self.data_columns
-
-            # Update data preview
-            self.update_data_preview()
-
-            # Setup feature selection
-            self.setup_feature_selection()
-
-            # Show target recommendations
-            self.show_target_recommendations()
-
-            messagebox.showinfo("Success", f"Data loaded successfully!\n{self.data.shape[0]} rows, {self.data.shape[1]} columns")
-
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to load data:\n{str(e)}")
-
-    def update_data_preview(self):
-        """Update the data preview text"""
-        if self.data is None:
-            self.preview_text.delete(1.0, tk.END)
-            self.preview_text.insert(tk.END, "No data loaded.")
-            return
-
-        preview_info = f"Dataset: {self.data.shape[0]} rows × {self.data.shape[1]} columns\n"
-        preview_info += f"Columns: {', '.join(self.data_columns)}\n\n"
-        preview_info += "First 5 rows:\n"
-        preview_info += self.data.head().to_string()
-
-        self.preview_text.delete(1.0, tk.END)
-        self.preview_text.insert(tk.END, preview_info)
-
-    def show_target_recommendations(self):
-        """Show target column recommendations"""
-        if self.data is None:
-            return
-
-        recommendations = self.get_target_recommendations(self.data)
-
-        if recommendations:
-            rec_text = "Target Column Recommendations:\n"
-            for i, rec in enumerate(recommendations[:5]):  # Top 5
-                rec_text += f"{i+1}. {rec['column']} ({rec['type']}, {rec['unique_count']} unique values)\n"
-
-            # Show in a message box
-            messagebox.showinfo("Target Recommendations", rec_text)
-
-    def select_all_features(self):
-        """Select all features"""
-        for var in self.feature_vars.values():
-            var.set(True)
-        self.update_feature_summary()
-
-    def deselect_all_features(self):
-        """Deselect all features"""
-        for var in self.feature_vars.values():
-            var.set(False)
-        self.update_feature_summary()
-
-    def select_numeric_features(self):
-        """Select only numeric features"""
-        for column, var in self.feature_vars.items():
-            col_type = self.column_types.get(column, 'unknown')
-            var.set(col_type == 'numeric')
-        self.update_feature_summary()
-
-    def invert_feature_selection(self):
-        """Invert feature selection"""
-        for var in self.feature_vars.values():
-            var.set(not var.get())
-        self.update_feature_summary()
-
-    def update_feature_summary(self):
-        """Update the feature selection summary"""
-        if not self.feature_vars:
-            self.feature_summary.set("No features available")
-            return
-
-        selected_count = sum(1 for var in self.feature_vars.values() if var.get())
-        total_count = len(self.feature_vars)
-
-        # Count by type
-        numeric_count = 0
-        categorical_count = 0
-        selected_numeric = 0
-        selected_categorical = 0
-
-        for column, var in self.feature_vars.items():
-            col_type = self.column_types.get(column, 'unknown')
-            is_selected = var.get()
-
-            if 'numeric' in col_type:
-                numeric_count += 1
-                if is_selected:
-                    selected_numeric += 1
-            elif 'categorical' in col_type:
-                categorical_count += 1
-                if is_selected:
-                    selected_categorical += 1
-
-        summary = f"Selected: {selected_count}/{total_count} features"
-        if numeric_count > 0:
-            summary += f" | Numeric: {selected_numeric}/{numeric_count}"
-        if categorical_count > 0:
-            summary += f" | Categorical: {selected_categorical}/{categorical_count}"
-
-        self.feature_summary.set(summary)
-
-    def get_selected_features(self):
-        """Get list of selected feature columns"""
-        return [col for col, var in self.feature_vars.items() if var.get()]
-
-    def setup_adaptive_tab(self, parent):
-        """Setup adaptive learning configuration tab"""
-        # Adaptive Learning Parameters
-        adaptive_frame = ttk.LabelFrame(parent, text="Adaptive Learning Parameters", padding="10")
-        adaptive_frame.pack(fill='both', expand=True, padx=5, pady=5)
-
-        # Create scrollable frame
-        canvas = tk.Canvas(adaptive_frame)
-        scrollbar = ttk.Scrollbar(adaptive_frame, orient="vertical", command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas)
-
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-
-        # Adaptive parameters
-        params = [
-            ("Enable Adaptive Learning", "enable_adaptive", "True", "checkbox", "Master switch for adaptive learning"),
-            ("Initial Samples Per Class", "initial_samples_per_class", "5", "entry", "Number of initial samples per class for training"),
-            ("Max Margin Samples Per Class", "max_margin_samples_per_class", "3", "entry", "Maximum margin-based samples to add per class per round"),
-            ("Margin Tolerance", "margin_tolerance", "0.15", "entry", "Tolerance for margin-based selection"),
-            ("KL Divergence Threshold", "kl_divergence_threshold", "0.1", "entry", "Threshold for KL divergence-based selection"),
-            ("Max Adaptive Rounds", "max_adaptive_rounds", "20", "entry", "Maximum number of adaptive learning rounds"),
-            ("Min Improvement", "min_improvement", "0.001", "entry", "Minimum improvement for early stopping"),
-            ("Training Convergence Epochs", "training_convergence_epochs", "50", "entry", "Epochs to wait for training convergence"),
-            ("Min Training Accuracy", "min_training_accuracy", "0.95", "entry", "Minimum training accuracy threshold"),
-            ("Min Samples To Add Per Class", "min_samples_to_add_per_class", "5", "entry", "Minimum samples to add per class"),
-            ("Adaptive Margin Relaxation", "adaptive_margin_relaxation", "0.1", "entry", "Margin relaxation factor"),
-            ("Max Divergence Samples Per Class", "max_divergence_samples_per_class", "5", "entry", "Maximum divergence samples per class"),
-            ("Exhaust All Failed", "exhaust_all_failed", "True", "checkbox", "Whether to exhaust all failed samples"),
-            ("Min Failed Threshold", "min_failed_threshold", "10", "entry", "Minimum failed samples threshold"),
-            ("Enable KL Divergence", "enable_kl_divergence", "True", "checkbox", "Enable KL divergence-based sampling"),
-            ("Max Samples Per Class Fallback", "max_samples_per_class_fallback", "2", "entry", "Fallback samples per class"),
-            ("Enable 3D Visualization", "enable_3d_visualization", "True", "checkbox", "Enable 3D visualization"),
-            ("3D Snapshot Interval", "3d_snapshot_interval", "10", "entry", "Interval for 3D snapshots"),
-            ("Learning Rate", "learning_rate", "1.0", "entry", "Learning rate for weight updates"),
-            ("Enable Acid Test", "enable_acid_test", "True", "checkbox", "Enable acid test on full dataset"),
-            ("Min Training Percentage For Stopping", "min_training_percentage_for_stopping", "10.0", "entry", "Minimum training percentage for stopping"),
-            ("Max Training Percentage", "max_training_percentage", "90.0", "entry", "Maximum training percentage"),
-            ("Max KL Samples Per Class", "max_kl_samples_per_class", "5", "entry", "Maximum KL-based samples per class"),
-            ("Disable Sample Limit", "disable_sample_limit", "False", "checkbox", "Disable sample limits (use with caution)"),
-        ]
-
-        self.adaptive_vars = {}
-
-        for i, (label, key, default, widget_type, tooltip) in enumerate(params):
-            ttk.Label(scrollable_frame, text=label).grid(row=i, column=0, sticky='w', pady=2, padx=5)
-
-            if widget_type == "checkbox":
-                var = tk.BooleanVar(value=(default.lower() == "true"))
-                cb = ttk.Checkbutton(scrollable_frame, variable=var)
-                cb.grid(row=i, column=1, sticky='w', pady=2)
-                self.adaptive_vars[key] = var
-            else:  # entry
-                var = tk.StringVar(value=default)
-                entry = ttk.Entry(scrollable_frame, textvariable=var, width=15)
-                entry.grid(row=i, column=1, sticky='w', pady=2)
-                self.adaptive_vars[key] = var
-
-            # Tooltip
-            widget = scrollable_frame.grid_slaves(row=i, column=1)[0]
-            self.create_tooltip(widget, f"Parameter: {key}\nDefault: {default}\n\n{tooltip}")
-
-    def setup_advanced_tab(self, parent):
-        """Setup advanced configuration tab"""
-        # Visualization Configuration
-        viz_frame = ttk.LabelFrame(parent, text="Visualization Configuration", padding="10")
-        viz_frame.pack(fill='x', padx=5, pady=5)
-
-        self.enable_visualization = tk.BooleanVar(value=True)
-        ttk.Checkbutton(viz_frame, text="Enable Visualization",
-                       variable=self.enable_visualization).grid(row=0, column=0, sticky='w', pady=2)
-
-        self.create_animations = tk.BooleanVar(value=False)
-        ttk.Checkbutton(viz_frame, text="Create Animations",
-                       variable=self.create_animations).grid(row=1, column=0, sticky='w', pady=2)
-
-        self.create_reports = tk.BooleanVar(value=True)
-        ttk.Checkbutton(viz_frame, text="Create Reports",
-                       variable=self.create_reports).grid(row=2, column=0, sticky='w', pady=2)
-
-        self.create_3d_visualizations = tk.BooleanVar(value=True)
-        ttk.Checkbutton(viz_frame, text="Create 3D Visualizations",
-                       variable=self.create_3d_visualizations).grid(row=3, column=0, sticky='w', pady=2)
-
-        # Statistics Configuration
-        stats_frame = ttk.LabelFrame(parent, text="Statistics Configuration", padding="10")
-        stats_frame.pack(fill='x', padx=5, pady=5)
-
-        self.enable_confusion_matrix = tk.BooleanVar(value=True)
-        ttk.Checkbutton(stats_frame, text="Enable Confusion Matrix",
-                       variable=self.enable_confusion_matrix).grid(row=0, column=0, sticky='w', pady=2)
-
-        self.enable_progress_plots = tk.BooleanVar(value=True)
-        ttk.Checkbutton(stats_frame, text="Enable Progress Plots",
-                       variable=self.enable_progress_plots).grid(row=1, column=0, sticky='w', pady=2)
-
-        self.create_interactive_plots = tk.BooleanVar(value=True)
-        ttk.Checkbutton(stats_frame, text="Create Interactive Plots",
-                       variable=self.create_interactive_plots).grid(row=2, column=0, sticky='w', pady=2)
-
-        self.create_sample_analysis = tk.BooleanVar(value=True)
-        ttk.Checkbutton(stats_frame, text="Create Sample Analysis",
-                       variable=self.create_sample_analysis).grid(row=3, column=0, sticky='w', pady=2)
-
-        # Color Configuration
-        color_frame = ttk.LabelFrame(parent, text="Color Configuration", padding="10")
-        color_frame.pack(fill='x', padx=5, pady=5)
-
-        ttk.Label(color_frame, text="Progress Color:").grid(row=0, column=0, sticky='w', pady=2)
-        self.color_progress = tk.StringVar(value="green")
-        ttk.Entry(color_frame, textvariable=self.color_progress, width=15).grid(row=0, column=1, sticky='w', pady=2)
-
-        ttk.Label(color_frame, text="Regression Color:").grid(row=1, column=0, sticky='w', pady=2)
-        self.color_regression = tk.StringVar(value="red")
-        ttk.Entry(color_frame, textvariable=self.color_regression, width=15).grid(row=1, column=1, sticky='w', pady=2)
-
-    def setup_control_buttons(self):
-        """Setup control buttons at the bottom"""
-        button_frame = ttk.Frame(self.root)
-        button_frame.pack(fill='x', padx=10, pady=10)
-
-        ttk.Button(button_frame, text="Save Configuration",
-                  command=self.save_configuration).pack(side='left', padx=5)
-
-        ttk.Button(button_frame, text="Load Configuration",
-                  command=self.load_configuration).pack(side='left', padx=5)
-
-        ttk.Button(button_frame, text="Reset to Defaults",
-                  command=self.reset_to_defaults).pack(side='left', padx=5)
-
-        ttk.Button(button_frame, text="Run Adaptive DBNN",
-                  command=self.run_adaptive_dbnn, style="Accent.TButton").pack(side='right', padx=5)
-
-        ttk.Button(button_frame, text="Close",
-                  command=self.root.quit).pack(side='right', padx=5)
-
-    def create_tooltip(self, widget, text):
-        """Create a tooltip for a widget"""
-        def enter(event):
-            tooltip = tk.Toplevel()
-            tooltip.wm_overrideredirect(True)
-            tooltip.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
-            label = ttk.Label(tooltip, text=text, background="yellow",
-                            relief='solid', borderwidth=1, padding=5, wraplength=300)
-            label.pack()
-            widget.tooltip = tooltip
-
-        def leave(event):
-            if hasattr(widget, 'tooltip'):
-                widget.tooltip.destroy()
-                delattr(widget, 'tooltip')
-
-        widget.bind("<Enter>", enter)
-        widget.bind("<Leave>", leave)
-
-    def browse_output_dir(self):
-        """Browse for output directory"""
-        directory = filedialog.askdirectory(title="Select Output Directory")
-        if directory:
-            self.output_dir.set(directory)
-
-    def get_configuration(self) -> Dict[str, Any]:
-        """Get current configuration from GUI"""
-        config = {
-            'dataset_name': self.dataset_name.get(),
-            'data_file': self.data_file_path.get(),
-            'target_column': self.target_column.get(),
-            'feature_columns': self.get_selected_features(),
-            'output_dir': self.output_dir.get(),
-
-            # Core DBNN parameters
-            'resol': int(self.resolution.get()),
-            'gain': float(self.gain.get()),
-            'margin': float(self.margin.get()),
-            'max_epochs': int(self.max_epochs.get()),
-            'patience': int(self.patience.get()),
-
-            # Adaptive learning parameters
-            'adaptive_learning': {},
-            'visualization_config': {},
-            'statistics': {}
-        }
-
-        # Adaptive learning parameters
-        for key, var in self.adaptive_vars.items():
-            if isinstance(var, tk.BooleanVar):
-                config['adaptive_learning'][key] = var.get()
+                    all_predictions = self.db.predict(X)
+                    acid_test_accuracy = accuracy_score(y, all_predictions)
+                    acid_test_history.append(acid_test_accuracy)
+
+                    print(f"📊 Training accuracy: {train_accuracy:.2f}%")
+                    print(f"📊 Acid test accuracy: {acid_test_accuracy:.4f}")
+
+                except Exception as e:
+                    print(f"❌ Acid test failed: {e}")
+                    acid_test_accuracy = 0.0
+                    acid_test_history.append(0.0)
             else:
-                # Try to convert to appropriate type
-                value = var.get()
-                try:
-                    if '.' in value:
-                        config['adaptive_learning'][key] = float(value)
-                    else:
-                        config['adaptive_learning'][key] = int(value)
-                except ValueError:
-                    config['adaptive_learning'][key] = value
+                # If acid test disabled, use training accuracy
+                acid_test_accuracy = train_accuracy / 100.0
+                acid_test_history.append(acid_test_accuracy)
+                print(f"📊 Training accuracy: {train_accuracy:.2f}%")
 
-        # Visualization configuration
-        config['visualization_config'] = {
-            'enabled': self.enable_visualization.get(),
-            'output_dir': self.output_dir.get(),
-            'create_animations': self.create_animations.get(),
-            'create_reports': self.create_reports.get(),
-            'create_3d_visualizations': self.create_3d_visualizations.get()
-        }
-
-        # Statistics configuration
-        config['statistics'] = {
-            'enable_confusion_matrix': self.enable_confusion_matrix.get(),
-            'enable_progress_plots': self.enable_progress_plots.get(),
-            'create_interactive_plots': self.create_interactive_plots.get(),
-            'create_sample_analysis': self.create_sample_analysis.get(),
-            'color_progress': self.color_progress.get(),
-            'color_regression': self.color_regression.get(),
-            'save_plots': True
-        }
-
-        return config
-
-    def save_configuration(self):
-        """Save configuration to file"""
-        config = self.get_configuration()
-
-        # Validate required fields
-        if not config['data_file'] or not os.path.exists(config['data_file']):
-            messagebox.showerror("Error", "Please select a valid data file first.")
-            return
-
-        if not config['target_column']:
-            messagebox.showerror("Error", "Please select a target column.")
-            return
-
-        selected_features = self.get_selected_features()
-        if not selected_features:
-            messagebox.showerror("Error", "Please select at least one feature.")
-            return
-
-        filename = filedialog.asksaveasfilename(
-            title="Save Configuration",
-            defaultextension=".json",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
-        )
-
-        if filename:
-            try:
-                with open(filename, 'w') as f:
-                    json.dump(config, f, indent=4)
-                messagebox.showinfo("Success", f"Configuration saved to:\n{filename}")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to save configuration:\n{e}")
-
-    def load_configuration(self):
-        """Load configuration from file"""
-        filename = filedialog.askopenfilename(
-            title="Load Configuration",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
-        )
-
-        if filename and os.path.exists(filename):
-            try:
-                with open(filename, 'r') as f:
-                    config = json.load(f)
-                self.apply_configuration(config)
-                messagebox.showinfo("Success", f"Configuration loaded from:\n{filename}")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to load configuration:\n{e}")
-
-    def load_saved_config(self):
-        """Load automatically saved configuration if exists"""
-        if os.path.exists(self.config_file):
-            try:
-                with open(self.config_file, 'r') as f:
-                    config = json.load(f)
-                self.apply_configuration(config)
-            except:
-                pass  # Ignore errors in auto-load
-
-    def apply_configuration(self, config: Dict[str, Any]):
-        """Apply configuration to GUI elements"""
-        # Main parameters
-        self.dataset_name.set(config.get('dataset_name', ''))
-        self.data_file_path.set(config.get('data_file', ''))
-        self.target_column.set(config.get('target_column', 'target'))
-        self.output_dir.set(config.get('output_dir', 'adaptive_visualizations'))
-
-        # Load data if file exists
-        if os.path.exists(self.data_file_path.get()):
-            self.load_and_analyze_data()
-
-        # Core parameters
-        self.resolution.set(str(config.get('resol', 100)))
-        self.gain.set(str(config.get('gain', 2.0)))
-        self.margin.set(str(config.get('margin', 0.2)))
-        self.max_epochs.set(str(config.get('max_epochs', 100)))
-        self.patience.set(str(config.get('patience', 10)))
-
-        # Adaptive learning parameters
-        adaptive_config = config.get('adaptive_learning', {})
-        for key, var in self.adaptive_vars.items():
-            if key in adaptive_config:
-                if isinstance(var, tk.BooleanVar):
-                    var.set(bool(adaptive_config[key]))
-                else:
-                    var.set(str(adaptive_config[key]))
-
-        # Visualization configuration
-        viz_config = config.get('visualization_config', {})
-        self.enable_visualization.set(viz_config.get('enabled', True))
-        self.create_animations.set(viz_config.get('create_animations', False))
-        self.create_reports.set(viz_config.get('create_reports', True))
-        self.create_3d_visualizations.set(viz_config.get('create_3d_visualizations', True))
-
-        # Statistics configuration
-        stats_config = config.get('statistics', {})
-        self.enable_confusion_matrix.set(stats_config.get('enable_confusion_matrix', True))
-        self.enable_progress_plots.set(stats_config.get('enable_progress_plots', True))
-        self.create_interactive_plots.set(stats_config.get('create_interactive_plots', True))
-        self.create_sample_analysis.set(stats_config.get('create_sample_analysis', True))
-        self.color_progress.set(stats_config.get('color_progress', 'green'))
-        self.color_regression.set(stats_config.get('color_regression', 'red'))
-
-        # Feature selection (need to be applied after data load)
-        if self.data is not None and 'feature_columns' in config:
-            # This will be applied when feature selection is set up
-            pass
-
-    def reset_to_defaults(self):
-        """Reset all values to defaults"""
-        default_config = {
-            'dataset_name': '',
-            'data_file': '',
-            'target_column': 'target',
-            'output_dir': 'adaptive_visualizations',
-            'resol': 100,
-            'gain': 2.0,
-            'margin': 0.2,
-            'max_epochs': 100,
-            'patience': 10,
-            'adaptive_learning': {
-                'enable_adaptive': True,
-                'initial_samples_per_class': 5,
-                'max_margin_samples_per_class': 3,
-                'margin_tolerance': 0.15,
-                'kl_divergence_threshold': 0.1,
-                'max_adaptive_rounds': 20,
-                'min_improvement': 0.001,
-                'training_convergence_epochs': 50,
-                'min_training_accuracy': 0.95,
-                'min_samples_to_add_per_class': 5,
-                'adaptive_margin_relaxation': 0.1,
-                'max_divergence_samples_per_class': 5,
-                'exhaust_all_failed': True,
-                'min_failed_threshold': 10,
-                'enable_kl_divergence': True,
-                'max_samples_per_class_fallback': 2,
-                'enable_3d_visualization': True,
-                '3d_snapshot_interval': 10,
-                'learning_rate': 1.0,
-                'enable_acid_test': True,
-                'min_training_percentage_for_stopping': 10.0,
-                'max_training_percentage': 90.0,
-                'max_kl_samples_per_class': 5,
-                'disable_sample_limit': False,
-            },
-            'visualization_config': {
-                'enabled': True,
-                'output_dir': 'adaptive_visualizations',
-                'create_animations': False,
-                'create_reports': True,
-                'create_3d_visualizations': True
-            },
-            'statistics': {
-                'enable_confusion_matrix': True,
-                'enable_progress_plots': True,
-                'color_progress': 'green',
-                'color_regression': 'red',
-                'save_plots': True,
-                'create_interactive_plots': True,
-                'create_sample_analysis': True
+            # Store round statistics
+            round_stat = {
+                'round': round_num,
+                'training_size': len(X_train),
+                'train_accuracy': train_accuracy / 100.0,
+                'test_accuracy': acid_test_accuracy,
+                'new_samples': 0,
+                'improvement': 0.0
             }
-        }
 
-        self.apply_configuration(default_config)
+            # ENHANCED STOPPING CRITERION 1: 100% accuracy on entire dataset
+            if acid_test_accuracy >= 0.9999:
+                print("🎉 REACHED 100% ACCURACY ON ENTIRE DATASET! Stopping adaptive learning.")
+                self.best_accuracy = acid_test_accuracy
+                self.best_training_indices = initial_indices.copy()
+                self.best_round = round_num
+                round_stat['improvement'] = acid_test_accuracy - self.best_accuracy
+                self.round_stats.append(round_stat)
+                self.training_history.append(initial_indices.copy())
+                break
 
-    def run_adaptive_dbnn(self):
-        """Run adaptive DBNN with current configuration"""
-        config = self.get_configuration()
+            # Check if we have any remaining samples to process
+            if not remaining_indices:
+                print("💤 No more samples to add to training set")
+                break
 
-        # Validate required fields
-        if not config['data_file'] or not os.path.exists(config['data_file']):
-            messagebox.showerror("Error", "Please select a valid data file first!")
-            return
+            # Find samples to add from remaining data
+            X_remaining = X[remaining_indices]
+            y_remaining = y[remaining_indices]
 
-        if not config['target_column']:
-            messagebox.showerror("Error", "Please select a target column!")
-            return
+            # Get predictions for remaining data
+            remaining_predictions = self.db.predict(X_remaining)
 
-        selected_features = self.get_selected_features()
-        if not selected_features:
-            messagebox.showerror("Error", "Please select at least one feature!")
-            return
+            # Find misclassified samples
+            misclassified_mask = remaining_predictions != y_remaining
+            misclassified_indices = np.where(misclassified_mask)[0]
 
-        if config['target_column'] in selected_features:
-            messagebox.showerror("Error", f"Target column '{config['target_column']}' cannot be in feature columns!")
-            return
+            if len(misclassified_indices) == 0:
+                print("✅ No misclassified samples in remaining data!")
+                print("🎉 PERFECT CLASSIFICATION ON REMAINING DATA! Stopping adaptive learning.")
+                self.best_accuracy = acid_test_accuracy
+                self.best_training_indices = initial_indices.copy()
+                self.best_round = round_num
+                round_stat['improvement'] = acid_test_accuracy - self.best_accuracy
+                self.round_stats.append(round_stat)
+                self.training_history.append(initial_indices.copy())
+                break
 
-        # Save configuration automatically
+            print(f"📊 Found {len(misclassified_indices)} misclassified samples in remaining data")
+
+            # Select samples to add (limit by configuration)
+            max_samples_to_add = self.adaptive_config.get('max_margin_samples_per_class', 3) * len(np.unique(y))
+            n_samples_to_add = min(len(misclassified_indices), max_samples_to_add)
+
+            selected_indices = np.random.choice(misclassified_indices, n_samples_to_add, replace=False)
+            samples_to_add_indices = [remaining_indices[i] for i in selected_indices]
+
+            # Update training set
+            initial_indices.extend(samples_to_add_indices)
+            remaining_indices = [i for i in remaining_indices if i not in samples_to_add_indices]
+
+            X_train = X[initial_indices]
+            y_train = y[initial_indices]
+
+            # Update training history
+            self.training_history.append(initial_indices.copy())
+
+            # Update round statistics with new samples
+            round_stat['new_samples'] = len(samples_to_add_indices)
+
+            print(f"📈 Added {len(samples_to_add_indices)} samples. New training set: {len(X_train)} samples")
+            print(f"📊 Remaining set size: {len(remaining_indices)} samples")
+
+            # ENHANCED: Update best model and check for improvement using acid test accuracy
+            improvement = acid_test_accuracy - self.best_accuracy
+            round_stat['improvement'] = improvement
+
+            if acid_test_accuracy > self.best_accuracy + min_improvement:
+                self.best_accuracy = acid_test_accuracy
+                self.best_training_indices = initial_indices.copy()
+                self.best_round = round_num
+                patience_counter = 0
+                print(f"🏆 New best acid test accuracy: {acid_test_accuracy:.4f} (+{improvement:.4f})")
+            else:
+                patience_counter += 1
+                if acid_test_accuracy > self.best_accuracy:
+                    print(f"↗️  Small improvement: {acid_test_accuracy:.4f} (+{improvement:.4f}) - Patience: {patience_counter}/{patience}")
+                else:
+                    print(f"🔄 No improvement - Patience: {patience_counter}/{patience}")
+
+            # Add round statistics
+            self.round_stats.append(round_stat)
+
+            # Create intermediate visualizations only if enabled
+            if enable_visualization and (round_num % 3 == 0 or round_num == 1) and self._should_create_visualizations(round_num):
+                self._create_intermediate_visualizations(round_num)
+
+            # ENHANCED STOPPING CRITERION: No significant improvement for patience rounds
+            if patience_counter >= patience:
+                print(f"🛑 PATIENCE EXCEEDED: No significant improvement for {patience} rounds")
+                print(f"   Best acid test accuracy: {self.best_accuracy:.4f} (round {self.best_round})")
+                break
+
+        # Finalize with best configuration
+        print(f"\n🎉 Adaptive learning completed after {self.adaptive_round} rounds!")
+
+        # Ensure we have valid best values
+        if self.best_accuracy == 0.0 and acid_test_history:
+            self.best_accuracy = acid_test_history[-1]
+            self.best_training_indices = initial_indices.copy()
+            self.best_round = self.adaptive_round
+
+        print(f"🏆 Best acid test accuracy: {self.best_accuracy:.4f} (round {self.best_round})")
+        print(f"📊 Final training set: {len(self.best_training_indices)} samples ({len(self.best_training_indices)/len(X)*100:.1f}% of total)")
+
+        # Use best configuration for final model
+        X_train_best = X[self.best_training_indices]
+        y_train_best = y[self.best_training_indices]
+        X_test_best = X[[i for i in range(len(X)) if i not in self.best_training_indices]]
+        y_test_best = y[[i for i in range(len(X)) if i not in self.best_training_indices]]
+
+        # Store test sets for evaluation
+        self.X_test = X_test_best
+        self.y_test = y_test_best
+
+        # Train final model with best configuration
+        print("🔧 Training final model with best configuration...")
+        final_train_accuracy = self.db.train_with_data(X_train_best, y_train_best, reset_weights=True)
+
+        # Final acid test verification
+        final_predictions = self.db.predict(X)
+        final_accuracy = accuracy_score(y, final_predictions)
+
+        # Calculate total training time
+        self.total_training_time = (datetime.now() - self.adaptive_start_time).total_seconds()
+
+        print(f"📊 Final training accuracy: {final_train_accuracy:.2f}%")
+        print(f"📊 Final acid test accuracy: {final_accuracy:.4f}")
+        print(f"📈 Final training set size: {len(X_train_best)}")
+        print(f"📊 Final test set size: {len(X_test_best)}")
+        print(f"⏱️  Total training time: {self.total_training_time:.2f} seconds")
+
+        # Final visualizations only if enabled
+        if enable_visualization:
+            self._finalize_adaptive_learning()
+        else:
+            print("🎨 Visualization disabled - skipping final visualizations")
+
+        return X_train_best, y_train_best, X_test_best, y_test_best
+
+    def _create_intermediate_visualizations(self, round_num):
+        """Create intermediate visualizations during adaptive learning"""
         try:
-            with open(self.config_file, 'w') as f:
-                json.dump(config, f, indent=4)
-        except:
-            pass  # Ignore auto-save errors
+            # Create snapshot of current state
+            current_indices = self.training_history[-1]
 
-        # Save configuration for the adaptive DBNN to use - use JSON format
-        config_filename = f"{config['dataset_name']}_config.json"  # Changed to .json
+            # Create 3D network visualization
+            self.comprehensive_visualizer.plot_3d_networks(
+                self.X_full, self.y_full, [current_indices],
+                self.feature_columns
+            )
+
+            print(f"🎨 Created intermediate visualization for round {round_num}")
+        except Exception as e:
+            print(f"⚠️ Intermediate visualization failed: {e}")
+
+    def _finalize_adaptive_learning(self):
+        """Finalize adaptive learning with comprehensive outputs"""
+        print("\n" + "="*60)
+        print("🏁 FINALIZING ADAPTIVE LEARNING")
+        print("="*60)
+
+        # 1. Create comprehensive visualizations
         try:
-            with open(config_filename, 'w') as f:
-                json.dump(config, f, indent=4)
-
-            messagebox.showinfo(
-                "Configuration Saved",
-                f"Configuration saved to:\n{config_filename}\n\n"
-                f"Close this window and run:\n"
-                f"python adaptive_dbnn.py --config {config_filename}\n\n"
-                f"Selected {len(selected_features)} features:\n"
-                f"{', '.join(selected_features[:5])}{'...' if len(selected_features) > 5 else ''}"
+            self.comprehensive_visualizer.create_comprehensive_visualizations(
+                self, self.X_full, self.y_full,
+                self.training_history, self.round_stats, self.feature_columns
             )
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to save run configuration:\n{e}")
+            print(f"⚠️ Comprehensive visualization failed: {e}")
 
+        # 2. Save model with automatic naming
+        self._save_adaptive_model()
 
-def launch_gui():
-    """Launch the GUI interface"""
-    root = tk.Tk()
+        # 3. Save configuration
+        self._save_adaptive_configuration()
 
-    # Set theme if available
-    try:
-        from ttkthemes import ThemedTk
-        root = ThemedTk(theme="arc")
+        # 4. Generate final report
+        self._generate_final_report()
 
-        # Create custom styles for feature checkboxes
-        style = ttk.Style()
-        style.configure('Numeric.TCheckbutton', foreground='blue')
-        style.configure('Categorical.TCheckbutton', foreground='green')
-    except ImportError:
-        pass  # Use default theme
+    def _save_adaptive_model(self):
+        """Save adaptive model with automatic naming"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        model_filename = f"{self.dataset_name}_adbnn_{timestamp}.bin"
+        model_path = self.models_dir / model_filename
 
-    app = AdaptiveDBNNGUI(root)
-    root.mainloop()
-
-
-# Update the main function in adaptive_dbnn.py to handle feature columns
-def main():
-    """Main function to run adaptive DBNN"""
-    import sys
-
-    # Check for GUI flag
-    if "--gui" in sys.argv or "-g" in sys.argv:
-        launch_gui()
-        return
-
-    # Check for config file parameter
-    config_file = None
-    for i, arg in enumerate(sys.argv):
-        if arg in ["--config", "-c"] and i + 1 < len(sys.argv):
-            config_file = sys.argv[i + 1]
-            break
-
-    print("🎯 Adaptive DBNN System")
-    print("=" * 50)
-
-    # Load configuration if provided
-    config = {}
-    if config_file and os.path.exists(config_file):
         try:
-            with open(config_file, 'r') as f:
-                config = json.load(f)
-            print(f"✅ Loaded configuration from: {config_file}")
+            # Use the DBNN core's save capability
+            success = self.model.core.save_model_auto(
+                model_dir=str(self.models_dir),
+                data_filename=f"{self.dataset_name}.csv",
+                feature_columns=self.feature_columns,
+                target_column=self.target_column
+            )
 
-            # Print configuration summary
-            if 'feature_columns' in config:
-                print(f"📊 Using {len(config['feature_columns'])} features: {config['feature_columns']}")
-            if 'target_column' in config:
-                print(f"🎯 Target column: {config['target_column']}")
-            if 'dataset_name' in config:
-                print(f"📁 Dataset: {config['dataset_name']}")
+            if success:
+                print(f"💾 Adaptive model saved: {model_path}")
+
+                # Also save adaptive learning metadata
+                metadata = {
+                    'dataset_name': self.dataset_name,
+                    'adaptive_config': self.adaptive_config,
+                    'best_accuracy': self.best_accuracy,
+                    'best_round': self.best_round,
+                    'final_training_size': len(self.best_training_indices),
+                    'total_rounds': self.adaptive_round,
+                    'feature_columns': self.feature_columns,
+                    'target_column': self.target_column,
+                    'save_timestamp': timestamp
+                }
+
+                metadata_path = self.models_dir / f"{self.dataset_name}_adbnn_{timestamp}_metadata.json"
+                with open(metadata_path, 'w') as f:
+                    json.dump(metadata, f, indent=4)
+
+                print(f"💾 Adaptive metadata saved: {metadata_path}")
+            else:
+                print("❌ Failed to save adaptive model")
 
         except Exception as e:
-            print(f"❌ Failed to load configuration: {e}")
-            config = {}
-    else:
-        # Show available configuration files if no specific config provided
-        available_configs = DatasetConfig.get_available_config_files()
-        if available_configs and not config_file:
-            print("\n📋 Available configuration files:")
-            for cfg in available_configs:
-                print(f"   • {cfg['file']} ({cfg['type']})")
-            print("\n💡 Use: python adaptive_dbnn.py --config <filename> to use a specific configuration")
+            print(f"❌ Error saving adaptive model: {e}")
 
-    # Create adaptive DBNN
-    adaptive_model = AdaptiveDBNN(config.get('dataset_name'), config)
+    def _save_adaptive_configuration(self):
+        """Save adaptive learning configuration"""
+        config_path = self.models_dir / f"{self.dataset_name}_adbnn_config.json"
 
-    # If no config file, use interactive configuration
-    if not config_file:
-        # Show available configuration files as an option
-        available_configs = DatasetConfig.get_available_config_files()
-        if available_configs:
-            print(f"\n🔄 Found {len(available_configs)} configuration files")
-            print("   You can load one by entering its number below")
+        try:
+            config_data = {
+                'dataset_name': self.dataset_name,
+                'adaptive_config': self.adaptive_config,
+                'feature_columns': self.feature_columns,
+                'target_column': self.target_column,
+                'save_timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
 
-        configure = input("\nConfigure adaptive learning settings? (y/N/1-9 for config): ").strip().lower()
+            with open(config_path, 'w') as f:
+                json.dump(config_data, f, indent=4)
 
-        if configure.isdigit():
-            # User selected a configuration file by number
-            choice_idx = int(configure) - 1
-            if 0 <= choice_idx < len(available_configs):
-                selected_config = available_configs[choice_idx]
-                config_file = selected_config['file']
-                try:
-                    with open(config_file, 'r') as f:
-                        config = json.load(f)
-                    print(f"✅ Loaded configuration from: {config_file}")
-                    # Update the model with loaded config
-                    adaptive_model = AdaptiveDBNN(config.get('dataset_name'), config)
-                except Exception as e:
-                    print(f"❌ Failed to load configuration: {e}")
+            print(f"💾 Adaptive configuration saved: {config_path}")
 
-        elif configure == 'y':
-            # Simple configuration interface
-            print("\n🎛️  Configuration Options:")
-            print("1. Enable KL Divergence sampling")
-            print("2. Disable sample limits")
-            print("3. Change number of rounds")
-            print("4. Keep current settings")
+        except Exception as e:
+            print(f"❌ Error saving adaptive configuration: {e}")
 
-            choice = input("Select option (1-4): ").strip()
-            if choice == '1':
-                adaptive_model.adaptive_config['enable_kl_divergence'] = True
-                print("✅ KL Divergence sampling enabled")
-            elif choice == '2':
-                adaptive_model.adaptive_config['disable_sample_limit'] = True
-                print("✅ Sample limits disabled")
-            elif choice == '3':
-                try:
-                    rounds = int(input("Enter number of rounds: "))
-                    adaptive_model.adaptive_config['max_adaptive_rounds'] = rounds
-                    print(f"✅ Max rounds set to {rounds}")
-                except ValueError:
-                    print("❌ Invalid number, using default")
+    def _generate_final_report(self):
+        """Generate final adaptive learning report"""
+        report_path = self.comprehensive_visualizer.output_dir / "adaptive_learning_final_report.txt"
 
-    # Run adaptive learning
-    print("\n🚀 Starting adaptive learning...")
-    X_train, y_train, X_test, y_test = adaptive_model.adaptive_learn()
+        try:
+            with open(report_path, 'w') as f:
+                f.write("="*60 + "\n")
+                f.write("ADAPTIVE DBNN FINAL REPORT\n")
+                f.write("="*60 + "\n\n")
 
-    print(f"\n✅ Adaptive learning completed!")
-    print(f"📦 Final training set size: {len(X_train)}")
-    print(f"📊 Final test set size: {len(X_test)}")
-    print(f"🏆 Best accuracy achieved: {adaptive_model.best_accuracy:.4f}")
+                f.write(f"Dataset: {self.dataset_name}\n")
+                f.write(f"Total Samples: {len(self.X_full)}\n")
+                f.write(f"Features: {len(self.feature_columns)}\n")
+                f.write(f"Classes: {np.unique(self.y_full)}\n\n")
 
+                f.write("ADAPTIVE LEARNING RESULTS:\n")
+                f.write("-" * 40 + "\n")
+                f.write(f"Best Accuracy: {self.best_accuracy:.4f}\n")
+                f.write(f"Best Round: {self.best_round}\n")
+                f.write(f"Total Rounds: {self.adaptive_round}\n")
+                f.write(f"Final Training Size: {len(self.best_training_indices)}\n")
+                f.write(f"Training Percentage: {len(self.best_training_indices)/len(self.X_full)*100:.1f}%\n")
+                f.write(f"Total Training Time: {self.total_training_time:.2f} seconds\n\n")
+
+                f.write("FEATURE COLUMNS:\n")
+                f.write("-" * 40 + "\n")
+                for feature in self.feature_columns:
+                    f.write(f"  {feature}\n")
+
+                f.write(f"\nReport generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+
+            print(f"📋 Final report saved: {report_path}")
+
+        except Exception as e:
+            print(f"❌ Error generating final report: {e}")
+
+    def finalize_adaptive_learning(self):
+        """Create final visualizations after adaptive learning"""
+        # Final 3D visualization
+        self.visualizer_3d.create_3d_training_network(
+            self.X_full, self.y_full, self.best_training_indices,
+            feature_names=self.feature_columns,
+            round_num=None  # Final visualization
+        )
+
+        # Create animation of the entire process
+        if len(self.training_history) > 1:
+            self.visualizer_3d.create_adaptive_learning_animation(
+                self.X_full, self.y_full, self.training_history
+            )
+
+    def _run_adaptive_rounds(self, X_train: np.ndarray, y_train: np.ndarray,
+                           X_full: np.ndarray, y_full: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Run adaptive learning rounds"""
+        max_rounds = self.adaptive_config['max_adaptive_rounds']
+        patience = self.adaptive_config['patience']
+        min_improvement = self.adaptive_config['min_improvement']
+
+        best_accuracy = 0.0
+        patience_counter = 0
+        current_X_train = X_train.copy()
+        current_y_train = y_train.copy()
+
+        for round_num in range(max_rounds):
+            self.adaptive_round = round_num
+            print(f"\n🔄 Adaptive Round {round_num + 1}/{max_rounds}")
+
+            # Train on current dataset
+            round_accuracy = self.db.adaptive_train(current_X_train, current_y_train)
+
+            print(f"📊 Round accuracy: {round_accuracy:.2f}%")
+
+            # Check for convergence
+            if round_accuracy >= self.adaptive_config['min_training_accuracy'] * 100:
+                print(f"🎯 Target accuracy reached: {round_accuracy:.2f}%")
+                break
+
+            # Find samples to add
+            new_samples_X, new_samples_y = self._find_samples_to_add(current_X_train, current_y_train, X_full, y_full)
+
+            if len(new_samples_X) == 0:
+                print("💡 No new informative samples found")
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print("🛑 Early stopping - no improvement")
+                    break
+                continue
+
+            # Add samples to training set
+            current_X_train = np.vstack([current_X_train, new_samples_X])
+            current_y_train = np.hstack([current_y_train, new_samples_y])
+
+            print(f"📈 Added {len(new_samples_X)} samples. New training set: {current_X_train.shape[0]} samples")
+
+            # Check for improvement
+            if round_accuracy > best_accuracy + min_improvement:
+                best_accuracy = round_accuracy
+                patience_counter = 0
+            else:
+                patience_counter += 1
+
+            if patience_counter >= patience:
+                print("🛑 Early stopping - no significant improvement")
+                break
+
+        return current_X_train, current_y_train
+
+    def _find_samples_to_add(self, X_train: np.ndarray, y_train: np.ndarray,
+                           X_full: np.ndarray, y_full: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Find informative samples to add to training set"""
+        print("🔍 Finding informative samples to add...")
+
+        # Get predictions on full dataset
+        predictions = self.db.predict(X_full)
+
+        # Find misclassified samples
+        misclassified_mask = predictions != y_full
+        misclassified_indices = np.where(misclassified_mask)[0]
+
+        print(f"📊 Misclassified samples: {len(misclassified_indices)}")
+
+        if len(misclassified_indices) == 0:
+            return np.array([]), np.array([])
+
+        # Select samples to add (limit by configuration)
+        max_samples_to_add = self.adaptive_config.get('max_samples_per_class_fallback', 2)
+        n_samples_to_add = min(len(misclassified_indices), max_samples_to_add * len(np.unique(y_full)))
+
+        selected_indices = np.random.choice(misclassified_indices, n_samples_to_add, replace=False)
+
+        return X_full[selected_indices], y_full[selected_indices]
+
+    def _create_test_set(self, X_train: np.ndarray, y_train: np.ndarray,
+                       X_full: np.ndarray, y_full: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Create test set from samples not in training set"""
+        # Create a mask for samples not in training set
+        train_mask = np.zeros(len(X_full), dtype=bool)
+
+        # For each training sample, find its index in the full dataset
+        for i in range(len(X_train)):
+            # Find matching sample in full dataset
+            for j in range(len(X_full)):
+                if np.array_equal(X_train[i], X_full[j]) and y_train[i] == y_full[j]:
+                    train_mask[j] = True
+                    break
+
+        test_mask = ~train_mask
+        X_test = X_full[test_mask]
+        y_test = y_full[test_mask]
+
+        print(f"📊 Test set created: {len(X_test)} samples")
+
+        return X_test, y_test
+
+    def evaluate_adaptive_performance(self, X_test: np.ndarray, y_test: np.ndarray) -> Dict[str, Any]:
+        """Evaluate adaptive learning performance"""
+        if not hasattr(self.db.core, 'is_trained') or not self.db.core.is_trained:
+            return {'accuracy': 0.0, 'error': 'Model not trained'}
+
+        predictions = self.db.predict(X_test)
+        accuracy = accuracy_score(y_test, predictions) * 100
+
+        # Additional metrics
+        cm = confusion_matrix(y_test, predictions)
+        class_report = classification_report(y_test, predictions, output_dict=True)
+
+        results = {
+            'accuracy': accuracy,
+            'confusion_matrix': cm,
+            'classification_report': class_report,
+            'adaptive_rounds': self.adaptive_round,
+            'samples_added': self.adaptive_samples_added
+        }
+
+        print(f"📊 Adaptive Learning Results:")
+        print(f"   Final Accuracy: {accuracy:.2f}%")
+        print(f"   Adaptive Rounds: {self.adaptive_round}")
+        print(f"   Samples Added: {self.adaptive_samples_added}")
+
+        return results
+
+def main():
+    """Main function for adaptive DBNN"""
+    print("🎯 Adaptive DBNN - Advanced Learning System")
+    print("=" * 50)
+
+    # Get available datasets
+    available_configs = DatasetConfig.get_available_config_files()
+    if not available_configs:
+        print("❌ No configuration files found (.conf or .json)")
+        return
+
+    print("📁 Available datasets:")
+    for i, config_info in enumerate(available_configs, 1):
+        print(f"  {i:2d}. {config_info['file']} ({config_info['type']})")
+
+    try:
+        selection = int(input("\nSelect a dataset (1-{}): ".format(len(available_configs))))
+        if selection < 1 or selection > len(available_configs):
+            print("❌ Invalid selection")
+            return
+
+        selected_config = available_configs[selection - 1]
+        dataset_name = selected_config['file'].replace('.conf', '').replace('.json', '')
+        config_type = selected_config['type']
+
+        print(f"🎯 Selected configuration: {dataset_name} ({config_type})")
+
+        # Load configuration
+        config = DatasetConfig.load_config(dataset_name)
+        if not config:
+            print(f"❌ Could not load configuration for {dataset_name}")
+            return
+
+        # Initialize adaptive DBNN
+        adaptive_model = AdaptiveDBNN(dataset_name, config)
+
+        # Get feature columns from config if available
+        feature_columns = config.get('feature_columns', None)
+        if feature_columns:
+            print(f"📊 Using feature columns from config: {feature_columns}")
+
+        # Run adaptive learning
+        print("🚀 Starting adaptive learning...")
+        X_train, y_train, X_test, y_test = adaptive_model.adaptive_learn(feature_columns=feature_columns)
+
+        # Evaluate performance
+        results = adaptive_model.evaluate_adaptive_performance(X_test, y_test)
+
+        print("\n✅ Adaptive Learning Completed!")
+        print(f"📊 Final Test Accuracy: {results['accuracy']:.2f}%")
+
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
-    main()
+    print("""
+    ╔═════════════════════════════════════════════════════════════╗
+    ║              🧠      DBNN CLASSIFIER                        ║
+    ║         Difference Boosting Bayesian Neural Network         ║
+    ║                 author: nsp@airis4d.com                     ║
+    ║  Artificial Intelligence Research and Intelligent Systems   ║
+    ║                 Thelliyoor 689544, India                    ║
+    ║          INCREMENTAL LEARNING + FREEZE MECHANISM            ║
+    ║                 implementation: deepseek                    ║
+    ╚═════════════════════════════════════════════════════════════╝
+    """)
+    # Check for GUI flag
+    if "--gui" in sys.argv or "-g" in sys.argv or len(sys.argv) == 1:
+        launch_adaptive_gui()
+    else:
+        # Run command line version
+        main()
