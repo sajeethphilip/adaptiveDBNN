@@ -66,6 +66,10 @@ from sklearn.manifold import TSNE
 from sklearn.metrics import confusion_matrix, classification_report
 import scipy.stats as stats
 
+import multiprocessing
+import queue
+import threading
+
 class AdvancedInteractiveVisualizer:
     """Advanced interactive 3D visualization with dynamic controls"""
 
@@ -1418,6 +1422,10 @@ class AdaptiveDBNNGUI:
         self.root.title("Enhanced Adaptive DBNN with Feature Selection")
         self.root.geometry("1400x900")
 
+        self.training_process = None
+        self.training_queue = queue.Queue()
+        self.training_active = False
+
         self.adaptive_model = None
         self.model_trained = False
         self.data_loaded = False
@@ -1453,6 +1461,170 @@ class AdaptiveDBNNGUI:
 
         self.setup_gui()
         self.setup_common_controls()
+
+    def run_adaptive_learning_async(self):
+        """Start training in separate thread"""
+        if self.training_active:
+            messagebox.showwarning("Warning", "Training already in progress")
+            return
+
+        self.training_active = True
+        self.training_process = threading.Thread(
+            target=self._training_worker,
+            args=(self.training_queue, self.get_training_config()),
+            daemon=True  # Make it a daemon thread
+        )
+        self.training_process.start()
+        self.log_output("🚀 Training started in background thread...")
+        self.log_output("💡 You can continue using the GUI freely")
+
+        # Start monitoring progress
+        self.root.after(100, self._check_training_progress)
+
+    def _training_worker(self, queue, config):
+        """Worker thread that runs training"""
+        try:
+            # Initialize model in thread
+            adaptive_model = AdaptiveDBNN(config['dataset_name'], config)
+
+            # Setup progress reporting - use thread-safe callbacks
+            adaptive_model.set_progress_callback(lambda msg: queue.put(('progress', msg)))
+
+            # Run training
+            results = adaptive_model.adaptive_learn(
+                feature_columns=config['feature_columns']
+            )
+
+            queue.put(('complete', results))
+
+        except Exception as e:
+            queue.put(('error', str(e)))
+
+    def get_training_config(self):
+        """Get training configuration from GUI"""
+        if not self.data_loaded or self.adaptive_model is None:
+            raise ValueError("Data not loaded or model not initialized")
+
+        return {
+            'dataset_name': self.dataset_name,
+            'target_column': self.target_var.get(),
+            'feature_columns': [col for col, var in self.feature_vars.items()
+                              if var.get() and col != self.target_var.get()],
+            'resol': int(self.config_vars["dbnn_resolution"].get()),
+            'gain': float(self.config_vars["dbnn_gain"].get()),
+            'margin': float(self.config_vars["dbnn_margin"].get()),
+            'patience': int(self.config_vars["dbnn_patience"].get()),
+            'max_epochs': int(self.config_vars["dbnn_max_epochs"].get()),
+            'min_improvement': float(self.config_vars["dbnn_min_improvement"].get()),
+            'adaptive_learning': {
+                'enable_adaptive': True,
+                'initial_samples_per_class': int(self.initial_samples_var.get()),
+                'max_adaptive_rounds': int(self.max_rounds_var.get()),
+                'max_margin_samples_per_class': int(self.max_samples_var.get()),
+                'enable_acid_test': self.enable_acid_var.get(),
+                'enable_kl_divergence': self.enable_kl_var.get(),
+                'disable_sample_limit': self.disable_sample_limit_var.get(),
+                'enable_visualization': self.enable_visualization_var.get(),
+            }
+        }
+
+    def _training_completed(self, results):
+        """Handle training completion"""
+        self.training_active = False
+        self.model_trained = True
+
+        # Update results display
+        self.display_results(results)
+
+        self.log_output("✅ Training completed successfully!")
+        self.status_var.set("Training completed")
+
+    def _training_failed(self, error_msg):
+        """Handle training failure"""
+        self.training_active = False
+        self.log_output(f"❌ Training failed: {error_msg}")
+        self.status_var.set("Training failed")
+        messagebox.showerror("Training Error", f"Training failed:\n{error_msg}")
+
+    def log_output(self, message: str):
+        """Thread-safe output logging"""
+        def update_log():
+            self.output_text.insert(tk.END, f"{message}\n")
+            self.output_text.see(tk.END)
+            self.status_var.set(message)
+
+        # Use thread-safe GUI update
+        self.root.after(0, update_log)
+
+    def safe_exit(self):
+        """Safely exit the application with confirmation"""
+        if self.training_active:
+            if not messagebox.askyesno("Training in Progress",
+                                      "Training is still in progress. Are you sure you want to exit?"):
+                return
+
+        if messagebox.askyesno("Exit", "Are you sure you want to exit?"):
+            try:
+                # Stop any active training
+                self.training_active = False
+
+                # Clean up threads
+                if self.training_process and self.training_process.is_alive():
+                    self.training_process.join(timeout=2.0)  # Wait max 2 seconds
+
+                # Clean up any temporary files or resources
+                if hasattr(self, 'adaptive_model'):
+                    del self.adaptive_model
+
+                self.root.quit()
+                self.root.destroy()
+
+            except Exception as e:
+                # Force exit even if cleanup fails
+                import traceback
+                traceback.print_exc()
+                self.root.quit()
+                self.root.destroy()
+
+
+    def _check_training_progress(self):
+        """Enhanced progress monitoring with timeouts"""
+        try:
+            # Use non-blocking get with timeout
+            try:
+                msg_type, data = self.training_queue.get_nowait()
+
+                if msg_type == 'progress':
+                    self.log_output(f"📊 {data}")
+                    self.status_var.set(data)
+
+                elif msg_type == 'round_update':
+                    round_num, accuracy, samples = data
+                    self.log_output(f"🔄 Round {round_num}: Accuracy={accuracy:.4f}, Samples={samples}")
+
+                elif msg_type == 'training_stats':
+                    epoch, accuracy = data
+                    progress = f"Epoch {epoch}: {accuracy:.2f}%"
+                    self.status_var.set(progress)
+
+                elif msg_type == 'complete':
+                    self._training_completed(data)
+                    return
+
+                elif msg_type == 'error':
+                    self._training_failed(data)
+                    return
+
+            except queue.Empty:
+                # No message in queue, continue checking
+                pass
+
+        except Exception as e:
+            self.log_output(f"❌ Error in progress monitoring: {e}")
+
+        # Continue monitoring if training is still active
+        if self.training_active:
+            self.root.after(300, self._check_training_progress)  # Reduced frequency
 
 
     def setup_common_controls(self):
@@ -1733,6 +1905,66 @@ class AdaptiveDBNNGUI:
         ttk.Checkbutton(adaptive_frame, text="Disable Sample Limit", variable=self.disable_sample_limit_var).grid(row=6, column=3, sticky=tk.W, padx=5)
         ttk.Checkbutton(adaptive_frame, text="Enable Visualization", variable=self.enable_visualization_var).grid(row=7, column=1, sticky=tk.W, padx=5)  # NEW
 
+    def generate_final_visualizations(self):
+        """Generate comprehensive final visualizations on-demand"""
+        if not self.model_trained or self.adaptive_model is None:
+            messagebox.showwarning("Warning", "No trained model available. Please run adaptive learning first.")
+            return
+
+        try:
+            self.log_output("🏆 Generating comprehensive final visualizations...")
+
+            # Show progress
+            self.status_var.set("Generating final visualizations...")
+            self.root.update()
+
+            # Generate comprehensive visualizations
+            if hasattr(self.adaptive_model, 'comprehensive_visualizer'):
+                self.adaptive_model.comprehensive_visualizer.create_comprehensive_visualizations(
+                    self.adaptive_model,
+                    self.adaptive_model.X_full,
+                    self.adaptive_model.y_full,
+                    self.adaptive_model.training_history,
+                    self.adaptive_model.round_stats,
+                    self.adaptive_model.feature_columns
+                )
+                self.log_output("✅ Comprehensive visualizations generated successfully!")
+            else:
+                self.log_output("⚠️ Comprehensive visualizer not available")
+
+            # Generate advanced 3D visualizations
+            if hasattr(self.adaptive_model, 'advanced_visualizer'):
+                self.adaptive_model.advanced_visualizer.create_advanced_3d_dashboard(
+                    self.adaptive_model.X_full,
+                    self.adaptive_model.y_full,
+                    self.adaptive_model.training_history,
+                    self.adaptive_model.feature_columns,
+                    round_num=None  # Final visualization
+                )
+                self.log_output("✅ Advanced 3D dashboard generated!")
+            else:
+                self.log_output("⚠️ Advanced 3D visualizer not available")
+
+            # Generate final model analysis
+            if hasattr(self.adaptive_model, 'comprehensive_visualizer'):
+                self.adaptive_model.comprehensive_visualizer.plot_final_model_analysis(
+                    self.adaptive_model,
+                    self.adaptive_model.X_full,
+                    self.adaptive_model.y_full,
+                    self.adaptive_model.feature_columns
+                )
+                self.log_output("✅ Final model analysis generated!")
+
+            # Open the visualization location
+            self.open_visualization_location()
+
+            self.status_var.set("Final visualizations completed!")
+            self.log_output("🎉 All final visualizations completed and folder opened!")
+
+        except Exception as e:
+            self.log_output(f"❌ Error generating final visualizations: {e}")
+            self.status_var.set("Visualization error")
+
     def setup_training_tab(self):
         """Setup training and evaluation tab with enhanced visualization controls"""
         # Control frame
@@ -1758,16 +1990,21 @@ class AdaptiveDBNNGUI:
         viz_control_frame = ttk.Frame(viz_frame)
         viz_control_frame.pack(fill=tk.X)
 
+        # Row 1: Basic and Advanced Visualizations
         ttk.Button(viz_control_frame, text="📊 Basic Visualizations",
                   command=self.show_visualizations, width=18).grid(row=0, column=0, padx=2, pady=2)
         ttk.Button(viz_control_frame, text="🔬 Advanced Analysis",
                   command=self.show_advanced_analysis, width=18).grid(row=0, column=1, padx=2, pady=2)
         ttk.Button(viz_control_frame, text="🌐 Interactive 3D",
                   command=self.show_interactive_3d, width=18).grid(row=0, column=2, padx=2, pady=2)
+
+        # Row 2: Final Visualizations and Folder Access
+        ttk.Button(viz_control_frame, text="🏆 Final Comprehensive Viz",
+                  command=self.generate_final_visualizations, width=18).grid(row=1, column=0, padx=2, pady=2)
         ttk.Button(viz_control_frame, text="📁 Open Viz Location",
-                  command=self.open_visualization_location, width=18).grid(row=0, column=3, padx=2, pady=2)
+                  command=self.open_visualization_location, width=18).grid(row=1, column=1, padx=2, pady=2)
         ttk.Button(viz_control_frame, text="🎬 Show Animations",
-                  command=self.show_animations, width=18).grid(row=0, column=4, padx=2, pady=2)
+                  command=self.show_animations, width=18).grid(row=1, column=2, padx=2, pady=2)
 
         # Create a notebook for output and results
         output_notebook = ttk.Notebook(self.training_tab)
@@ -1793,7 +2030,15 @@ class AdaptiveDBNNGUI:
         """Open the visualization directory in file explorer"""
         try:
             if hasattr(self, 'adaptive_model') and self.adaptive_model:
-                viz_dir = self.adaptive_model.comprehensive_visualizer.output_dir
+                # Try comprehensive visualizer first, then fallback to basic
+                if hasattr(self.adaptive_model, 'comprehensive_visualizer'):
+                    viz_dir = self.adaptive_model.comprehensive_visualizer.output_dir
+                elif hasattr(self.adaptive_model, 'visualizer'):
+                    viz_dir = self.adaptive_model.visualizer.output_dir
+                else:
+                    self.log_output("❌ No visualizer found. Run adaptive learning first.")
+                    return
+
                 if viz_dir.exists():
                     import subprocess
                     import platform
@@ -1807,18 +2052,31 @@ class AdaptiveDBNNGUI:
                         subprocess.Popen(['xdg-open', str(viz_dir)])
 
                     self.log_output(f"📁 Opened visualization directory: {viz_dir}")
+
+                    # List available visualization files
+                    html_files = list(viz_dir.rglob("*.html"))
+                    png_files = list(viz_dir.rglob("*.png"))
+                    gif_files = list(viz_dir.rglob("*.gif"))
+
+                    self.log_output(f"📊 Found: {len(html_files)} HTML, {len(png_files)} PNG, {len(gif_files)} GIF files")
+
                 else:
-                    self.log_output("❌ Visualization directory not found. Run adaptive learning first.")
+                    self.log_output("❌ Visualization directory not found. Generate visualizations first.")
             else:
                 self.log_output("❌ No model available. Please run adaptive learning first.")
         except Exception as e:
             self.log_output(f"❌ Error opening visualization location: {e}")
 
     def show_animations(self):
-        """Show available animations"""
+        """Show available animations and offer to open them"""
         try:
             if hasattr(self, 'adaptive_model') and self.adaptive_model:
-                viz_dir = self.adaptive_model.comprehensive_visualizer.output_dir
+                if hasattr(self.adaptive_model, 'comprehensive_visualizer'):
+                    viz_dir = self.adaptive_model.comprehensive_visualizer.output_dir
+                else:
+                    self.log_output("❌ No visualizer found.")
+                    return
+
                 animation_files = list(viz_dir.rglob("*.gif")) + list(viz_dir.rglob("*.mp4"))
 
                 if animation_files:
@@ -1826,10 +2084,12 @@ class AdaptiveDBNNGUI:
                     for anim_file in animation_files:
                         self.log_output(f"   📹 {anim_file.relative_to(viz_dir)}")
 
-                    # Open the animations directory
-                    self.open_visualization_location()
+                    # Ask if user wants to open the animations directory
+                    if messagebox.askyesno("Open Animations",
+                                          f"Found {len(animation_files)} animations. Open folder?"):
+                        self.open_visualization_location()
                 else:
-                    self.log_output("❌ No animations found. Run adaptive learning with visualization enabled.")
+                    self.log_output("❌ No animations found. Generate final visualizations first.")
             else:
                 self.log_output("❌ No model available. Please run adaptive learning first.")
         except Exception as e:
@@ -2059,7 +2319,7 @@ Data Types:
                 'margin': float(self.config_vars.get('dbnn_margin', tk.StringVar(value="0.2")).get()),
                 'patience': int(self.config_vars.get('dbnn_patience', tk.StringVar(value="10")).get()),
                 'max_epochs': int(self.config_vars.get('dbnn_max_epochs', tk.StringVar(value="100")).get()),
-                'min_improvement': float(self.config_vars.get('dbnn_min_improvement', tk.StringVar(value="0.1")).get()),
+                'min_improvement': float(self.config_vars.get('dbnn_min_improvement', tk.StringVar(value="0.0000001")).get()),
 
                 'adaptive_learning': {
                     'enable_adaptive': True,
@@ -2073,7 +2333,7 @@ Data Types:
                     'margin_tolerance': float(self.config_vars.get('adaptive_margin_tolerance', tk.StringVar(value="0.15")).get()),
                     'kl_threshold': float(self.config_vars.get('adaptive_kl_threshold', tk.StringVar(value="0.1")).get()),
                     'patience': int(self.config_vars.get('dbnn_patience', tk.StringVar(value="10")).get()),
-                    'min_improvement': float(self.config_vars.get('dbnn_min_improvement', tk.StringVar(value="0.1")).get()),
+                    'min_improvement': float(self.config_vars.get('dbnn_min_improvement', tk.StringVar(value="0.0000001")).get()),
                 }
             }
 
@@ -2104,7 +2364,7 @@ Data Types:
             self.config_vars["dbnn_margin"].set("0.2")
             self.config_vars["dbnn_patience"].set("10")
             self.config_vars["dbnn_max_epochs"].set("100")
-            self.config_vars["dbnn_min_improvement"].set("0.1")
+            self.config_vars["dbnn_min_improvement"].set("0.0000001")
 
             # Adaptive learning defaults
             self.config_vars["adaptive_margin_tolerance"].set("0.15")
@@ -2501,7 +2761,7 @@ Data Types:
         if file_path:
             try:
                 # Use the model's save functionality
-                success = self.adaptive_model.model.save_model_auto(
+                success = self.adaptive_model.db.core.save_model_auto(
                     model_dir=os.path.dirname(file_path),
                     data_filename=self.current_data_file,
                     feature_columns=self.adaptive_model.feature_columns,
@@ -2832,7 +3092,7 @@ class DBNNWrapper:
             'margin': self.config.get('margin', 0.2),
             'patience': self.config.get('patience', 10),
             'epochs': self.config.get('max_epochs', 100),
-            'min_improvement': self.config.get('min_improvement', 0.1)
+            'min_improvement': self.config.get('min_improvement',0.0000001)
         }
         self.core = dbnn.DBNNCore(dbnn_config)
 
@@ -3140,12 +3400,12 @@ class DBNNWrapper:
             gain = self.core.config.get('gain', 2.0)
             max_epochs = self.core.config.get('epochs', 100)
             patience = self.core.config.get('patience', 10)
-            min_improvement = self.core.config.get('min_improvement', 0.1)
+            min_improvement = self.core.config.get('min_improvement', 0.0000001)
 
             print(f"Starting weight training (max {max_epochs} epochs)...")
             best_accuracy = 0.0
-            best_weights = None
-            best_round = 0
+            self.best_weights = None
+            self.best_round = 0
             patience_counter = 0
 
             for rnd in range(max_epochs + 1):
@@ -3153,9 +3413,9 @@ class DBNNWrapper:
                     # Initial evaluation
                     current_accuracy, correct_predictions, _ = self._evaluate_model(features_batches, encoded_targets_batches)
                     print(f"Epoch {rnd:3d}: Accuracy = {current_accuracy:.2f}% ({correct_predictions}/{total_samples})")
-                    best_accuracy = current_accuracy
-                    best_weights = self.core.anti_wts.copy()
-                    best_round = rnd
+                    self.best_accuracy = current_accuracy
+                    self.best_weights = self.core.anti_wts.copy()
+                    self.best_round = rnd
 
                     # Stop immediately if we already have 100% accuracy
                     if current_accuracy >= 100.0:
@@ -3172,19 +3432,19 @@ class DBNNWrapper:
                 # Stop immediately if we reach 100% accuracy
                 if current_accuracy >= 100.0:
                     print(f"Epoch {rnd:3d}: Accuracy = {current_accuracy:.2f}% - 🎉 100% ACCURACY REACHED!")
-                    best_accuracy = current_accuracy
-                    best_weights = self.core.anti_wts.copy()
-                    best_round = rnd
+                    self.best_accuracy = current_accuracy
+                    self.best_weights = self.core.anti_wts.copy()
+                    self.best_round = rnd
                     break
 
                 print(f"Epoch {rnd:3d}: Accuracy = {current_accuracy:.2f}% ({correct_predictions}/{total_samples})")
 
                 # Check for improvement
-                if current_accuracy > best_accuracy + min_improvement:
-                    improvement = current_accuracy - best_accuracy
-                    best_accuracy = current_accuracy
-                    best_weights = self.core.anti_wts.copy()
-                    best_round = rnd
+                if current_accuracy > self.best_accuracy:
+                    improvement = current_accuracy - self.best_accuracy
+                    self.best_accuracy = current_accuracy
+                    self.best_weights = self.core.anti_wts.copy()
+                    self.best_round = rnd
                     patience_counter = 0
                     print(f"  → Improved by {improvement:.2f}%")
                 else:
@@ -3196,9 +3456,9 @@ class DBNNWrapper:
                         print(f"  → No improvement (patience: {patience_counter}/{patience})")
 
             # Restore best weights
-            if best_weights is not None:
-                self.core.anti_wts = best_weights
-                print(f"✅ Training completed - Best accuracy: {best_accuracy:.2f}% (epoch {best_round})")
+            if self.best_weights is not None:
+                self.core.anti_wts = self.best_weights
+                print(f"✅ Training completed - Best accuracy: {self.best_accuracy:.2f}% (epoch {self.best_round})")
 
             self.core.is_trained = True
             return True
@@ -3507,6 +3767,7 @@ class AdaptiveDBNN:
         self.dataset_name = dataset_name
         self.config = config or {}
         self.adaptive_config = self._setup_adaptive_config()
+        self.progress_callback = None
 
         # Initialize DBNN wrapper - THIS IS THE MAIN MODEL
         self.db = DBNNWrapper(dataset_name, config)  # Changed from self.db to self.model
@@ -3561,6 +3822,11 @@ class AdaptiveDBNN:
         for key, value in self.adaptive_config.items():
             print(f"  {key:40}: {value}")
 
+    def set_progress_callback(self, callback):
+        """Set callback for progress updates"""
+        self.progress_callback = callback
+
+
     def _setup_adaptive_config(self) -> Dict[str, Any]:
         """Setup adaptive learning configuration with defaults"""
         default_config = {
@@ -3569,7 +3835,7 @@ class AdaptiveDBNN:
             'margin': 0.1,
             'max_adaptive_rounds': 10,
             'patience': 3,
-            'min_improvement': 0.001,
+            'min_improvement': 0.0000001,
             'max_margin_samples_per_class': 3,
             'margin_tolerance': 0.15,
             'kl_threshold': 0.1,
@@ -3852,7 +4118,7 @@ class AdaptiveDBNN:
 
         max_rounds = self.adaptive_config['max_adaptive_rounds']
         patience = self.adaptive_config['patience']
-        min_improvement = self.adaptive_config['min_improvement']
+        # REMOVED: min_improvement - any improvement is valuable
         enable_acid_test = self.adaptive_config.get('enable_acid_test', True)
         enable_visualization = self.adaptive_config.get('enable_visualization', True)
 
@@ -3977,20 +4243,25 @@ class AdaptiveDBNN:
             print(f"📈 Added {len(samples_to_add_indices)} samples. New training set: {len(X_train)} samples")
             print(f"📊 Remaining set size: {len(remaining_indices)} samples")
 
-            # CRITICAL FIX: Update best model and check for improvement
+            # CRITICAL FIX: Update best model and check for improvement - ANY improvement counts!
             improvement = current_accuracy - self.best_accuracy
             round_stat['improvement'] = improvement
 
-            if current_accuracy > self.best_accuracy + min_improvement:
+            # DEBUG: Show detailed tracking information
+            print(f"🔍 BEST TRACKING: Current={current_accuracy:.4f}, Best={self.best_accuracy:.4f}, Δ={improvement:.4f}")
+
+            if current_accuracy > self.best_accuracy:
+                # ANY improvement updates the best model and resets patience
                 self._update_best_model(current_accuracy, initial_indices.copy(), round_num, self.db)
-                patience_counter = 0
-                print(f"🏆 New best {accuracy_type} accuracy: {current_accuracy:.4f} (+{improvement:.4f})")
+                patience_counter = 0  # Reset patience on ANY improvement
+                print(f"🏆 NEW BEST {accuracy_type} accuracy: {current_accuracy:.4f} (+{improvement:.4f})")
             else:
+                # No improvement - increment patience
                 patience_counter += 1
-                if current_accuracy > self.best_accuracy:
-                    print(f"↗️  Small improvement: {current_accuracy:.4f} (+{improvement:.4f}) - Patience: {patience_counter}/{patience}")
+                if current_accuracy == self.best_accuracy:
+                    print(f"🔄 Same accuracy - Patience: {patience_counter}/{patience}")
                 else:
-                    print(f"🔄 No improvement - Patience: {patience_counter}/{patience}")
+                    print(f"📉 Worse accuracy: {current_accuracy:.4f} (best: {self.best_accuracy:.4f}) - Patience: {patience_counter}/{patience}")
 
             # Add round statistics
             self.round_stats.append(round_stat)
@@ -3999,20 +4270,22 @@ class AdaptiveDBNN:
             if enable_visualization and self._should_create_visualizations(round_num):
                 self._create_intermediate_visualizations(round_num)
 
-            # STOPPING CRITERION: No significant improvement for patience rounds
+            # STOPPING CRITERION: No improvement for patience rounds
             if patience_counter >= patience:
-                print(f"🛑 PATIENCE EXCEEDED: No significant improvement for {patience} rounds")
+                print(f"🛑 PATIENCE EXCEEDED: No improvement for {patience} rounds")
                 print(f"   Best {accuracy_type} accuracy: {self.best_accuracy:.4f} (round {self.best_round})")
                 break
 
         # Finalize with best configuration
         print(f"\n🎉 Adaptive learning completed after {self.adaptive_round} rounds!")
 
-        # Ensure we have valid best values
+        # Ensure we have valid best values - FIXED: Use the actual best we tracked
         if self.best_accuracy == 0.0 and acid_test_history:
+            # Fallback: use the last accuracy if no best was set
             self.best_accuracy = acid_test_history[-1]
             self.best_training_indices = initial_indices.copy()
             self.best_round = self.adaptive_round
+            print(f"⚠️  Using fallback best accuracy: {self.best_accuracy:.4f}")
 
         print(f"🏆 Best accuracy: {self.best_accuracy:.4f} (round {self.best_round})")
         print(f"📊 Final training set: {len(self.best_training_indices)} samples ({len(self.best_training_indices)/len(X)*100:.1f}% of total)")
@@ -4021,6 +4294,8 @@ class AdaptiveDBNN:
         if self.best_model_state is not None:
             print("🔄 Restoring best model state...")
             self._restore_best_model_state()
+        else:
+            print("⚠️  No best model state saved - using current model")
 
         X_train_best = X[self.best_training_indices]
         y_train_best = y[self.best_training_indices]
@@ -4043,7 +4318,7 @@ class AdaptiveDBNN:
         self.total_training_time = (datetime.now() - self.adaptive_start_time).total_seconds()
 
         print(f"📊 Final training accuracy: {final_train_accuracy:.2f}%")
-        print(f"📊 Final accuracy: {final_accuracy:.4f}")
+        print(f"📊 Final acid test accuracy: {final_accuracy:.4f}")
         print(f"📈 Final training set size: {len(X_train_best)}")
         print(f"📊 Final test set size: {len(X_test_best)}")
         print(f"⏱️  Total training time: {self.total_training_time:.2f} seconds")
@@ -4253,7 +4528,7 @@ class AdaptiveDBNN:
         patience = self.adaptive_config['patience']
         min_improvement = self.adaptive_config['min_improvement']
 
-        best_accuracy = 0.0
+        self.best_accuracy = 0.0
         patience_counter = 0
         current_X_train = X_train.copy()
         current_y_train = y_train.copy()
@@ -4290,8 +4565,8 @@ class AdaptiveDBNN:
             print(f"📈 Added {len(new_samples_X)} samples. New training set: {current_X_train.shape[0]} samples")
 
             # Check for improvement
-            if round_accuracy > best_accuracy + min_improvement:
-                best_accuracy = round_accuracy
+            if round_accuracy > self.best_accuracy + min_improvement:
+                self.best_accuracy = round_accuracy
                 patience_counter = 0
             else:
                 patience_counter += 1
