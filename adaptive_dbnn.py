@@ -80,6 +80,11 @@ import numpy as np
 from pathlib import Path
 import time
 
+import warnings
+from astropy.io import fits
+from astropy.table import Table
+import astropy
+
 class TOPCATIntegration:
     """
     Integration with TOPCAT for advanced table manipulation and column operations
@@ -90,7 +95,8 @@ class TOPCATIntegration:
         self.temp_dir = Path("topcat_temp")
         self.temp_dir.mkdir(exist_ok=True)
 
-    def export_to_topcat(self, data: pd.DataFrame = None, filename: str = None):
+
+    def export_to_topcat(self, data: pd.DataFrame = None, filename: str = None, format: str = 'fits'):
         """
         Export current dataset to TOPCAT-compatible format
         """
@@ -102,69 +108,88 @@ class TOPCATIntegration:
 
         if filename is None:
             timestamp = int(time.time())
-            filename = f"adaptive_dbnn_export_{timestamp}.fits"
+            if format == 'fits':
+                filename = f"adaptive_dbnn_export_{timestamp}.fits"
+            else:
+                filename = f"adaptive_dbnn_export_{timestamp}.csv"
 
         filepath = self.temp_dir / filename
 
-        # Save in FITS format (TOP CAT's preferred format)
         try:
-            # Try using astropy for FITS export
-            from astropy.table import Table
-            table = Table.from_pandas(data)
-            table.write(str(filepath), format='fits')
-            print(f"✅ Exported {len(data)} rows to {filepath}")
-        except ImportError:
+            if format == 'fits':
+                # Export to FITS format
+                from astropy.table import Table
+                table = Table.from_pandas(data)
+
+                # Add metadata headers
+                table.meta['AUTHOR'] = 'adaptive_dbnn'
+                table.meta['SOFTWARE'] = 'DBNN Classifier'
+                table.meta['CREATED'] = time.ctime()
+
+                if hasattr(self.adaptive_model, 'dataset_name'):
+                    table.meta['DATASET'] = self.adaptive_model.dataset_name
+
+                table.write(str(filepath), format='fits', overwrite=True)
+                print(f"✅ Exported {len(data)} rows to FITS: {filepath}")
+
+            else:
+                # Export to CSV
+                data.to_csv(filepath, index=False)
+                print(f"✅ Exported {len(data)} rows to CSV: {filepath}")
+
+        except Exception as e:
+            print(f"❌ Export error: {e}")
             # Fallback to CSV
             filepath = filepath.with_suffix('.csv')
             data.to_csv(filepath, index=False)
-            print(f"✅ Exported {len(data)} rows to {filepath} (CSV format)")
+            print(f"✅ Exported {len(data)} rows to CSV (fallback): {filepath}")
 
         return filepath
 
-    def launch_topcat_with_data(self, data: pd.DataFrame = None):
+    def launch_topcat_with_data(self, data: pd.DataFrame = None, format: str = 'fits'):
         """
-        Launch TOPCAT with the current dataset loaded
+        Launch TOPCAT with the current dataset loaded in preferred format
         """
-        data_file = self.export_to_topcat(data)
+        data_file = self.export_to_topcat(data, format=format)
 
         try:
             # Launch TOPCAT with the data file
-            if data_file.suffix == '.fits':
-                cmd = f"topcat -fits {data_file}"
-            else:
-                cmd = f"topcat {data_file}"
+            cmd = f"topcat {data_file}"
 
             print(f"🚀 Launching TOPCAT with command: {cmd}")
             process = subprocess.Popen(cmd, shell=True)
 
             # Provide instructions for user
-            self._print_topcat_instructions(data_file)
+            self._print_topcat_instructions(data_file, format)
 
             return process
         except Exception as e:
             print(f"❌ Failed to launch TOPCAT: {e}")
             return None
 
-    def _print_topcat_instructions(self, data_file):
+    def _print_topcat_instructions(self, data_file, format: str):
         """Print instructions for using TOPCAT with adaptive_dbnn"""
         print("\n" + "="*60)
         print("🎯 TOPCAT INTEGRATION INSTRUCTIONS")
         print("="*60)
-        print("1. In TOPCAT, use the table browser to view your data")
+        print(f"📁 Data file: {data_file} ({format.upper()} format)")
+        print("\n1. In TOPCAT, use the table browser to view your data")
         print("2. Use 'Views → Column Info' to see column statistics")
         print("3. Use 'Views → Row Subsets' to create data subsets")
         print("4. Use 'Graphics → Plane Plot' for 2D visualizations")
         print("5. Use 'Graphics → 3D Plot' for 3D visualizations")
+
         print("\n🔧 COLUMN OPERATIONS:")
         print("   - Use 'Analysis → Column Arithmetic' to create new columns")
-        print("   - Example expressions:")
-        print("     * 'sqrt(col1^2 + col2^2)' - Euclidean distance")
-        print("     * 'log10(col1)' - Logarithmic transform")
-        print("     * 'col1 > mean(col1)' - Boolean condition")
-        print("     * 'col1 * 100 / max(col1)' - Normalization")
+        print("   - Example expressions for astronomical data:")
+        print("     * 'sqrt(ra^2 + dec^2)' - Position magnitude")
+        print("     * 'mag1 - mag2' - Color index")
+        print("     * 'log10(flux)' - Logarithmic flux")
+        print("     * 'ra * cos(dec)' - Projected coordinates")
+
         print("\n💾 SAVING MODIFIED DATA:")
         print("   - Use 'File → Save Table' to export modified table")
-        print("   - Choose format: FITS, CSV, or VOTable")
+        print("   - Recommended format: FITS (preserves metadata)")
         print("   - Save to a new file name")
         print("="*60)
 
@@ -1883,7 +1908,12 @@ class AdaptiveDBNNGUI:
 
         file_path = filedialog.askopenfilename(
             title="Select TOPCAT Modified File",
-            filetypes=[("FITS files", "*.fits"), ("CSV files", "*.csv"), ("VOTable files", "*.vot"), ("All files", "*.*")]
+            filetypes=[
+                ("FITS files", "*.fits *.fit"),
+                ("CSV files", "*.csv"),
+                ("DAT files", "*.dat"),
+                ("All files", "*.*")
+            ]
         )
 
         if file_path:
@@ -3884,63 +3914,101 @@ class AdaptiveDBNNGUI:
                 var.set(False)
 
 
+
     def load_data_file(self):
-        """Load data file and populate feature selection."""
+        """Load data file and populate feature selection with FITS support."""
         file_path = self.data_file_var.get()
         if not file_path or not os.path.exists(file_path):
             messagebox.showwarning("Warning", "Please select a valid data file.")
             return
 
         try:
-            # Load data
-            if file_path.endswith('.csv'):
-                df = pd.read_csv(file_path)
-            elif file_path.endswith('.dat'):
-                # Try to load DAT file with space separation
-                try:
-                    df = pd.read_csv(file_path, delimiter=r'\s+')
-                except:
-                    df = pd.read_csv(file_path)  # Fallback to default
-            else:
-                messagebox.showerror("Error", "Unsupported file format.")
-                return
+            # Initialize preprocessor for FITS support
+            if not hasattr(self, 'preprocessor'):
+                self.preprocessor = DataPreprocessor()
 
+            # Load data with format auto-detection
+            self.original_data = self.preprocessor.load_data_auto(file_path)
             self.current_data_file = file_path
-            self.original_data = df.copy()
 
             # Update data info
-            self.update_data_info(df)
+            self.update_data_info(self.original_data)
 
             # Update feature selection UI
-            self.update_feature_selection_ui(df)
+            self.update_feature_selection_ui(self.original_data)
 
             self.data_loaded = True
-            self.log_output(f"✅ Data loaded successfully: {len(df)} samples, {len(df.columns)} columns")
+            self.log_output(f"✅ Data loaded successfully: {len(self.original_data)} samples, {len(self.original_data.columns)} columns")
+
+            # Show file format info
+            if file_path.endswith(('.fits', '.fit')):
+                self.log_output("🔭 FITS file loaded - astronomical data ready!")
+                self._show_fits_info(file_path)
 
         except Exception as e:
             self.log_output(f"❌ Error loading data: {e}")
+            import traceback
+            traceback.print_exc()
 
+    def _show_fits_info(self, file_path: str):
+        """Display additional FITS file information"""
+        try:
+            with fits.open(file_path) as hdul:
+                self.log_output(f"📊 FITS Structure: {len(hdul)} HDUs")
+
+                for i, hdu in enumerate(hdul):
+                    hdu_info = f"  HDU {i}: {hdu.__class__.__name__}"
+                    if hdu.header:
+                        hdu_info += f", {len(hdu.header)} cards"
+                    if hdu.data is not None:
+                        hdu_info += f", shape {hdu.data.shape}"
+                    self.log_output(hdu_info)
+
+                # Show important header keywords from primary HDU
+                primary_hdu = hdul[0]
+                if primary_hdu.header:
+                    self.log_output("📋 Key header keywords:")
+                    for key in ['TELESCOP', 'INSTRUME', 'OBJECT', 'RA', 'DEC', 'EXPTIME']:
+                        if key in primary_hdu.header:
+                            self.log_output(f"  {key}: {primary_hdu.header[key]}")
+
+        except Exception as e:
+            self.log_output(f"⚠️ Could not read FITS metadata: {e}")
 
     def update_data_info(self, df):
-        """Update data information display."""
+        """Update data information display with FITS support."""
         self.data_info_text.config(state=tk.NORMAL)
         self.data_info_text.delete(1.0, tk.END)
 
         target_mode = "Prediction" if self.target_var.get() == 'None' else "Training"
+        file_format = "FITS" if self.current_data_file and self.current_data_file.endswith(('.fits', '.fit')) else "CSV/DAT"
 
         info_text = f"""📊 DATA INFORMATION - {target_mode} MODE
-    {'='*40}
+    {'='*50}
+    File: {os.path.basename(self.current_data_file)} ({file_format})
     Samples: {len(df)}
     Features: {len(df.columns)}
-    Columns: {', '.join(df.columns.tolist())}
     Target: {'None (Prediction Mode)' if self.target_var.get() == 'None' else self.target_var.get()}
 
     Data Types:
     """
+        numeric_count = 0
+        categorical_count = 0
+
         for col in df.columns:
             dtype = df[col].dtype
             unique_count = df[col].nunique()
-            info_text += f"  {col}: {dtype} (unique: {unique_count})\n"
+
+            if pd.api.types.is_numeric_dtype(df[col]):
+                col_type = "numeric"
+                numeric_count += 1
+            else:
+                col_type = "categorical"
+                categorical_count += 1
+
+            info_text += f"  {col}: {dtype} ({col_type}, unique: {unique_count})\n"
+
+        info_text += f"\nSummary: {numeric_count} numeric, {categorical_count} categorical features\n"
 
         missing_values = df.isnull().sum()
         if missing_values.any():
@@ -4474,6 +4542,116 @@ class DataPreprocessor:
         self.missing_value_indicators = {}
         self.column_dtypes = {}  # Track original data types
 
+
+    def load_data_auto(self, file_path: str) -> pd.DataFrame:
+        """Auto-detect file format and load data"""
+        print(f"📁 Loading data from: {file_path}")
+
+        if file_path.endswith('.fits') or file_path.endswith('.fit'):
+            return self._load_fits_file(file_path)
+        elif file_path.endswith('.csv'):
+            return pd.read_csv(file_path)
+        elif file_path.endswith('.dat'):
+            return self._load_dat_file(file_path)
+        else:
+            # Try to auto-detect format
+            return self._load_unknown_format(file_path)
+
+    def _load_fits_file(self, file_path: str) -> pd.DataFrame:
+        """Load data from FITS file with comprehensive handling"""
+        print("🔭 Loading FITS file...")
+
+        try:
+            with fits.open(file_path) as hdul:
+                print(f"📊 FITS file contains {len(hdul)} HDUs")
+
+                # Display HDU information
+                for i, hdu in enumerate(hdul):
+                    print(f"  HDU {i}: {hdu.__class__.__name__}, {hdu.data is not None and hdu.data.shape or 'No data'}")
+
+                # Find the first HDU with table data
+                table_hdu = None
+                for hdu in hdul:
+                    if isinstance(hdu, fits.BinTableHDU) or isinstance(hdu, fits.TableHDU):
+                        table_hdu = hdu
+                        break
+
+                if table_hdu is None:
+                    # Try to find any HDU with data that can be converted to table
+                    for hdu in hdul:
+                        if hdu.data is not None and hasattr(hdu.data, 'dtype'):
+                            table_hdu = hdu
+                            break
+
+                if table_hdu is None:
+                    raise ValueError("No table data found in FITS file")
+
+                print(f"✅ Using HDU {hdul.index(table_hdu)}: {table_hdu.__class__.__name__}")
+
+                # Convert to pandas DataFrame
+                if isinstance(table_hdu, (fits.BinTableHDU, fits.TableHDU)):
+                    # Proper table HDU
+                    table = Table.read(file_path)
+                    df = table.to_pandas()
+                else:
+                    # Image data or other format - convert to table
+                    data = table_hdu.data
+                    if data.ndim == 2:
+                        # 2D image data - treat as feature matrix
+                        n_samples, n_features = data.shape
+                        columns = [f'feature_{i}' for i in range(n_features)]
+                        df = pd.DataFrame(data, columns=columns)
+                    else:
+                        # Other data shapes
+                        df = self._convert_array_to_dataframe(data)
+
+                print(f"✅ Loaded {len(df)} samples, {len(df.columns)} columns from FITS")
+                print(f"📊 Columns: {list(df.columns)}")
+
+                return df
+
+        except Exception as e:
+            print(f"❌ Error loading FITS file: {e}")
+            raise
+
+    def _convert_array_to_dataframe(self, data: np.ndarray) -> pd.DataFrame:
+        """Convert numpy array to DataFrame with intelligent column naming"""
+        if data.ndim == 1:
+            return pd.DataFrame({f'feature_0': data})
+        elif data.ndim == 2:
+            n_features = data.shape[1]
+            columns = [f'feature_{i}' for i in range(n_features)]
+            return pd.DataFrame(data, columns=columns)
+        else:
+            # Flatten higher-dimensional data
+            flattened = data.reshape(data.shape[0], -1)
+            n_features = flattened.shape[1]
+            columns = [f'feature_{i}' for i in range(n_features)]
+            return pd.DataFrame(flattened, columns=columns)
+
+    def _load_dat_file(self, file_path: str) -> pd.DataFrame:
+        """Load DAT file with various delimiters"""
+        try:
+            # Try space-separated first
+            return pd.read_csv(file_path, delimiter=r'\s+')
+        except:
+            try:
+                # Try comma-separated
+                return pd.read_csv(file_path)
+            except:
+                # Try tab-separated
+                return pd.read_csv(file_path, delimiter='\t')
+
+    def _load_unknown_format(self, file_path: str) -> pd.DataFrame:
+        """Attempt to load file with unknown format"""
+        try:
+            return pd.read_csv(file_path)
+        except:
+            try:
+                return pd.read_csv(file_path, delimiter=r'\s+')
+            except:
+                raise ValueError(f"Unsupported file format: {file_path}")
+
     def preprocess_dataset(self, data: pd.DataFrame, feature_columns: List[str] = None) -> Tuple[np.ndarray, np.ndarray, List[str]]:
         """Preprocess entire dataset with specified feature columns"""
         print("🔧 Preprocessing dataset...")
@@ -4731,12 +4909,17 @@ class DBNNWrapper:
         if file_path is None:
             # Auto-detect data file (existing logic)
             possible_files = [
+                f"{self.dataset_name}.fits",  # FITS first
+                f"{self.dataset_name}.fit",
                 f"{self.dataset_name}.csv",
                 f"{self.dataset_name}.data",
                 f"wine.data",
                 f"wine.csv",
+                f"wine.fits",  # FITS version
                 "data.csv",
-                "train.csv"
+                "data.fits",   # FITS version
+                "train.csv",
+                "train.fits"   # FITS version
             ]
             for file in possible_files:
                 if os.path.exists(file):
@@ -4745,9 +4928,10 @@ class DBNNWrapper:
                     break
 
         if file_path is None:
+            fits_files = glob.glob("*.fits") + glob.glob("*.fit")
             csv_files = glob.glob("*.csv")
             dat_files = glob.glob("*.dat")
-            all_files = csv_files + dat_files
+            all_files = fits_files + csv_files + dat_files
             if all_files:
                 file_path = all_files[0]
                 print(f"📁 Auto-selected data file: {file_path}")
