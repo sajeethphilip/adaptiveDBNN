@@ -72,6 +72,348 @@ import multiprocessing
 import queue
 import threading
 
+import subprocess
+import tempfile
+import os
+import pandas as pd
+import numpy as np
+from pathlib import Path
+import time
+
+class TOPCATIntegration:
+    """
+    Integration with TOPCAT for advanced table manipulation and column operations
+    """
+
+    def __init__(self, adaptive_model):
+        self.adaptive_model = adaptive_model
+        self.temp_dir = Path("topcat_temp")
+        self.temp_dir.mkdir(exist_ok=True)
+
+    def export_to_topcat(self, data: pd.DataFrame = None, filename: str = None):
+        """
+        Export current dataset to TOPCAT-compatible format
+        """
+        if data is None:
+            if hasattr(self.adaptive_model, 'original_data'):
+                data = self.adaptive_model.original_data
+            else:
+                raise ValueError("No data available for export")
+
+        if filename is None:
+            timestamp = int(time.time())
+            filename = f"adaptive_dbnn_export_{timestamp}.fits"
+
+        filepath = self.temp_dir / filename
+
+        # Save in FITS format (TOP CAT's preferred format)
+        try:
+            # Try using astropy for FITS export
+            from astropy.table import Table
+            table = Table.from_pandas(data)
+            table.write(str(filepath), format='fits')
+            print(f"✅ Exported {len(data)} rows to {filepath}")
+        except ImportError:
+            # Fallback to CSV
+            filepath = filepath.with_suffix('.csv')
+            data.to_csv(filepath, index=False)
+            print(f"✅ Exported {len(data)} rows to {filepath} (CSV format)")
+
+        return filepath
+
+    def launch_topcat_with_data(self, data: pd.DataFrame = None):
+        """
+        Launch TOPCAT with the current dataset loaded
+        """
+        data_file = self.export_to_topcat(data)
+
+        try:
+            # Launch TOPCAT with the data file
+            if data_file.suffix == '.fits':
+                cmd = f"topcat -fits {data_file}"
+            else:
+                cmd = f"topcat {data_file}"
+
+            print(f"🚀 Launching TOPCAT with command: {cmd}")
+            process = subprocess.Popen(cmd, shell=True)
+
+            # Provide instructions for user
+            self._print_topcat_instructions(data_file)
+
+            return process
+        except Exception as e:
+            print(f"❌ Failed to launch TOPCAT: {e}")
+            return None
+
+    def _print_topcat_instructions(self, data_file):
+        """Print instructions for using TOPCAT with adaptive_dbnn"""
+        print("\n" + "="*60)
+        print("🎯 TOPCAT INTEGRATION INSTRUCTIONS")
+        print("="*60)
+        print("1. In TOPCAT, use the table browser to view your data")
+        print("2. Use 'Views → Column Info' to see column statistics")
+        print("3. Use 'Views → Row Subsets' to create data subsets")
+        print("4. Use 'Graphics → Plane Plot' for 2D visualizations")
+        print("5. Use 'Graphics → 3D Plot' for 3D visualizations")
+        print("\n🔧 COLUMN OPERATIONS:")
+        print("   - Use 'Analysis → Column Arithmetic' to create new columns")
+        print("   - Example expressions:")
+        print("     * 'sqrt(col1^2 + col2^2)' - Euclidean distance")
+        print("     * 'log10(col1)' - Logarithmic transform")
+        print("     * 'col1 > mean(col1)' - Boolean condition")
+        print("     * 'col1 * 100 / max(col1)' - Normalization")
+        print("\n💾 SAVING MODIFIED DATA:")
+        print("   - Use 'File → Save Table' to export modified table")
+        print("   - Choose format: FITS, CSV, or VOTable")
+        print("   - Save to a new file name")
+        print("="*60)
+
+    def import_from_topcat(self, filepath: str, update_model: bool = True):
+        """
+        Import modified data from TOPCAT back into adaptive_dbnn
+        """
+        try:
+            # Read the modified file
+            if filepath.endswith('.fits'):
+                from astropy.table import Table
+                table = Table.read(filepath)
+                df = table.to_pandas()
+            else:
+                df = pd.read_csv(filepath)
+
+            print(f"✅ Imported {len(df)} rows from {filepath}")
+            print(f"📊 Columns: {list(df.columns)}")
+
+            if update_model and hasattr(self.adaptive_model, 'original_data'):
+                # Update the adaptive model with new data
+                self.adaptive_model.original_data = df
+                print("🔄 Updated adaptive_dbnn with modified data")
+
+                # If model was already trained, warn about retraining
+                if hasattr(self.adaptive_model, 'model_trained') and self.adaptive_model.model_trained:
+                    print("⚠️  Data structure changed - retraining recommended")
+
+            return df
+
+        except Exception as e:
+            print(f"❌ Error importing from TOPCAT file: {e}")
+            return None
+
+    def create_interactive_topcat_session(self):
+        """
+        Create an interactive session for TOPCAT data manipulation
+        """
+        if not hasattr(self.adaptive_model, 'original_data'):
+            print("❌ No data loaded in adaptive_dbnn")
+            return None
+
+        print("\n🎮 Starting Interactive TOPCAT Session")
+        print("="*50)
+
+        # Export current data
+        export_file = self.export_to_topcat()
+
+        # Launch TOPCAT
+        topcat_process = self.launch_topcat_with_data()
+
+        if topcat_process:
+            print("\n⏳ TOPCAT is running...")
+            print("   Modify your data in TOPCAT and save the changes")
+            print("   When done, return here and press Enter to continue")
+            input("   Press Enter when ready to import modified data... ")
+
+            # Ask for the modified file
+            modified_file = input("   Enter path to modified TOPCAT file: ").strip()
+
+            if os.path.exists(modified_file):
+                # Import modified data
+                new_data = self.import_from_topcat(modified_file, update_model=True)
+
+                # Cleanup temporary files
+                self.cleanup_temp_files()
+
+                return new_data
+            else:
+                print("❌ File not found. No changes imported.")
+
+        return None
+
+    def _evaluate_expression(self, df: pd.DataFrame, expression: str):
+        """
+        Evaluate TOPCAT-like expressions on DataFrame safely
+        """
+        try:
+            # Create a safe environment for evaluation
+            safe_dict = {
+                'np': np,
+                'sqrt': np.sqrt,
+                'log10': np.log10,
+                'log': np.log,
+                'exp': np.exp,
+                'sin': np.sin,
+                'cos': np.cos,
+                'tan': np.tan,
+                'abs': np.abs,
+                'max': np.maximum,
+                'min': np.minimum,
+                'mean': np.mean,
+                'std': np.std
+            }
+
+            # Add dataframe columns to the safe environment
+            for col in df.columns:
+                safe_dict[col] = df[col]
+
+            # Evaluate the expression
+            result = eval(expression, {"__builtins__": {}}, safe_dict)
+            return result
+
+        except Exception as e:
+            # Fallback to pandas eval for simple expressions
+            try:
+                return df.eval(expression)
+            except:
+                raise ValueError(f"Cannot evaluate expression: {expression}. Error: {e}")
+
+    def batch_column_operations(self, operations: dict):
+        """
+        Apply batch column operations using TOPCAT-like syntax
+        """
+        if not hasattr(self.adaptive_model, 'original_data'):
+            print("❌ No data available")
+            return None
+
+        df = self.adaptive_model.original_data.copy()
+
+        print("🔧 Applying batch column operations...")
+
+        for new_col, expression in operations.items():
+            try:
+                # Simple expression evaluation (for basic operations)
+                result = self._evaluate_expression(df, expression)
+                df[new_col] = result
+                print(f"✅ Created column '{new_col}': {expression}")
+            except Exception as e:
+                print(f"❌ Failed to create '{new_col}': {e}")
+
+        # Update the model
+        self.adaptive_model.original_data = df
+        return df
+
+
+    def create_derived_features(self, feature_definitions: dict):
+        """
+        Create derived features based on domain knowledge
+        """
+        operations = {}
+
+        for feature_name, definition in feature_definitions.items():
+            operations[feature_name] = definition
+
+        return self.batch_column_operations(operations)
+
+    def interactive_feature_engineering(self):
+        """
+        Interactive feature engineering session
+        """
+        if not hasattr(self.adaptive_model, 'original_data'):
+            print("❌ No data loaded")
+            return
+
+        df = self.adaptive_model.original_data
+        print(f"\n🔧 INTERACTIVE FEATURE ENGINEERING")
+        print(f"📊 Current data: {len(df)} samples, {len(df.columns)} features")
+        print("Available columns:", list(df.columns))
+
+        operations = {}
+
+        while True:
+            print("\nOptions:")
+            print("1. Add new column")
+            print("2. View current columns")
+            print("3. Apply operations and continue")
+            print("4. Cancel")
+
+            choice = input("\nSelect option (1-4): ").strip()
+
+            if choice == '1':
+                self._add_column_interactive(operations, df)
+            elif choice == '2':
+                print("\nCurrent columns:", list(df.columns))
+                if operations:
+                    print("Pending operations:", operations)
+            elif choice == '3':
+                if operations:
+                    self.batch_column_operations(operations)
+                    print("✅ Operations applied!")
+                break
+            elif choice == '4':
+                print("❌ Operation cancelled")
+                break
+            else:
+                print("❌ Invalid choice")
+
+    def _add_column_interactive(self, operations: dict, df: pd.DataFrame):
+        """Interactive column addition"""
+        col_name = input("New column name: ").strip()
+
+        if col_name in df.columns:
+            print(f"⚠️  Column '{col_name}' already exists")
+            return
+
+        print("\nExample expressions:")
+        print("  sqrt(feature1^2 + feature2^2)  # Euclidean distance")
+        print("  log10(feature1)                # Logarithm")
+        print("  feature1 * feature2            # Interaction")
+        print("  feature1 > mean(feature1)      # Threshold")
+
+        expression = input("Expression: ").strip()
+
+        # Validate expression
+        try:
+            test_result = self._evaluate_expression(df.head(), expression)
+            operations[col_name] = expression
+            print(f"✅ Expression validated - will create '{col_name}'")
+        except Exception as e:
+            print(f"❌ Invalid expression: {e}")
+
+    def cleanup_temp_files(self):
+        """Clean up temporary files"""
+        for file in self.temp_dir.glob("*"):
+            try:
+                file.unlink()
+            except:
+                pass
+        print("🧹 Cleaned up temporary files")
+
+    def get_column_statistics(self):
+        """Get comprehensive column statistics"""
+        if not hasattr(self.adaptive_model, 'original_data'):
+            return None
+
+        df = self.adaptive_model.original_data
+        stats = {}
+
+        for col in df.columns:
+            if pd.api.types.is_numeric_dtype(df[col]):
+                stats[col] = {
+                    'type': 'numeric',
+                    'min': float(df[col].min()),
+                    'max': float(df[col].max()),
+                    'mean': float(df[col].mean()),
+                    'std': float(df[col].std()),
+                    'missing': df[col].isna().sum()
+                }
+            else:
+                stats[col] = {
+                    'type': 'categorical',
+                    'unique_values': df[col].nunique(),
+                    'most_frequent': df[col].mode().iloc[0] if not df[col].empty else None,
+                    'missing': df[col].isna().sum()
+                }
+
+        return stats
+
 class AdvancedInteractiveVisualizer:
     """Advanced interactive 3D visualization with dynamic controls"""
 
@@ -1419,8 +1761,14 @@ class AdaptiveDBNNGUI:
     Provides an interactive interface for the adaptive learning system.
     """
 
-    def __init__(self, root):
-        self.root = root
+    def __init__(self, root=None):
+        if root is None:
+            self.root = tk.Tk()
+        else:
+            self.root = root
+        self.root.title("Enhanced Adaptive DBNN with Feature Selection")
+        self.root.geometry("1400x900")
+
         self.root.title("Enhanced Adaptive DBNN with Feature Selection")
         self.root.geometry("1400x900")
 
@@ -1463,6 +1811,293 @@ class AdaptiveDBNNGUI:
 
         self.setup_gui()
         self.setup_common_controls()
+
+
+    def setup_topcat_integration(self):
+        """Setup TOPCAT integration in the GUI"""
+        # Add TOPCAT tab to notebook
+        self.topcat_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.topcat_tab, text="🔧 TOPCAT Integration")
+
+        # TOPCAT integration frame
+        topcat_frame = ttk.LabelFrame(self.topcat_tab, text="TOPCAT Table Manipulation", padding="10")
+        topcat_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+
+        # Control buttons
+        control_frame = ttk.Frame(topcat_frame)
+        control_frame.pack(fill=tk.X, pady=5)
+
+        ttk.Button(control_frame, text="🚀 Launch TOPCAT with Data",
+                  command=self.launch_topcat).pack(side=tk.LEFT, padx=2)
+        ttk.Button(control_frame, text="📊 Import Modified Data",
+                  command=self.import_from_topcat).pack(side=tk.LEFT, padx=2)
+        ttk.Button(control_frame, text="🔧 Interactive Feature Engineering",
+                  command=self.interactive_feature_engineering).pack(side=tk.LEFT, padx=2)
+
+        # Column operations frame
+        ops_frame = ttk.LabelFrame(topcat_frame, text="Quick Column Operations", padding="10")
+        ops_frame.pack(fill=tk.X, pady=5)
+
+        # Common operations - FIXED: Use lambda functions instead of method references
+        common_ops = [
+            ("Normalize", self.normalize_features),
+            ("Log Transform", self.log_transform),
+            ("Square Root", self.sqrt_transform),
+            ("Create Interactions", self.create_interaction_terms)
+        ]
+
+        for text, command in common_ops:
+            ttk.Button(ops_frame, text=text, command=command).pack(side=tk.LEFT, padx=2)
+
+        # Statistics display
+        stats_frame = ttk.LabelFrame(topcat_frame, text="Column Statistics", padding="10")
+        stats_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+
+        self.stats_text = scrolledtext.ScrolledText(stats_frame, height=10)
+        self.stats_text.pack(fill=tk.BOTH, expand=True)
+        self.stats_text.config(state=tk.DISABLED)
+
+        ttk.Button(stats_frame, text="🔄 Refresh Statistics",
+                  command=self.refresh_statistics).pack(pady=5)
+
+    def launch_topcat(self):
+        """Launch TOPCAT with current data"""
+        if not self.data_loaded:
+            messagebox.showwarning("Warning", "Please load data first.")
+            return
+
+        try:
+            if not hasattr(self, 'topcat_integration'):
+                self.topcat_integration = TOPCATIntegration(self)
+
+            self.topcat_integration.launch_topcat_with_data()
+            self.log_output("🚀 TOPCAT launched with current data")
+
+        except Exception as e:
+            self.log_output(f"❌ Error launching TOPCAT: {e}")
+
+    def import_from_topcat(self):
+        """Import modified data from TOPCAT"""
+        if not hasattr(self, 'topcat_integration'):
+            self.topcat_integration = TOPCATIntegration(self)
+
+        file_path = filedialog.askopenfilename(
+            title="Select TOPCAT Modified File",
+            filetypes=[("FITS files", "*.fits"), ("CSV files", "*.csv"), ("VOTable files", "*.vot"), ("All files", "*.*")]
+        )
+
+        if file_path:
+            new_data = self.topcat_integration.import_from_topcat(file_path, update_model=True)
+            if new_data is not None:
+                self.original_data = new_data
+                self.data_loaded = True
+                self.update_feature_selection_ui(new_data)
+                self.log_output("✅ Imported modified data from TOPCAT")
+
+                # Refresh statistics
+                self.refresh_statistics()
+
+    def interactive_feature_engineering(self):
+        """Start interactive feature engineering"""
+        if not self.data_loaded:
+            messagebox.showwarning("Warning", "Please load data first.")
+            return
+
+        if not hasattr(self, 'topcat_integration'):
+            self.topcat_integration = TOPCATIntegration(self)
+
+        self.topcat_integration.interactive_feature_engineering()
+        self.refresh_statistics()
+
+    def refresh_statistics(self):
+        """Refresh column statistics display"""
+        if not self.data_loaded:
+            return
+
+        if not hasattr(self, 'topcat_integration'):
+            self.topcat_integration = TOPCATIntegration(self)
+
+        stats = self.topcat_integration.get_column_statistics()
+
+        self.stats_text.config(state=tk.NORMAL)
+        self.stats_text.delete(1.0, tk.END)
+
+        if stats:
+            self.stats_text.insert(tk.END, "📊 COLUMN STATISTICS\n")
+            self.stats_text.insert(tk.END, "="*50 + "\n\n")
+
+            for col, col_stats in stats.items():
+                self.stats_text.insert(tk.END, f"📈 {col} ({col_stats['type']})\n")
+                if col_stats['type'] == 'numeric':
+                    self.stats_text.insert(tk.END, f"   Range: {col_stats['min']:.3f} - {col_stats['max']:.3f}\n")
+                    self.stats_text.insert(tk.END, f"   Mean: {col_stats['mean']:.3f} ± {col_stats['std']:.3f}\n")
+                else:
+                    self.stats_text.insert(tk.END, f"   Unique values: {col_stats['unique_values']}\n")
+                    if col_stats['most_frequent']:
+                        self.stats_text.insert(tk.END, f"   Most frequent: {col_stats['most_frequent']}\n")
+
+                self.stats_text.insert(tk.END, f"   Missing: {col_stats['missing']}\n\n")
+
+        self.stats_text.config(state=tk.DISABLED)
+
+    # Common column operations - ADD MISSING METHODS
+    def normalize_features(self):
+        """Normalize numeric features"""
+        if not self.data_loaded:
+            return
+
+        operations = {}
+        df = self.original_data
+
+        numeric_cols = [col for col in df.columns if pd.api.types.is_numeric_dtype(df[col])]
+
+        for col in numeric_cols:
+            col_min = df[col].min()
+            col_max = df[col].max()
+            if col_max > col_min:  # Avoid division by zero
+                operations[f"norm_{col}"] = f"({col} - {col_min}) / ({col_max - col_min})"
+
+        if operations:
+            self.topcat_integration.batch_column_operations(operations)
+            self.log_output("✅ Normalized numeric features")
+            self.refresh_statistics()
+        else:
+            self.log_output("⚠️ No numeric features to normalize")
+
+    def log_transform(self):
+        """Apply log transform to numeric features"""
+        if not self.data_loaded:
+            return
+
+        operations = {}
+        df = self.original_data
+
+        numeric_cols = [col for col in df.columns if pd.api.types.is_numeric_dtype(df[col])]
+
+        for col in numeric_cols:
+            if df[col].min() > 0:  # Log only positive values
+                operations[f"log_{col}"] = f"log10({col})"
+
+        if operations:
+            self.topcat_integration.batch_column_operations(operations)
+            self.log_output("✅ Applied log transform to positive numeric features")
+            self.refresh_statistics()
+        else:
+            self.log_output("⚠️ No suitable features for log transform")
+
+    def sqrt_transform(self):
+        """Apply square root transform"""
+        if not self.data_loaded:
+            return
+
+        operations = {}
+        df = self.original_data
+
+        numeric_cols = [col for col in df.columns if pd.api.types.is_numeric_dtype(df[col])]
+
+        for col in numeric_cols:
+            if df[col].min() >= 0:  # Sqrt only non-negative values
+                operations[f"sqrt_{col}"] = f"sqrt({col})"
+
+        if operations:
+            self.topcat_integration.batch_column_operations(operations)
+            self.log_output("✅ Applied square root transform to non-negative features")
+            self.refresh_statistics()
+        else:
+            self.log_output("⚠️ No suitable features for square root transform")
+
+    def create_interaction_terms(self):
+        """Create interaction terms between numeric features"""
+        if not self.data_loaded:
+            return
+
+        df = self.original_data
+        numeric_cols = [col for col in df.columns if pd.api.types.is_numeric_dtype(df[col])]
+
+        if len(numeric_cols) < 2:
+            self.log_output("⚠️ Need at least 2 numeric features for interactions")
+            return
+
+        operations = {}
+
+        # Create pairwise interactions for first few features to avoid explosion
+        max_interactions = 5
+        count = 0
+
+        for i in range(len(numeric_cols)):
+            for j in range(i + 1, len(numeric_cols)):
+                if count >= max_interactions:
+                    break
+                col1, col2 = numeric_cols[i], numeric_cols[j]
+                operations[f"{col1}_x_{col2}"] = f"{col1} * {col2}"
+                count += 1
+
+        if operations:
+            self.topcat_integration.batch_column_operations(operations)
+            self.log_output("✅ Created interaction terms between numeric features")
+            self.refresh_statistics()
+        else:
+            self.log_output("⚠️ Could not create interaction terms")
+
+    def create_polynomial_features(self):
+        """Create polynomial features for numeric columns"""
+        if not self.data_loaded:
+            return
+
+        operations = {}
+        df = self.original_data
+
+        numeric_cols = [col for col in df.columns if pd.api.types.is_numeric_dtype(df[col])]
+
+        for col in numeric_cols[:3]:  # Limit to first 3 features to avoid explosion
+            operations[f"{col}_squared"] = f"{col} ** 2"
+            operations[f"{col}_cubed"] = f"{col} ** 3"
+
+        if operations:
+            self.topcat_integration.batch_column_operations(operations)
+            self.log_output("✅ Created polynomial features")
+            self.refresh_statistics()
+
+    def create_statistical_features(self):
+        """Create statistical aggregate features"""
+        if not self.data_loaded:
+            return
+
+        df = self.original_data
+        numeric_cols = [col for col in df.columns if pd.api.types.is_numeric_dtype(df[col])]
+
+        if len(numeric_cols) < 2:
+            return
+
+        operations = {}
+
+        # Create some statistical aggregates
+        if len(numeric_cols) >= 2:
+            operations["feature_mean"] = " + ".join(numeric_cols[:3]) + f" / {min(3, len(numeric_cols))}"
+            operations["feature_range"] = f"max({numeric_cols[0]}, {numeric_cols[1]}) - min({numeric_cols[0]}, {numeric_cols[1]})"
+
+        if operations:
+            self.topcat_integration.batch_column_operations(operations)
+            self.log_output("✅ Created statistical aggregate features")
+            self.refresh_statistics()
+
+    def _apply_transform(self, suffix: str, template: str, description: str):
+        """Apply a transform to numeric features"""
+        if not self.data_loaded:
+            return
+
+        operations = {}
+        df = self.original_data
+
+        for col in df.columns:
+            if pd.api.types.is_numeric_dtype(df[col]) and df[col].min() > 0:
+                operations[f"{suffix}_{col}"] = template.format(col)
+
+        if operations:
+            self.topcat_integration.batch_column_operations(operations)
+            self.log_output(f"✅ Applied {description}")
+            self.refresh_statistics()
+
 
     def run_adaptive_learning_async(self):
         """Start training in separate thread"""
@@ -1707,6 +2342,9 @@ class AdaptiveDBNNGUI:
         # Training Tab
         self.training_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.training_tab, text="🚀 Training & Evaluation")
+
+        # Add TOPCAT integration tab
+        self.setup_topcat_integration()
 
         # Create navigation buttons for tabs
         ttk.Button(nav_frame, text="📊 Data",
@@ -3750,9 +4388,25 @@ class AdaptiveDBNNGUI:
 
 def launch_adaptive_gui():
     """Launch the Adaptive DBNN GUI."""
-    root = tk.Tk()
-    app = AdaptiveDBNNGUI(root)
-    root.mainloop()
+    print("DEBUG: Starting GUI launch...")
+    try:
+        root = tk.Tk()
+        print("DEBUG: Root window created")
+        app = AdaptiveDBNNGUI(root)
+        print("DEBUG: AdaptiveDBNNGUI instance created")
+        root.mainloop()
+        print("DEBUG: GUI mainloop ended")
+    except Exception as e:
+        print(f"ERROR in GUI launch: {e}")
+        import traceback
+        traceback.print_exc()
+        # Try alternative approach
+        try:
+            print("DEBUG: Trying alternative approach...")
+            app = AdaptiveDBNNGUI()
+            app.root.mainloop()
+        except Exception as e2:
+            print(f"ERROR in alternative approach: {e2}")
 
 
 class DatasetConfig:
