@@ -1981,6 +1981,8 @@ class AdaptiveDBNNGUI:
                   command=self.save_model, width=12).pack(side=tk.LEFT, padx=2)
         ttk.Button(control_frame, text="Load Model",
                   command=self.load_model, width=12).pack(side=tk.LEFT, padx=2)
+        ttk.Button(control_frame, text="Predict",
+              command=self.predict_with_loaded_model, width=12).pack(side=tk.LEFT, padx=2)
 
         # Enhanced Visualization frame
         viz_frame = ttk.LabelFrame(self.training_tab, text="Advanced Visualization", padding="10")
@@ -2024,6 +2026,436 @@ class AdaptiveDBNNGUI:
         self.results_text = scrolledtext.ScrolledText(results_frame, height=15, width=100)
         self.results_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         self.results_text.config(state=tk.DISABLED)
+
+    def load_adaptive_model_for_prediction(self, model_path):
+        """Load adaptive_dbnn model using the same structure as adaptive_dbnn"""
+        try:
+            import gzip
+            import pickle
+
+            self.log_output(f"📥 Loading adaptive model: {model_path}")
+
+            # Load the model data using the same method as adaptive_dbnn
+            with gzip.open(model_path, 'rb') as f:
+                model_data = pickle.load(f)
+
+            # Extract the adaptive model components
+            self.adaptive_model = AdaptiveDBNN("prediction_mode")
+
+            # Load the core DBNN model
+            if 'model' in model_data:
+                # The model is stored in the 'model' key in adaptive_dbnn
+                self.adaptive_model.model = DBNNWrapper("prediction_mode")
+                self.adaptive_model.model.core = DBNNCore()
+
+                # Load the core model data using the adaptive_dbnn structure
+                core_data = model_data['model']
+
+                # Manually load the core components
+                if 'core' in core_data:
+                    # Load from the core sub-structure
+                    core_model_data = core_data['core']
+                    self.load_core_model_data(self.adaptive_model.model.core, core_model_data)
+                else:
+                    # Load directly from model data
+                    self.load_core_model_data(self.adaptive_model.model.core, core_data)
+
+            # Load feature information
+            if 'feature_columns' in model_data:
+                self.adaptive_model.feature_columns = model_data['feature_columns']
+                self.log_output(f"📊 Loaded feature columns: {len(self.adaptive_model.feature_columns)}")
+
+            if 'target_column' in model_data:
+                self.adaptive_model.target_column = model_data['target_column']
+                self.log_output(f"🎯 Target column: {self.adaptive_model.target_column}")
+
+            # Load configuration
+            if 'config' in model_data:
+                self.adaptive_model.config = model_data['config']
+                self.log_output("⚙️ Model configuration loaded")
+
+            # Verify the encoder is properly fitted
+            if (hasattr(self.adaptive_model.model.core, 'class_encoder') and
+                hasattr(self.adaptive_model.model.core.class_encoder, 'is_fitted')):
+                self.log_output(f"🔤 Class encoder fitted: {self.adaptive_model.model.core.class_encoder.is_fitted}")
+                if self.adaptive_model.model.core.class_encoder.is_fitted:
+                    self.log_output(f"📊 Encoded classes: {len(self.adaptive_model.model.core.class_encoder.encoded_to_class)}")
+
+            self.log_output("✅ Adaptive model components loaded successfully")
+            return True
+
+        except Exception as e:
+            self.log_output(f"❌ Error loading adaptive model: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def load_core_model_data(self, core_instance, model_data):
+        """Load core model data with proper encoder handling"""
+        try:
+            # Load basic configuration
+            core_instance.config = model_data.get('config', {})
+
+            # Load arrays
+            array_mappings = [
+                ('anti_net', np.int32),
+                ('anti_wts', np.float64),
+                ('binloc', np.float64),
+                ('max_val', np.float64),
+                ('min_val', np.float64),
+                ('dmyclass', np.float64),
+                ('resolution_arr', np.int32)
+            ]
+
+            for field_name, dtype in array_mappings:
+                if field_name in model_data and model_data[field_name] is not None:
+                    if isinstance(model_data[field_name], list):
+                        loaded_array = np.array(model_data[field_name], dtype=dtype)
+                    else:
+                        loaded_array = model_data[field_name]
+                    setattr(core_instance, field_name, loaded_array)
+
+            # Infer dimensions from arrays
+            if hasattr(core_instance, 'anti_net') and core_instance.anti_net is not None:
+                core_instance.innodes = core_instance.anti_net.shape[0] - 2
+                core_instance.outnodes = core_instance.anti_net.shape[4] - 2
+                self.log_output(f"📊 Model dimensions: {core_instance.innodes} inputs, {core_instance.outnodes} outputs")
+
+            # Load class encoder with robust error handling
+            if 'class_encoder' in model_data:
+                encoder_data = model_data['class_encoder']
+                self.load_class_encoder(core_instance.class_encoder, encoder_data)
+            else:
+                # Try to infer encoder from dmyclass
+                self.infer_encoder_from_dmyclass(core_instance)
+
+            core_instance.is_trained = True
+            return True
+
+        except Exception as e:
+            self.log_output(f"❌ Error loading core model data: {e}")
+            return False
+
+    def load_class_encoder(self, encoder_instance, encoder_data):
+        """Load class encoder with proper error handling"""
+        try:
+            if 'encoded_to_class' in encoder_data and 'class_to_encoded' in encoder_data:
+                # Convert keys to appropriate types
+                encoded_to_class = {}
+                for k, v in encoder_data['encoded_to_class'].items():
+                    try:
+                        key = float(k) if isinstance(k, (int, float, str)) else k
+                        encoded_to_class[key] = v
+                    except (ValueError, TypeError):
+                        self.log_output(f"⚠️ Could not convert encoder key: {k}")
+
+                class_to_encoded = {}
+                for k, v in encoder_data['class_to_encoded'].items():
+                    try:
+                        value = float(v) if isinstance(v, (int, float, str)) else v
+                        class_to_encoded[k] = value
+                    except (ValueError, TypeError):
+                        self.log_output(f"⚠️ Could not convert encoder value: {v}")
+
+                encoder_instance.encoded_to_class = encoded_to_class
+                encoder_instance.class_to_encoded = class_to_encoded
+                encoder_instance.is_fitted = True
+
+                self.log_output(f"✅ Class encoder loaded with {len(encoded_to_class)} classes")
+                if encoded_to_class:
+                    sample = list(encoded_to_class.items())[:3]
+                    self.log_output(f"📋 Sample classes: {sample}")
+            else:
+                self.log_output("⚠️ No encoder mapping found in model data")
+                encoder_instance.is_fitted = False
+
+        except Exception as e:
+            self.log_output(f"❌ Error loading class encoder: {e}")
+            encoder_instance.is_fitted = False
+
+    def infer_encoder_from_dmyclass(self, core_instance):
+        """Infer encoder from dmyclass values as fallback"""
+        try:
+            if hasattr(core_instance, 'dmyclass') and core_instance.dmyclass is not None:
+                # Extract class values from dmyclass (skip margin at index 0)
+                class_values = []
+                for i in range(1, min(len(core_instance.dmyclass), core_instance.outnodes + 1)):
+                    if core_instance.dmyclass[i] != 0:  # Skip zero values
+                        class_values.append(core_instance.dmyclass[i])
+
+                if class_values:
+                    # Create basic encoder mapping
+                    encoded_to_class = {}
+                    class_to_encoded = {}
+                    for i, class_val in enumerate(class_values, 1):
+                        encoded_to_class[float(i)] = f"Class_{class_val}"
+                        class_to_encoded[f"Class_{class_val}"] = float(i)
+
+                    core_instance.class_encoder.encoded_to_class = encoded_to_class
+                    core_instance.class_encoder.class_to_encoded = class_to_encoded
+                    core_instance.class_encoder.is_fitted = True
+
+                    self.log_output(f"✅ Inferred encoder from dmyclass with {len(class_values)} classes")
+                    return True
+
+            self.log_output("⚠️ Could not infer encoder from dmyclass")
+            core_instance.class_encoder.is_fitted = False
+            return False
+
+        except Exception as e:
+            self.log_output(f"❌ Error inferring encoder from dmyclass: {e}")
+            core_instance.class_encoder.is_fitted = False
+            return False
+
+    def predict_with_adaptive_model(self):
+        """Make predictions using the loaded adaptive model with better error handling"""
+        try:
+            if not hasattr(self, 'adaptive_model') or not self.adaptive_model:
+                self.log_output("❌ No adaptive model loaded")
+                return None
+
+            # Prepare data for prediction
+            if self.original_data is None:
+                self.log_output("❌ No data available for prediction")
+                return None
+
+            # Use the feature columns from the model
+            feature_columns = getattr(self.adaptive_model, 'feature_columns', None)
+            if not feature_columns:
+                # Fallback to current feature selection
+                feature_columns = [col for col, var in self.feature_vars.items()
+                                 if var.get() and col != self.target_var.get()]
+                self.log_output(f"⚠️ Using current feature selection: {feature_columns}")
+
+            # Create feature matrix
+            X_pred = self.original_data[feature_columns].values
+
+            self.log_output(f"📊 Making predictions on {len(X_pred)} samples...")
+
+            # Use the adaptive model's predict method with encoder fallback
+            if hasattr(self.adaptive_model, 'model') and self.adaptive_model.model:
+                predictions = self.adaptive_model.model.predict(X_pred)
+
+                # Try to decode predictions, with fallback if encoder fails
+                decoded_predictions = self.safe_decode_predictions(predictions)
+
+                self.log_output(f"✅ Generated {len(decoded_predictions)} predictions")
+                return decoded_predictions
+            else:
+                self.log_output("❌ No model available for prediction")
+                return None
+
+        except Exception as e:
+            self.log_output(f"❌ Prediction error: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def safe_decode_predictions(self, predictions):
+        """Safely decode predictions with multiple fallback strategies"""
+        try:
+            # Check if we have a valid encoder
+            if (hasattr(self.adaptive_model.model.core, 'class_encoder') and
+                self.adaptive_model.model.core.class_encoder.is_fitted):
+
+                # Try to decode using the encoder
+                decoded = self.adaptive_model.model.core.class_encoder.inverse_transform(predictions)
+                self.log_output("✅ Predictions decoded using class encoder")
+                return decoded
+
+            else:
+                # Fallback: use raw predictions with labeling
+                self.log_output("⚠️ Using raw predictions (encoder not available)")
+                decoded = [f"Class_{int(p)}" if isinstance(p, (int, float)) else str(p)
+                          for p in predictions]
+                return decoded
+
+        except Exception as e:
+            self.log_output(f"⚠️ Encoder decoding failed, using raw predictions: {e}")
+            # Final fallback: convert to string
+            return [str(p) for p in predictions]
+
+    def load_model(self):
+        """Load a model - UPDATED to handle both regular and adaptive_dbnn models"""
+        model_path = filedialog.askopenfilename(
+            title="Load Model",
+            filetypes=[("Model files", "*.bin"), ("JSON files", "*.json"), ("All files", "*.*")]
+        )
+
+        if model_path:
+            try:
+                self.log_output(f"📥 Loading model: {model_path}")
+
+                # First try to load as adaptive_dbnn model
+                success = self.load_adaptive_model_for_prediction(model_path)
+
+                if success:
+                    self.log_output("✅ Adaptive DBNN model loaded successfully!")
+                    self.model_loaded = True
+                    self.model_type = "adaptive"
+
+                    # Log model information
+                    if hasattr(self.adaptive_model, 'feature_columns') and self.adaptive_model.feature_columns:
+                        self.log_output(f"📊 Model features: {len(self.adaptive_model.feature_columns)}")
+                        self.log_output(f"📊 Feature names: {self.adaptive_model.feature_columns}")
+                    if hasattr(self.adaptive_model, 'target_column'):
+                        self.log_output(f"🎯 Target column: {self.adaptive_model.target_column}")
+
+                else:
+                    # Fall back to regular DBNN model loading
+                    self.log_output("🔄 Trying regular DBNN model format...")
+                    cmd_interface = DBNNCommandLine()
+                    success = cmd_interface.load_model(model_path)
+
+                    if success:
+                        self.log_output("✅ Regular DBNN model loaded successfully!")
+                        self.cmd_interface = cmd_interface
+                        self.model_loaded = True
+                        self.model_type = "regular"
+
+                        # Log basic model info
+                        if hasattr(cmd_interface.core, 'innodes'):
+                            self.log_output(f"📊 Input nodes: {cmd_interface.core.innodes}")
+                        if hasattr(cmd_interface.core, 'outnodes'):
+                            self.log_output(f"📊 Output nodes: {cmd_interface.core.outnodes}")
+                    else:
+                        self.log_output("❌ Failed to load model in any format")
+                        return
+
+                # Enable predict button if data is loaded
+                if self.data_loaded:
+                    self.log_output("🎯 Model ready for prediction on current data")
+                else:
+                    self.log_output("💡 Load data to make predictions")
+
+            except Exception as e:
+                self.log_output(f"❌ Error loading model: {e}")
+                import traceback
+                traceback.print_exc()
+
+    def predict_with_loaded_model(self):
+        """Predict using whichever model is loaded (adaptive or regular)"""
+        if not self.model_loaded:
+            messagebox.showwarning("Warning", "Please load a model first.")
+            return
+
+        if not self.data_loaded:
+            messagebox.showwarning("Warning", "Please load data first.")
+            return
+
+        # Ask for output file
+        output_file = filedialog.asksaveasfilename(
+            title="Save Predictions As",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+
+        if not output_file:
+            return
+
+        try:
+            self.log_output("🔮 Making predictions...")
+
+            if self.model_type == "adaptive":
+                predictions = self.predict_with_adaptive_model()
+            else:  # regular model
+                predictions = self.predict_with_regular_model()
+
+            if predictions is not None:
+                self.save_predictions(predictions, output_file)
+                self.log_output("✅ Predictions completed successfully!")
+            else:
+                self.log_output("❌ Prediction failed")
+
+        except Exception as e:
+            self.log_output(f"❌ Prediction error: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def predict_with_regular_model(self):
+        """Predict using regular DBNN model"""
+        try:
+            if not hasattr(self, 'cmd_interface') or not self.cmd_interface:
+                self.log_output("❌ No regular model loaded")
+                return None
+
+            # Create temporary data file for prediction
+            temp_data_file = "temp_prediction_data.csv"
+
+            # Save current data to temporary file
+            if hasattr(self.cmd_interface.core, 'feature_columns') and self.cmd_interface.core.feature_columns:
+                # Use model's feature columns
+                feature_columns = self.cmd_interface.core.feature_columns
+            else:
+                # Use current feature selection
+                feature_columns = [col for col, var in self.feature_vars.items()
+                                 if var.get() and col != self.target_var.get()]
+
+            prediction_data = self.original_data[feature_columns]
+            prediction_data.to_csv(temp_data_file, index=False)
+
+            # Create args for prediction
+            class Args:
+                def __init__(self):
+                    self.predict = temp_data_file
+                    self.output = "temp_predictions.csv"
+                    self.format = 'csv'
+                    self.target = None  # No target for prediction
+                    self.features = feature_columns
+                    self.verbose = True
+
+            args = Args()
+
+            # Make prediction
+            success = self.cmd_interface.predict_data(args)
+
+            # Read results
+            if success and os.path.exists("temp_predictions.csv"):
+                import pandas as pd
+                results = pd.read_csv("temp_predictions.csv")
+                predictions = results['Prediction'].tolist()
+
+                # Clean up temp files
+                import os
+                if os.path.exists(temp_data_file):
+                    os.remove(temp_data_file)
+                if os.path.exists("temp_predictions.csv"):
+                    os.remove("temp_predictions.csv")
+
+                return predictions
+            else:
+                return None
+
+        except Exception as e:
+            self.log_output(f"❌ Regular model prediction error: {e}")
+            return None
+
+    def save_predictions(self, predictions, output_file):
+        """Save predictions to CSV file (works for both model types)"""
+        try:
+            # Create results DataFrame
+            results_df = self.original_data.copy()
+            results_df['Prediction'] = predictions
+
+            # Add model type information
+            results_df['Model_Type'] = self.model_type
+
+            # Save to CSV
+            results_df.to_csv(output_file, index=False)
+
+            self.log_output(f"💾 Predictions saved to: {output_file}")
+            self.log_output(f"📈 File contains {len(results_df)} predictions")
+
+            # Show prediction distribution
+            from collections import Counter
+            pred_counts = Counter(predictions)
+            self.log_output("Prediction distribution:")
+            for pred, count in pred_counts.most_common():
+                pct = (count / len(predictions)) * 100
+                self.log_output(f"  {pred}: {count} ({pct:.1f}%)")
+
+        except Exception as e:
+            self.log_output(f"❌ Error saving predictions: {e}")
 
     # NEW METHODS FOR VISUALIZATION CONTROLS
     def open_visualization_location(self):
@@ -2761,7 +3193,7 @@ Data Types:
         if file_path:
             try:
                 # Use the model's save functionality
-                success = self.adaptive_model.db.core.save_model_auto(
+                success = self.adaptive_model.model.core.save_model_auto(
                     model_dir=os.path.dirname(file_path),
                     data_filename=self.current_data_file,
                     feature_columns=self.adaptive_model.feature_columns,
@@ -2775,26 +3207,6 @@ Data Types:
 
             except Exception as e:
                 self.log_output(f"❌ Error saving model: {e}")
-
-    def load_model(self):
-        """Load a model."""
-        file_path = filedialog.askopenfilename(
-            title="Load Model",
-            filetypes=[("Model files", "*.bin"), ("All files", "*.*")]
-        )
-
-        if file_path:
-            try:
-                # For now, we'll just log this since model loading needs to be integrated
-                self.log_output(f"📥 Model loading from: {file_path}")
-                self.log_output("⚠️ Model loading functionality needs to be integrated with AdaptiveDBNN class")
-
-                # TODO: Integrate model loading with AdaptiveDBNN
-                # self.adaptive_model = AdaptiveDBNN()
-                # success = self.adaptive_model.model.load_model(file_path)
-
-            except Exception as e:
-                self.log_output(f"❌ Error loading model: {e}")
 
     def log_output(self, message: str):
         """Add message to output text."""
@@ -3054,8 +3466,8 @@ class DataPreprocessor:
 class DBNNVisualizer:
     """Visualization system for DBNN"""
 
-    def __init__(self, model, output_dir='visualizations', enabled=True):
-        self.db = model
+    def __init__(self, model, output_dir='visualizations', enabled=False):
+        self.model = model
         self.output_dir = output_dir
         self.enabled = enabled
         os.makedirs(output_dir, exist_ok=True)
@@ -3770,7 +4182,7 @@ class AdaptiveDBNN:
         self.progress_callback = None
 
         # Initialize DBNN wrapper - THIS IS THE MAIN MODEL
-        self.db = DBNNWrapper(dataset_name, config)  # Changed from self.db to self.model
+        self.model = DBNNWrapper(dataset_name, config)  # Changed from self.model to self.model
 
         # Adaptive learning state
         self.adaptive_round = 0
@@ -3797,7 +4209,7 @@ class AdaptiveDBNN:
 
         # Visualization
         self.visualizer = None
-        self.enable_3d = self.adaptive_config.get('enable_3d_visualization', True)
+        self.enable_3d = self.adaptive_config.get('enable_3d_visualization', False)
 
         # Adaptive learning metrics
         self.margin_samples_per_class = defaultdict(list)
@@ -3848,7 +4260,7 @@ class AdaptiveDBNN:
             'min_failed_threshold': 10,
             'enable_kl_divergence': False,
             'max_samples_per_class_fallback': 2,
-            'enable_3d_visualization': True,
+            'enable_3d_visualization': False,
             '3d_snapshot_interval': 10,
             'learning_rate': 1.0,
             'enable_acid_test': True,
@@ -3874,7 +4286,7 @@ class AdaptiveDBNN:
 
     def _should_create_visualizations(self, round_num: int) -> bool:
         """Determine whether to create visualizations based on round and configuration"""
-        if not self.adaptive_config.get('enable_visualization', True):
+        if not self.adaptive_config.get('enable_visualization', False):
             return False
 
         # Create visualizations only at strategic points to save time
@@ -3894,10 +4306,10 @@ class AdaptiveDBNN:
         print("📊 Loading and preprocessing data...")
 
         # Load data
-        data = self.db.load_data(file_path, feature_columns)
+        data = self.model.load_data(file_path, feature_columns)
 
         # Preprocess data
-        X, y, feature_columns_used = self.db.preprocess_data(feature_columns)
+        X, y, feature_columns_used = self.model.preprocess_data(feature_columns)
 
         # Store full dataset
         self.X_full = X
@@ -3929,7 +4341,7 @@ class AdaptiveDBNN:
         X_full, y_full, _ = self.prepare_full_data(feature_columns)
 
         # Initialize DBNN with full data
-        self.db.initialize_with_full_data(X_full, y_full, self.feature_columns)
+        self.model.initialize_with_full_data(X_full, y_full, self.feature_columns)
 
         print(f"✅ DBNN initialized with full dataset: {X_full.shape[0]} samples")
 
@@ -4097,7 +4509,7 @@ class AdaptiveDBNN:
         print(f"📊 Features: {self.feature_columns}")
 
         # STEP 1: Initialize DBNN architecture with full dataset and feature names
-        self.db.initialize_with_full_data(X, y, self.feature_columns)
+        self.model.initialize_with_full_data(X, y, self.feature_columns)
 
         # STEP 2: Select initial diverse training samples
         X_train, y_train, initial_indices = self._select_initial_training_samples(X, y)
@@ -4120,7 +4532,7 @@ class AdaptiveDBNN:
         patience = self.adaptive_config['patience']
         # REMOVED: min_improvement - any improvement is valuable
         enable_acid_test = self.adaptive_config.get('enable_acid_test', True)
-        enable_visualization = self.adaptive_config.get('enable_visualization', True)
+        enable_visualization = self.adaptive_config.get('enable_visualization', False)
 
         print(f"\n🔄 Starting adaptive learning for up to {max_rounds} rounds...")
         print(f"📊 Stopping criteria: 100% accuracy OR patience {patience} rounds OR max rounds {max_rounds}")
@@ -4136,7 +4548,7 @@ class AdaptiveDBNN:
 
             # Train with current training data
             print("🎯 Training with current training data...")
-            train_accuracy = self.db.train_with_data(X_train, y_train, reset_weights=True)
+            train_accuracy = self.model.train_with_data(X_train, y_train, reset_weights=True)
 
             if train_accuracy == 0.0:
                 print("❌ Training failed, stopping...")
@@ -4146,7 +4558,7 @@ class AdaptiveDBNN:
             if enable_acid_test:
                 print("🧪 Running acid test on entire dataset...")
                 try:
-                    all_predictions = self.db.predict(X)
+                    all_predictions = self.model.predict(X)
                     current_accuracy = accuracy_score(y, all_predictions)
                     accuracy_type = "acid test"
                     print(f"📊 Training accuracy: {train_accuracy:.2f}%")
@@ -4162,7 +4574,7 @@ class AdaptiveDBNN:
                 if len(remaining_indices) > 0:
                     X_remaining = X[remaining_indices]
                     y_remaining = y[remaining_indices]
-                    remaining_predictions = self.db.predict(X_remaining)
+                    remaining_predictions = self.model.predict(X_remaining)
                     current_accuracy = accuracy_score(y_remaining, remaining_predictions)
                     accuracy_type = "remaining data"
                 else:
@@ -4187,7 +4599,7 @@ class AdaptiveDBNN:
             # STOPPING CRITERION 1: 100% accuracy
             if current_accuracy >= 0.9999:
                 print("🎉 REACHED 100% ACCURACY! Stopping adaptive learning.")
-                self._update_best_model(current_accuracy, initial_indices.copy(), round_num, self.db)
+                self._update_best_model(current_accuracy, initial_indices.copy(), round_num, self.model)
                 round_stat['improvement'] = current_accuracy - self.best_accuracy
                 self.round_stats.append(round_stat)
                 self.training_history.append(initial_indices.copy())
@@ -4203,7 +4615,7 @@ class AdaptiveDBNN:
             y_remaining = y[remaining_indices]
 
             # Get predictions for remaining data
-            remaining_predictions = self.db.predict(X_remaining)
+            remaining_predictions = self.model.predict(X_remaining)
 
             # Find misclassified samples
             misclassified_mask = remaining_predictions != y_remaining
@@ -4212,7 +4624,7 @@ class AdaptiveDBNN:
             if len(misclassified_indices) == 0:
                 print("✅ No misclassified samples in remaining data!")
                 print("🎉 PERFECT CLASSIFICATION ON REMAINING DATA! Stopping adaptive learning.")
-                self._update_best_model(current_accuracy, initial_indices.copy(), round_num, self.db)
+                self._update_best_model(current_accuracy, initial_indices.copy(), round_num, self.model)
                 round_stat['improvement'] = current_accuracy - self.best_accuracy
                 self.round_stats.append(round_stat)
                 self.training_history.append(initial_indices.copy())
@@ -4252,7 +4664,7 @@ class AdaptiveDBNN:
 
             if current_accuracy > self.best_accuracy:
                 # ANY improvement updates the best model and resets patience
-                self._update_best_model(current_accuracy, initial_indices.copy(), round_num, self.db)
+                self._update_best_model(current_accuracy, initial_indices.copy(), round_num, self.model)
                 patience_counter = 0  # Reset patience on ANY improvement
                 print(f"🏆 NEW BEST {accuracy_type} accuracy: {current_accuracy:.4f} (+{improvement:.4f})")
             else:
@@ -4308,10 +4720,10 @@ class AdaptiveDBNN:
 
         # Train final model with best configuration (quick fine-tuning)
         print("🔧 Fine-tuning final model with best configuration...")
-        final_train_accuracy = self.db.train_with_data(X_train_best, y_train_best, reset_weights=False)
+        final_train_accuracy = self.model.train_with_data(X_train_best, y_train_best, reset_weights=False)
 
         # Final verification
-        final_predictions = self.db.predict(X)
+        final_predictions = self.model.predict(X)
         final_accuracy = accuracy_score(y, final_predictions)
 
         # Calculate total training time
@@ -4339,10 +4751,10 @@ class AdaptiveDBNN:
 
         # Store the actual model weights for later restoration
         try:
-            if hasattr(model, 'core') and hasattr(model.core, 'anti_wts'):
+            if hasattr(db, 'core') and hasattr(db.core, 'anti_wts'):
                 self.best_model_state = {
-                    'anti_wts': model.core.anti_wts.copy(),
-                    'anti_net': model.core.anti_net.copy() if hasattr(model.core, 'anti_net') else None
+                    'anti_wts': db.core.anti_wts.copy(),
+                    'anti_net': db.core.anti_net.copy() if hasattr(db.core, 'anti_net') else None
                 }
             else:
                 self.best_model_state = None
@@ -4352,11 +4764,11 @@ class AdaptiveDBNN:
 
     def _restore_best_model_state(self):
         """Restore the best model state"""
-        if self.best_model_state is not None and hasattr(self.db, 'core'):
+        if self.best_model_state is not None and hasattr(self.model, 'core'):
             try:
-                self.db.core.anti_wts = self.best_model_state['anti_wts'].copy()
-                if self.best_model_state['anti_net'] is not None and hasattr(self.db.core, 'anti_net'):
-                    self.db.core.anti_net = self.best_model_state['anti_net'].copy()
+                self.model.core.anti_wts = self.best_model_state['anti_wts'].copy()
+                if self.best_model_state['anti_net'] is not None and hasattr(self.model.core, 'anti_net'):
+                    self.model.core.anti_net = self.best_model_state['anti_net'].copy()
                 print("✅ Best model state restored")
             except Exception as e:
                 print(f"⚠️ Could not restore model state: {e}")
@@ -4414,8 +4826,8 @@ class AdaptiveDBNN:
         model_path = self.models_dir / model_filename
 
         try:
-            # Use the DBNN core's save capability - FIXED: use self.db instead of self.model
-            success = self.db.core.save_model_auto(
+            # Use the DBNN core's save capability - FIXED: use self.model instead of self.model
+            success = self.model.core.save_model_auto(
                 model_dir=str(self.models_dir),
                 data_filename=f"{self.dataset_name}.csv",
                 feature_columns=self.feature_columns,
@@ -4538,7 +4950,7 @@ class AdaptiveDBNN:
             print(f"\n🔄 Adaptive Round {round_num + 1}/{max_rounds}")
 
             # Train on current dataset
-            round_accuracy = self.db.adaptive_train(current_X_train, current_y_train)
+            round_accuracy = self.model.adaptive_train(current_X_train, current_y_train)
 
             print(f"📊 Round accuracy: {round_accuracy:.2f}%")
 
@@ -4583,7 +4995,7 @@ class AdaptiveDBNN:
         print("🔍 Finding informative samples to add...")
 
         # Get predictions on full dataset
-        predictions = self.db.predict(X_full)
+        predictions = self.model.predict(X_full)
 
         # Find misclassified samples
         misclassified_mask = predictions != y_full
@@ -4626,10 +5038,10 @@ class AdaptiveDBNN:
 
     def evaluate_adaptive_performance(self, X_test: np.ndarray, y_test: np.ndarray) -> Dict[str, Any]:
         """Evaluate adaptive learning performance"""
-        if not hasattr(self.db.core, 'is_trained') or not self.db.core.is_trained:
+        if not hasattr(self.model.core, 'is_trained') or not self.model.core.is_trained:
             return {'accuracy': 0.0, 'error': 'Model not trained'}
 
-        predictions = self.db.predict(X_test)
+        predictions = self.model.predict(X_test)
         accuracy = accuracy_score(y_test, predictions) * 100
 
         # Additional metrics
