@@ -14,6 +14,8 @@ import copy
 import glob
 import time
 import torch
+import gzip
+import pickle
 from scipy.stats import entropy
 from scipy.spatial.distance import jensenshannon
 from sklearn.cluster import KMeans
@@ -2027,8 +2029,118 @@ class AdaptiveDBNNGUI:
         self.results_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         self.results_text.config(state=tk.DISABLED)
 
+    def emergency_encoder_recovery(self, core):
+        """Emergency recovery for unfitted encoder"""
+        try:
+            self.log_output("🔄 Attempting emergency encoder recovery...")
+
+            # Method 1: Try to get classes from dmyclass
+            if hasattr(core, 'dmyclass') and core.dmyclass is not None:
+                dmyclass = core.dmyclass
+                self.log_output(f"   dmyclass values: {[dmyclass[i] for i in range(min(10, len(dmyclass)))]}")
+
+                # Extract class values from dmyclass (skip margin at index 0)
+                class_values = []
+                for i in range(1, min(len(dmyclass), getattr(core, 'outnodes', 10) + 1)):
+                    if dmyclass[i] != 0 and not np.isnan(dmyclass[i]):
+                        class_values.append(dmyclass[i])
+
+                if class_values:
+                    self.log_output(f"   Found {len(class_values)} classes in dmyclass: {class_values}")
+
+                    # Create encoder mapping
+                    core.class_encoder.encoded_to_class = {}
+                    core.class_encoder.class_to_encoded = {}
+
+                    for i, class_val in enumerate(class_values, 1):
+                        encoded_val = float(i)
+                        class_name = f"Class_{class_val}"
+                        core.class_encoder.encoded_to_class[encoded_val] = class_name
+                        core.class_encoder.class_to_encoded[class_name] = encoded_val
+
+                    core.class_encoder.is_fitted = True
+                    self.log_output(f"✅ Emergency recovery: Created encoder with {len(class_values)} classes")
+                    self.log_output(f"   Encoder mapping: {core.class_encoder.encoded_to_class}")
+                    return True
+
+            # Method 2: If we have target data, infer from it
+            target_column = getattr(self.adaptive_model, 'target_column', None)
+            if target_column and hasattr(self, 'original_data') and target_column in self.original_data.columns:
+                unique_classes = self.original_data[target_column].unique()
+                self.log_output(f"   Found {len(unique_classes)} unique classes in target data: {list(unique_classes)}")
+
+                core.class_encoder.encoded_to_class = {}
+                core.class_encoder.class_to_encoded = {}
+
+                for i, class_val in enumerate(unique_classes, 1):
+                    encoded_val = float(i)
+                    core.class_encoder.encoded_to_class[encoded_val] = str(class_val)
+                    core.class_encoder.class_to_encoded[str(class_val)] = encoded_val
+
+                core.class_encoder.is_fitted = True
+                self.log_output(f"✅ Emergency recovery: Created encoder from target data with {len(unique_classes)} classes")
+                return True
+
+            self.log_output("❌ Emergency encoder recovery failed")
+            return False
+
+        except Exception as e:
+            self.log_output(f"❌ Emergency recovery error: {e}")
+            return False
+
+    def verify_and_decode_predictions(self, predictions, X_pred):
+        """Verify predictions and handle label decoding with comprehensive checks"""
+        try:
+            self.log_output("🔍 VERIFYING PREDICTIONS:")
+            self.log_output(f"   Raw predictions: {predictions[:10]}..." if len(predictions) > 10 else predictions)
+
+            # Check for unique prediction values
+            unique_predictions = np.unique(predictions)
+            self.log_output(f"   Unique prediction values: {unique_predictions}")
+
+            # Check encoder status
+            core = self.adaptive_model.model.core
+            if hasattr(core, 'class_encoder') and core.class_encoder.is_fitted:
+                self.log_output("✅ Class encoder is fitted")
+
+                # Debug encoder mapping
+                self.debug_encoder_mapping(core.class_encoder)
+
+                # Try to decode predictions
+                try:
+                    decoded_predictions = core.class_encoder.inverse_transform(predictions)
+                    self.log_output(f"✅ Predictions decoded successfully")
+
+                    # Verify decoding worked correctly
+                    unique_raw = set(predictions[:100])  # Check first 100 samples
+                    unique_decoded = set(decoded_predictions[:100])
+                    self.log_output(f"   Unique raw values: {unique_raw}")
+                    self.log_output(f"   Unique decoded values: {unique_decoded}")
+
+                    return decoded_predictions
+
+                except Exception as decode_error:
+                    self.log_output(f"❌ Decoding failed: {decode_error}")
+                    return self.fallback_prediction_handling(predictions)
+            else:
+                self.log_output("❌ Class encoder not fitted properly")
+                # Try emergency recovery one more time
+                if self.emergency_encoder_recovery(core):
+                    try:
+                        decoded_predictions = core.class_encoder.inverse_transform(predictions)
+                        self.log_output("✅ Predictions decoded after emergency recovery")
+                        return decoded_predictions
+                    except:
+                        return self.fallback_prediction_handling(predictions)
+                else:
+                    return self.fallback_prediction_handling(predictions)
+
+        except Exception as e:
+            self.log_output(f"❌ Prediction verification error: {e}")
+            return self.fallback_prediction_handling(predictions)
+
     def load_adaptive_model_for_prediction(self, model_path):
-        """Load adaptive_dbnn model using the same structure as adaptive_dbnn"""
+        """Load adaptive_dbnn model using the actual structure it saves"""
         try:
             import gzip
             import pickle
@@ -2039,47 +2151,53 @@ class AdaptiveDBNNGUI:
             with gzip.open(model_path, 'rb') as f:
                 model_data = pickle.load(f)
 
+            self.log_output(f"📦 Model data keys: {list(model_data.keys())}")
+
             # Extract the adaptive model components
             self.adaptive_model = AdaptiveDBNN("prediction_mode")
 
-            # Load the core DBNN model
-            if 'model' in model_data:
-                # The model is stored in the 'model' key in adaptive_dbnn
-                self.adaptive_model.model = DBNNWrapper("prediction_mode")
-                self.adaptive_model.model.core = DBNNCore()
+            # FIXED: The model data is stored directly, not under 'model' key
+            # Create the model wrapper and load core data directly
+            self.adaptive_model.model = DBNNWrapper("prediction_mode")
+            self.adaptive_model.model.core = dbnn.DBNNCore()
 
-                # Load the core model data using the adaptive_dbnn structure
-                core_data = model_data['model']
-
-                # Manually load the core components
-                if 'core' in core_data:
-                    # Load from the core sub-structure
-                    core_model_data = core_data['core']
-                    self.load_core_model_data(self.adaptive_model.model.core, core_model_data)
-                else:
-                    # Load directly from model data
-                    self.load_core_model_data(self.adaptive_model.model.core, core_data)
+            # Load the core model data directly from the model_data
+            self.load_core_model_data(self.adaptive_model.model.core, model_data)
 
             # Load feature information
             if 'feature_columns' in model_data:
                 self.adaptive_model.feature_columns = model_data['feature_columns']
-                self.log_output(f"📊 Loaded feature columns: {len(self.adaptive_model.feature_columns)}")
+                self.log_output(f"📊 Loaded feature columns: {self.adaptive_model.feature_columns}")
+            else:
+                self.log_output("❌ No feature_columns found in model")
+                return False
 
             if 'target_column' in model_data:
                 self.adaptive_model.target_column = model_data['target_column']
                 self.log_output(f"🎯 Target column: {self.adaptive_model.target_column}")
+            else:
+                self.log_output("❌ No target_column found in model")
+                return False
 
-            # Load configuration
+            # Load configuration and training results
             if 'config' in model_data:
                 self.adaptive_model.config = model_data['config']
                 self.log_output("⚙️ Model configuration loaded")
 
-            # Verify the encoder is properly fitted
-            if (hasattr(self.adaptive_model.model.core, 'class_encoder') and
-                hasattr(self.adaptive_model.model.core.class_encoder, 'is_fitted')):
-                self.log_output(f"🔤 Class encoder fitted: {self.adaptive_model.model.core.class_encoder.is_fitted}")
-                if self.adaptive_model.model.core.class_encoder.is_fitted:
-                    self.log_output(f"📊 Encoded classes: {len(self.adaptive_model.model.core.class_encoder.encoded_to_class)}")
+            # Load training results for acid test comparison
+            if 'best_accuracy' in model_data:
+                self.adaptive_model.best_accuracy = model_data['best_accuracy']
+                self.log_output(f"🏆 Best accuracy from model: {self.adaptive_model.best_accuracy:.4f}")
+            else:
+                self.adaptive_model.best_accuracy = 0.0
+                self.log_output("⚠️ No best_accuracy found in model")
+
+            if 'is_trained' in model_data:
+                self.adaptive_model.model.core.is_trained = model_data['is_trained']
+                self.log_output(f"🔧 Model trained flag: {model_data['is_trained']}")
+
+            # CRITICAL: Verify the model is actually trained and encoder is fitted
+            self.validate_loaded_model()
 
             self.log_output("✅ Adaptive model components loaded successfully")
             return True
@@ -2094,9 +2212,10 @@ class AdaptiveDBNNGUI:
         """Load core model data with proper encoder handling"""
         try:
             # Load basic configuration
-            core_instance.config = model_data.get('config', {})
+            if 'config' in model_data:
+                core_instance.config = model_data['config']
 
-            # Load arrays
+            # Load arrays - handle both direct arrays and the actual data structure
             array_mappings = [
                 ('anti_net', np.int32),
                 ('anti_wts', np.float64),
@@ -2109,69 +2228,158 @@ class AdaptiveDBNNGUI:
 
             for field_name, dtype in array_mappings:
                 if field_name in model_data and model_data[field_name] is not None:
-                    if isinstance(model_data[field_name], list):
-                        loaded_array = np.array(model_data[field_name], dtype=dtype)
+                    if isinstance(model_data[field_name], (list, np.ndarray)):
+                        if isinstance(model_data[field_name], list):
+                            loaded_array = np.array(model_data[field_name], dtype=dtype)
+                        else:
+                            loaded_array = model_data[field_name].astype(dtype)
+                        setattr(core_instance, field_name, loaded_array)
+                        self.log_output(f"   Loaded {field_name}: shape {loaded_array.shape}")
                     else:
-                        loaded_array = model_data[field_name]
-                    setattr(core_instance, field_name, loaded_array)
+                        self.log_output(f"⚠️ {field_name} is not a list/array: {type(model_data[field_name])}")
 
             # Infer dimensions from arrays
             if hasattr(core_instance, 'anti_net') and core_instance.anti_net is not None:
                 core_instance.innodes = core_instance.anti_net.shape[0] - 2
                 core_instance.outnodes = core_instance.anti_net.shape[4] - 2
                 self.log_output(f"📊 Model dimensions: {core_instance.innodes} inputs, {core_instance.outnodes} outputs")
+            elif 'innodes' in model_data and 'outnodes' in model_data:
+                core_instance.innodes = model_data['innodes']
+                core_instance.outnodes = model_data['outnodes']
+                self.log_output(f"📊 Model dimensions from metadata: {core_instance.innodes} inputs, {core_instance.outnodes} outputs")
 
             # Load class encoder with robust error handling
             if 'class_encoder' in model_data:
                 encoder_data = model_data['class_encoder']
                 self.load_class_encoder(core_instance.class_encoder, encoder_data)
             else:
+                self.log_output("❌ No class_encoder found in model data")
                 # Try to infer encoder from dmyclass
                 self.infer_encoder_from_dmyclass(core_instance)
 
-            core_instance.is_trained = True
+            # Set training status
+            if 'is_trained' in model_data:
+                core_instance.is_trained = model_data['is_trained']
+            else:
+                core_instance.is_trained = True  # Assume trained if we have arrays
+
             return True
 
         except Exception as e:
             self.log_output(f"❌ Error loading core model data: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
     def load_class_encoder(self, encoder_instance, encoder_data):
         """Load class encoder with proper error handling"""
         try:
-            if 'encoded_to_class' in encoder_data and 'class_to_encoded' in encoder_data:
-                # Convert keys to appropriate types
-                encoded_to_class = {}
-                for k, v in encoder_data['encoded_to_class'].items():
-                    try:
-                        key = float(k) if isinstance(k, (int, float, str)) else k
-                        encoded_to_class[key] = v
-                    except (ValueError, TypeError):
-                        self.log_output(f"⚠️ Could not convert encoder key: {k}")
+            self.log_output("🔤 Loading class encoder...")
 
-                class_to_encoded = {}
-                for k, v in encoder_data['class_to_encoded'].items():
-                    try:
-                        value = float(v) if isinstance(v, (int, float, str)) else v
-                        class_to_encoded[k] = value
-                    except (ValueError, TypeError):
-                        self.log_output(f"⚠️ Could not convert encoder value: {v}")
+            if isinstance(encoder_data, dict):
+                if 'encoded_to_class' in encoder_data and 'class_to_encoded' in encoder_data:
+                    # Convert keys to appropriate types
+                    encoded_to_class = {}
+                    for k, v in encoder_data['encoded_to_class'].items():
+                        try:
+                            if isinstance(k, str):
+                                # Handle string keys - try to convert to float
+                                key = float(k) if k.replace('.', '').replace('-', '').isdigit() else k
+                            else:
+                                key = float(k) if isinstance(k, (int, float)) else k
+                            encoded_to_class[key] = v
+                        except (ValueError, TypeError) as e:
+                            self.log_output(f"⚠️ Could not convert encoder key {k}: {e}")
+                            encoded_to_class[k] = v  # Keep as is
 
-                encoder_instance.encoded_to_class = encoded_to_class
-                encoder_instance.class_to_encoded = class_to_encoded
-                encoder_instance.is_fitted = True
+                    class_to_encoded = {}
+                    for k, v in encoder_data['class_to_encoded'].items():
+                        try:
+                            if isinstance(v, str):
+                                # Handle string values - try to convert to float
+                                value = float(v) if v.replace('.', '').replace('-', '').isdigit() else v
+                            else:
+                                value = float(v) if isinstance(v, (int, float)) else v
+                            class_to_encoded[k] = value
+                        except (ValueError, TypeError) as e:
+                            self.log_output(f"⚠️ Could not convert encoder value {v}: {e}")
+                            class_to_encoded[k] = v  # Keep as is
 
-                self.log_output(f"✅ Class encoder loaded with {len(encoded_to_class)} classes")
-                if encoded_to_class:
-                    sample = list(encoded_to_class.items())[:3]
-                    self.log_output(f"📋 Sample classes: {sample}")
+                    encoder_instance.encoded_to_class = encoded_to_class
+                    encoder_instance.class_to_encoded = class_to_encoded
+                    encoder_instance.is_fitted = True
+
+                    self.log_output(f"✅ Class encoder loaded with {len(encoded_to_class)} classes")
+                    if encoded_to_class:
+                        sample = list(encoded_to_class.items())[:3]
+                        self.log_output(f"📋 Sample classes: {sample}")
+                else:
+                    self.log_output("❌ No encoder mapping found in encoder_data")
+                    encoder_instance.is_fitted = False
             else:
-                self.log_output("⚠️ No encoder mapping found in model data")
+                self.log_output(f"❌ encoder_data is not a dict: {type(encoder_data)}")
                 encoder_instance.is_fitted = False
 
         except Exception as e:
             self.log_output(f"❌ Error loading class encoder: {e}")
             encoder_instance.is_fitted = False
+
+    def validate_loaded_model(self):
+        """Validate that the loaded model is properly trained and has fitted encoder"""
+        try:
+            core = self.adaptive_model.model.core
+
+            self.log_output("🔍 MODEL VALIDATION:")
+
+            # Check if model is trained
+            if hasattr(core, 'is_trained'):
+                self.log_output(f"   Model trained: {core.is_trained}")
+            else:
+                self.log_output("❌ Model training status unknown")
+
+            # Check encoder status
+            if hasattr(core, 'class_encoder'):
+                encoder = core.class_encoder
+                if hasattr(encoder, 'is_fitted'):
+                    self.log_output(f"   Encoder fitted: {encoder.is_fitted}")
+
+                    if encoder.is_fitted:
+                        # Check encoder contents
+                        if hasattr(encoder, 'encoded_to_class') and encoder.encoded_to_class:
+                            self.log_output(f"   Encoded classes: {len(encoder.encoded_to_class)}")
+                            for encoded, class_name in sorted(encoder.encoded_to_class.items()):
+                                self.log_output(f"     {encoded} -> {class_name}")
+                        else:
+                            self.log_output("❌ Encoder has no class mappings")
+                            encoder.is_fitted = False
+                    else:
+                        self.log_output("❌ Encoder is not fitted - attempting emergency recovery")
+                        self.emergency_encoder_recovery(core)
+                else:
+                    self.log_output("❌ Encoder fitted status unknown")
+            else:
+                self.log_output("❌ No class encoder found")
+
+            # Check model arrays
+            required_arrays = ['anti_net', 'anti_wts', 'dmyclass']
+            arrays_loaded = True
+            for array_name in required_arrays:
+                if hasattr(core, array_name) and getattr(core, array_name) is not None:
+                    array = getattr(core, array_name)
+                    if hasattr(array, 'shape'):
+                        self.log_output(f"   {array_name}: shape {array.shape}")
+                    else:
+                        self.log_output(f"   {array_name}: loaded but no shape info")
+                else:
+                    self.log_output(f"❌ Missing required array: {array_name}")
+                    arrays_loaded = False
+
+            if not arrays_loaded:
+                self.log_output("❌ Critical model arrays missing - model may not work")
+
+        except Exception as e:
+            self.log_output(f"⚠️ Model validation error: {e}")
+
 
     def infer_encoder_from_dmyclass(self, core_instance):
         """Infer encoder from dmyclass values as fallback"""
@@ -2208,7 +2416,7 @@ class AdaptiveDBNNGUI:
             return False
 
     def predict_with_adaptive_model(self):
-        """Make predictions using the loaded adaptive model with better error handling"""
+        """Make predictions using the loaded adaptive model with comprehensive validation"""
         try:
             if not hasattr(self, 'adaptive_model') or not self.adaptive_model:
                 self.log_output("❌ No adaptive model loaded")
@@ -2219,28 +2427,41 @@ class AdaptiveDBNNGUI:
                 self.log_output("❌ No data available for prediction")
                 return None
 
-            # Use the feature columns from the model
-            feature_columns = getattr(self.adaptive_model, 'feature_columns', None)
+            # CRITICAL: Verify feature column order matches training
+            feature_columns = self.verify_feature_columns()
             if not feature_columns:
-                # Fallback to current feature selection
-                feature_columns = [col for col, var in self.feature_vars.items()
-                                 if var.get() and col != self.target_var.get()]
-                self.log_output(f"⚠️ Using current feature selection: {feature_columns}")
+                return None
 
-            # Create feature matrix
+            # Create feature matrix with exact same order as training
             X_pred = self.original_data[feature_columns].values
 
             self.log_output(f"📊 Making predictions on {len(X_pred)} samples...")
 
-            # Use the adaptive model's predict method with encoder fallback
+            # DEBUG: Log first few samples to verify data
+            self.debug_prediction_data(X_pred, feature_columns)
+
+            # Use the adaptive model's predict method
             if hasattr(self.adaptive_model, 'model') and self.adaptive_model.model:
                 predictions = self.adaptive_model.model.predict(X_pred)
 
-                # Try to decode predictions, with fallback if encoder fails
-                decoded_predictions = self.safe_decode_predictions(predictions)
+                # CRITICAL: Verify and decode predictions
+                decoded_predictions = self.verify_and_decode_predictions(predictions, X_pred)
 
-                self.log_output(f"✅ Generated {len(decoded_predictions)} predictions")
-                return decoded_predictions
+                if decoded_predictions is not None:
+                    self.log_output(f"✅ Generated {len(decoded_predictions)} predictions")
+
+                    # VALIDATION: Compare with actual labels if available (handles missing targets gracefully)
+                    self.validate_predictions_accuracy(decoded_predictions)
+
+                    # COMPARISON: Compare with acid test results if possible
+                    self.compare_with_acid_test(decoded_predictions)
+
+                    # Show prediction summary (always works, even without targets)
+                    self.show_prediction_summary(decoded_predictions)
+
+                    return decoded_predictions
+                else:
+                    return None
             else:
                 self.log_output("❌ No model available for prediction")
                 return None
@@ -2250,6 +2471,218 @@ class AdaptiveDBNNGUI:
             import traceback
             traceback.print_exc()
             return None
+
+    def show_prediction_summary(self, decoded_predictions):
+        """Show prediction summary that works regardless of target availability"""
+        try:
+            from collections import Counter
+
+            # Count predictions
+            pred_counts = Counter(decoded_predictions)
+            total_samples = len(decoded_predictions)
+
+            self.log_output("\n🎯 PREDICTION SUMMARY:")
+            self.log_output("=" * 40)
+            self.log_output(f"Total samples predicted: {total_samples}")
+
+            # Show prediction distribution
+            self.log_output("\nPrediction Distribution:")
+            for pred, count in pred_counts.most_common():
+                percentage = (count / total_samples) * 100
+                self.log_output(f"  {pred}: {count} samples ({percentage:.1f}%)")
+
+            # Show confidence if available (you can add this if your model provides probabilities)
+            self.log_output(f"\nPrediction completed successfully!")
+            self.log_output("=" * 40)
+
+        except Exception as e:
+            self.log_output(f"⚠️ Prediction summary error: {e}")
+
+
+    def verify_feature_columns(self):
+        """Verify feature columns exactly match training configuration"""
+        try:
+            # Get model's feature columns
+            model_features = getattr(self.adaptive_model, 'feature_columns', [])
+
+            if not model_features:
+                self.log_output("❌ No feature columns found in model")
+                return None
+
+            # Get current data columns
+            current_columns = list(self.original_data.columns)
+
+            self.log_output("🔍 VERIFYING FEATURE COLUMNS:")
+            self.log_output(f"   Model features ({len(model_features)}): {model_features}")
+            self.log_output(f"   Data columns ({len(current_columns)}): {current_columns}")
+
+            # Check if all model features exist in current data
+            missing_features = [f for f in model_features if f not in current_columns]
+            if missing_features:
+                self.log_output(f"❌ Missing features in data: {missing_features}")
+                return None
+
+            # Check for exact order match
+            if model_features != [col for col in current_columns if col in model_features]:
+                self.log_output("⚠️ Feature order doesn't match! Reordering...")
+                # Reorder columns to match model exactly
+                reordered_data = self.original_data[model_features]
+                self.log_output(f"✅ Columns reordered to match model: {list(reordered_data.columns)}")
+                return model_features
+            else:
+                self.log_output("✅ Feature columns and order match exactly!")
+                return model_features
+
+        except Exception as e:
+            self.log_output(f"❌ Feature verification error: {e}")
+            return None
+
+    def debug_prediction_data(self, X_pred, feature_columns):
+        """Debug the prediction data to ensure it matches training format"""
+        try:
+            self.log_output("🔍 PREDICTION DATA DEBUG:")
+            self.log_output(f"   Data shape: {X_pred.shape}")
+            self.log_output(f"   Feature order: {feature_columns[:5]}..." if len(feature_columns) > 5 else feature_columns)
+
+            # Show first sample values
+            if len(X_pred) > 0:
+                sample = X_pred[0]
+                self.log_output(f"   First sample: {sample[:5]}..." if len(sample) > 5 else sample)
+
+            # Show data statistics
+            self.log_output(f"   Data range: [{X_pred.min():.3f}, {X_pred.max():.3f}]")
+            self.log_output(f"   Data mean: {X_pred.mean():.3f}")
+
+        except Exception as e:
+            self.log_output(f"⚠️ Debug data error: {e}")
+
+    def verify_and_decode_predictions(self, predictions, X_pred):
+        """Verify predictions and handle label decoding with comprehensive checks"""
+        try:
+            self.log_output("🔍 VERIFYING PREDICTIONS:")
+            self.log_output(f"   Raw predictions: {predictions[:10]}..." if len(predictions) > 10 else predictions)
+
+            # Check encoder status
+            core = self.adaptive_model.model.core
+            if hasattr(core, 'class_encoder') and core.class_encoder.is_fitted:
+                self.log_output("✅ Class encoder is fitted")
+
+                # Debug encoder mapping
+                self.debug_encoder_mapping(core.class_encoder)
+
+                # Try to decode predictions
+                try:
+                    decoded_predictions = core.class_encoder.inverse_transform(predictions)
+                    self.log_output(f"✅ Predictions decoded successfully")
+
+                    # Verify decoding worked correctly
+                    unique_raw = set(predictions[:100])  # Check first 100 samples
+                    unique_decoded = set(decoded_predictions[:100])
+                    self.log_output(f"   Unique raw values: {unique_raw}")
+                    self.log_output(f"   Unique decoded values: {unique_decoded}")
+
+                    return decoded_predictions
+
+                except Exception as decode_error:
+                    self.log_output(f"❌ Decoding failed: {decode_error}")
+                    return self.fallback_prediction_handling(predictions)
+            else:
+                self.log_output("❌ Class encoder not fitted properly")
+                return self.fallback_prediction_handling(predictions)
+
+        except Exception as e:
+            self.log_output(f"❌ Prediction verification error: {e}")
+            return self.fallback_prediction_handling(predictions)
+
+    def debug_encoder_mapping(self, encoder):
+        """Debug the encoder mapping to ensure labels match"""
+        try:
+            if hasattr(encoder, 'encoded_to_class') and encoder.encoded_to_class:
+                self.log_output("🔤 ENCODER MAPPING:")
+                for encoded_val, class_name in sorted(encoder.encoded_to_class.items()):
+                    self.log_output(f"   {encoded_val} -> {class_name}")
+
+                # Check dmyclass alignment
+                if hasattr(self.adaptive_model.model.core, 'dmyclass'):
+                    dmyclass = self.adaptive_model.model.core.dmyclass
+                    self.log_output("🎯 DMYCLASS VALUES:")
+                    for i in range(min(10, len(dmyclass))):
+                        if i == 0:
+                            self.log_output(f"   [0] (margin): {dmyclass[i]}")
+                        else:
+                            self.log_output(f"   [{i}]: {dmyclass[i]}")
+
+        except Exception as e:
+            self.log_output(f"⚠️ Encoder debug error: {e}")
+
+    def fallback_prediction_handling(self, predictions):
+        """Fallback when encoder decoding fails"""
+        try:
+            self.log_output("🔄 Using fallback prediction handling")
+
+            # Convert to string representations
+            decoded = []
+            for pred in predictions:
+                if isinstance(pred, (int, float)):
+                    decoded.append(f"Class_{int(pred)}")
+                else:
+                    decoded.append(str(pred))
+
+            self.log_output(f"✅ Fallback decoding applied to {len(decoded)} predictions")
+            return decoded
+
+        except Exception as e:
+            self.log_output(f"❌ Fallback handling failed: {e}")
+            return [str(p) for p in predictions]
+
+    def validate_predictions_accuracy(self, decoded_predictions):
+        """Validate prediction accuracy if ground truth is available, handle gracefully if not"""
+        try:
+            # Check if we have target column for validation
+            target_column = getattr(self.adaptive_model, 'target_column', None)
+
+            if not target_column:
+                self.log_output("ℹ️ No target column defined in model - skipping accuracy validation")
+                return
+
+            if target_column not in self.original_data.columns:
+                self.log_output("ℹ️ Target column not found in prediction data - skipping accuracy validation")
+                return
+
+            actual_labels = self.original_data[target_column].values
+
+            # Ensure we have the same number of predictions and actual labels
+            if len(decoded_predictions) != len(actual_labels):
+                self.log_output("⚠️ Prediction/actual count mismatch - cannot validate accuracy")
+                return
+
+            # Calculate accuracy
+            correct = sum(1 for pred, actual in zip(decoded_predictions, actual_labels)
+                        if str(pred) == str(actual))
+            accuracy = (correct / len(actual_labels)) * 100
+
+            self.log_output(f"🎯 PREDICTION ACCURACY VALIDATION:")
+            self.log_output(f"   Correct: {correct}/{len(actual_labels)}")
+            self.log_output(f"   Accuracy: {accuracy:.2f}%")
+
+            # Show confusion for first few mismatches (only if we have significant errors)
+            if correct < len(actual_labels):  # If there are errors
+                mismatches = []
+                for i, (pred, actual) in enumerate(zip(decoded_predictions, actual_labels)):
+                    if str(pred) != str(actual):
+                        mismatches.append((i, pred, actual))
+                    if len(mismatches) >= 3:  # Show only first 3 mismatches
+                        break
+
+                if mismatches:
+                    self.log_output("   Sample mismatches (index, predicted, actual):")
+                    for idx, pred, actual in mismatches:
+                        self.log_output(f"     [{idx}]: {pred} != {actual}")
+            else:
+                self.log_output("   ✅ Perfect prediction match!")
+
+        except Exception as e:
+            self.log_output(f"⚠️ Accuracy validation error: {e}")
 
     def safe_decode_predictions(self, predictions):
         """Safely decode predictions with multiple fallback strategies"""
@@ -2274,6 +2707,81 @@ class AdaptiveDBNNGUI:
             self.log_output(f"⚠️ Encoder decoding failed, using raw predictions: {e}")
             # Final fallback: convert to string
             return [str(p) for p in predictions]
+
+    def compare_with_acid_test(self, decoded_predictions):
+        """Compare current predictions with acid test results if available"""
+        try:
+            # Check if we have acid test results from adaptive learning
+            if hasattr(self.adaptive_model, 'best_accuracy'):
+                acid_accuracy = self.adaptive_model.best_accuracy
+                self.log_output(f"🧪 ACID TEST COMPARISON:")
+                self.log_output(f"   Model's best acid test accuracy: {acid_accuracy:.4f}")
+
+                # Only compare if we have meaningful acid test accuracy
+                if acid_accuracy > 0.01:  # Only compare if acid test was meaningful
+                    # Only compare if we have targets available
+                    target_column = getattr(self.adaptive_model, 'target_column', None)
+                    if target_column and target_column in self.original_data.columns:
+                        actual_labels = self.original_data[target_column].values
+
+                        if len(decoded_predictions) == len(actual_labels):
+                            current_accuracy = self.calculate_accuracy(decoded_predictions, actual_labels)
+
+                            self.log_output(f"   Current prediction accuracy: {current_accuracy:.4f}")
+                            self.log_output(f"   Difference: {current_accuracy - acid_accuracy:+.4f}")
+
+                            if abs(current_accuracy - acid_accuracy) > 0.05:  # More than 5% difference
+                                self.log_output("❌ SIGNIFICANT ACCURACY DISCREPANCY DETECTED!")
+                                self.investigate_accuracy_discrepancy(decoded_predictions, actual_labels)
+                        else:
+                            self.log_output("   ⚠️ Cannot compare: prediction/actual count mismatch")
+                    else:
+                        self.log_output("   ℹ️ No target data available for acid test comparison")
+                else:
+                    self.log_output("   ⚠️ Acid test accuracy too low for meaningful comparison")
+            else:
+                self.log_output("   ℹ️ No acid test results available for comparison")
+
+        except Exception as e:
+            self.log_output(f"⚠️ Acid test comparison error: {e}")
+
+    def calculate_accuracy(self, predictions, actuals):
+        """Calculate accuracy between predictions and actual labels"""
+        correct = sum(1 for pred, actual in zip(predictions, actuals)
+                     if str(pred) == str(actual))
+        return correct / len(actuals) if actuals else 0.0
+
+    def investigate_accuracy_discrepancy(self, predictions, actuals):
+        """Investigate why accuracy doesn't match acid test"""
+        try:
+            self.log_output("🔍 INVESTIGATING ACCURACY DISCREPANCY:")
+
+            # Check for label mapping issues
+            unique_predictions = set(predictions)
+            unique_actuals = set(actuals)
+
+            self.log_output(f"   Unique predictions: {unique_predictions}")
+            self.log_output(f"   Unique actuals: {unique_actuals}")
+
+            # Check if there's a simple label mapping issue
+            if unique_predictions != unique_actuals:
+                self.log_output("❌ Label sets don't match!")
+
+            # Check prediction distribution
+            from collections import Counter
+            pred_counts = Counter(predictions)
+            actual_counts = Counter(actuals)
+
+            self.log_output("   Prediction distribution:")
+            for pred, count in pred_counts.most_common():
+                self.log_output(f"     {pred}: {count}")
+
+            self.log_output("   Actual distribution:")
+            for actual, count in actual_counts.most_common():
+                self.log_output(f"     {actual}: {count}")
+
+        except Exception as e:
+            self.log_output(f"⚠️ Discrepancy investigation error: {e}")
 
     def load_model(self):
         """Load a model - UPDATED to handle both regular and adaptive_dbnn models"""
@@ -2304,7 +2812,7 @@ class AdaptiveDBNNGUI:
                 else:
                     # Fall back to regular DBNN model loading
                     self.log_output("🔄 Trying regular DBNN model format...")
-                    cmd_interface = DBNNCommandLine()
+                    cmd_interface = dbnn.DBNNCommandLine()
                     success = cmd_interface.load_model(model_path)
 
                     if success:
@@ -2440,13 +2948,17 @@ class AdaptiveDBNNGUI:
             # Add model type information
             results_df['Model_Type'] = self.model_type
 
+            # Add feature information if available
+            if hasattr(self.adaptive_model, 'feature_columns'):
+                results_df['Model_Features'] = str(self.adaptive_model.feature_columns)
+
             # Save to CSV
             results_df.to_csv(output_file, index=False)
 
             self.log_output(f"💾 Predictions saved to: {output_file}")
-            self.log_output(f"📈 File contains {len(results_df)} predictions")
+            self.log_output(f"📈 File contains {len(results_df)} predictions, {len(results_df.columns)} columns")
 
-            # Show prediction distribution
+            # Show prediction distribution (always works)
             from collections import Counter
             pred_counts = Counter(predictions)
             self.log_output("Prediction distribution:")
@@ -2566,6 +3078,174 @@ class AdaptiveDBNNGUI:
             # Try to load configuration automatically
             self.load_configuration_for_file(file_path)
 
+    def update_feature_selection_ui(self, df):
+        """Update the feature selection UI with available columns."""
+        # Clear existing feature checkboxes
+        for widget in self.feature_scroll_frame.winfo_children():
+            widget.destroy()
+
+        self.feature_vars = {}
+        columns = df.columns.tolist()
+
+        # Update target combo with ALL columns + "None" option
+        self.target_combo['values'] = ['None'] + columns
+
+        # Auto-select target if not set
+        if not self.target_var.get():
+            # Try common target column names
+            target_candidates = ['target', 'class', 'label', 'y', 'output', 'result']
+            for candidate in target_candidates + [columns[-1]]:
+                if candidate in columns:
+                    self.target_var.set(candidate)
+                    break
+            # If no obvious target, default to "None" for prediction mode
+            if not self.target_var.get():
+                self.target_var.set('None')
+
+        # Create feature checkboxes
+        for i, col in enumerate(columns):
+            var = tk.BooleanVar(value=True)  # Auto-select all columns by default
+            self.feature_vars[col] = var
+
+            # Determine column type for styling
+            if pd.api.types.is_numeric_dtype(df[col]):
+                col_type = "numeric"
+                color = "blue"
+            elif pd.api.types.is_string_dtype(df[col]):
+                col_type = "categorical"
+                color = "green"
+            else:
+                col_type = "other"
+                color = "gray"
+
+            display_text = f"{col} ({col_type})"
+
+            # Highlight target column only if it's not "None"
+            if col == self.target_var.get() and self.target_var.get() != 'None':
+                display_text = f"🎯 {display_text} [TARGET]"
+                # Don't allow target to be selected as feature
+                cb = ttk.Checkbutton(self.feature_scroll_frame, text=display_text, variable=var, state="disabled")
+            else:
+                cb = ttk.Checkbutton(self.feature_scroll_frame, text=display_text, variable=var)
+
+            cb.pack(anchor=tk.W, padx=5, pady=2)
+
+        self.log_output(f"🔧 Available columns: {len(columns)} total")
+        if self.target_var.get() == 'None':
+            self.log_output("🔮 Prediction mode: No target column selected")
+        else:
+            self.log_output(f"🎯 Current target: {self.target_var.get()}")
+
+    def on_target_selected(self, event):
+        """Handle target column selection"""
+        selected_target = self.target_var.get()
+
+        if selected_target == 'None':
+            self.log_output("🔮 Prediction mode: No target column selected")
+            # Enable all feature checkboxes for prediction mode
+            for col, var in self.feature_vars.items():
+                var.set(True)
+        else:
+            self.log_output(f"🎯 Training mode: Target column set to '{selected_target}'")
+            # In training mode, don't allow target to be used as a feature
+            for col, var in self.feature_vars.items():
+                if col == selected_target:
+                    var.set(False)
+                else:
+                    var.set(True)
+
+    def apply_feature_selection(self):
+        """Apply the current feature selection"""
+        if not self.data_loaded:
+            messagebox.showwarning("Warning", "Please load data first.")
+            return
+
+        try:
+            # Get target column - handle "None" option
+            target_column = self.target_var.get()
+            if target_column == 'None':
+                target_column = None
+
+            # Get selected features
+            selected_features = []
+            for col, var in self.feature_vars.items():
+                if var.get() and (target_column is None or col != target_column):
+                    selected_features.append(col)
+
+            if not selected_features:
+                messagebox.showwarning("Warning", "Please select at least one feature.")
+                return
+
+            if not target_column and selected_features:
+                self.log_output("🔮 Prediction mode: Feature selection applied")
+                self.log_output(f"📊 Selected features: {len(selected_features)}")
+                self.log_output(f"🔧 Features: {', '.join(selected_features)}")
+                return
+
+            # For training mode, initialize the model
+            dataset_name = os.path.splitext(os.path.basename(self.current_data_file))[0]
+
+            config = {
+                'target_column': target_column,
+                'feature_columns': selected_features,
+                'resol': int(self.config_vars.get('dbnn_resolution', tk.StringVar(value="100")).get()),
+                'gain': float(self.config_vars.get('dbnn_gain', tk.StringVar(value="2.0")).get()),
+                'margin': float(self.config_vars.get('dbnn_margin', tk.StringVar(value="0.2")).get()),
+                'patience': int(self.config_vars.get('dbnn_patience', tk.StringVar(value="10")).get()),
+                'max_epochs': int(self.config_vars.get('dbnn_max_epochs', tk.StringVar(value="100")).get()),
+                'min_improvement': float(self.config_vars.get('dbnn_min_improvement', tk.StringVar(value="0.0000001")).get()),
+
+                'adaptive_learning': {
+                    'enable_adaptive': True,
+                    'initial_samples_per_class': int(self.initial_samples_var.get()),
+                    'max_adaptive_rounds': int(self.max_rounds_var.get()),
+                    'max_margin_samples_per_class': int(self.max_samples_var.get()),
+                    'enable_acid_test': self.enable_acid_var.get(),
+                    'enable_kl_divergence': self.enable_kl_var.get(),
+                    'disable_sample_limit': self.disable_sample_limit_var.get(),
+                    'enable_visualization': self.enable_visualization_var.get(),
+                }
+            }
+
+            self.adaptive_model = AdaptiveDBNN(dataset_name, config)
+
+            self.log_output(f"✅ Feature selection applied")
+            if target_column:
+                self.log_output(f"🎯 Target: {target_column}")
+            self.log_output(f"📊 Selected features: {len(selected_features)}")
+            self.log_output(f"🔧 Features: {', '.join(selected_features)}")
+
+            # Save configuration
+            self.save_configuration_for_file(self.current_data_file)
+
+        except Exception as e:
+            self.log_output(f"❌ Error applying feature selection: {e}")
+
+    def select_all_features(self):
+        """Select all features"""
+        for col, var in self.feature_vars.items():
+            if self.target_var.get() != 'None' and col != self.target_var.get():
+                var.set(True)
+
+    def deselect_all_features(self):
+        """Deselect all features"""
+        for var in self.feature_vars.values():
+            var.set(False)
+
+    def select_numeric_features(self):
+        """Select only numeric features"""
+        if not hasattr(self, 'original_data'):
+            return
+
+        df = self.original_data
+        for col, var in self.feature_vars.items():
+            if (col != self.target_var.get() and
+                pd.api.types.is_numeric_dtype(df[col])):
+                var.set(True)
+            else:
+                var.set(False)
+
+
     def load_data_file(self):
         """Load data file and populate feature selection."""
         file_path = self.data_file_var.get()
@@ -2602,19 +3282,23 @@ class AdaptiveDBNNGUI:
         except Exception as e:
             self.log_output(f"❌ Error loading data: {e}")
 
+
     def update_data_info(self, df):
         """Update data information display."""
         self.data_info_text.config(state=tk.NORMAL)
         self.data_info_text.delete(1.0, tk.END)
 
-        info_text = f"""📊 DATA INFORMATION
-{'='*40}
-Samples: {len(df)}
-Features: {len(df.columns)}
-Columns: {', '.join(df.columns.tolist())}
+        target_mode = "Prediction" if self.target_var.get() == 'None' else "Training"
 
-Data Types:
-"""
+        info_text = f"""📊 DATA INFORMATION - {target_mode} MODE
+    {'='*40}
+    Samples: {len(df)}
+    Features: {len(df.columns)}
+    Columns: {', '.join(df.columns.tolist())}
+    Target: {'None (Prediction Mode)' if self.target_var.get() == 'None' else self.target_var.get()}
+
+    Data Types:
+    """
         for col in df.columns:
             dtype = df[col].dtype
             unique_count = df[col].nunique()
@@ -2630,157 +3314,6 @@ Data Types:
         self.data_info_text.insert(1.0, info_text)
         self.data_info_text.config(state=tk.DISABLED)
 
-    def update_feature_selection_ui(self, df):
-        """Update the feature selection UI with available columns."""
-        # Clear existing feature checkboxes
-        for widget in self.feature_scroll_frame.winfo_children():
-            widget.destroy()
-
-        self.feature_vars = {}
-        columns = df.columns.tolist()
-
-        # Update target combo with ALL columns
-        self.target_combo['values'] = columns
-
-        # Auto-select target if not set
-        if not self.target_var.get() and columns:
-            # Try common target column names
-            target_candidates = ['target', 'class', 'label', 'y', 'output', 'result']
-            for candidate in target_candidates + [columns[-1]]:
-                if candidate in columns:
-                    self.target_var.set(candidate)
-                    break
-
-        # Create feature checkboxes
-        for i, col in enumerate(columns):
-            var = tk.BooleanVar(value=col != self.target_var.get())  # Auto-select non-target columns
-            self.feature_vars[col] = var
-
-            # Determine column type for styling
-            if pd.api.types.is_numeric_dtype(df[col]):
-                col_type = "numeric"
-                color = "blue"
-            elif pd.api.types.is_string_dtype(df[col]):
-                col_type = "categorical"
-                color = "green"
-            else:
-                col_type = "other"
-                color = "gray"
-
-            display_text = f"{col} ({col_type})"
-
-            # Highlight target column
-            if col == self.target_var.get():
-                display_text = f"🎯 {display_text} [TARGET]"
-                # Don't allow target to be selected as feature
-                cb = ttk.Checkbutton(self.feature_scroll_frame, text=display_text, variable=var, state="disabled")
-            else:
-                cb = ttk.Checkbutton(self.feature_scroll_frame, text=display_text, variable=var)
-
-            cb.pack(anchor=tk.W, padx=5, pady=2)
-
-        self.log_output(f"🔧 Available columns: {len(columns)} total")
-        self.log_output(f"🎯 Current target: {self.target_var.get()}")
-
-    def on_target_selected(self, event):
-        """Handle target column selection."""
-        # When target changes, update feature selection states
-        if hasattr(self, 'feature_vars') and self.target_var.get():
-            for col, var in self.feature_vars.items():
-                if col == self.target_var.get():
-                    var.set(False)
-                else:
-                    var.set(True)
-
-    def select_all_features(self):
-        """Select all features."""
-        for col, var in self.feature_vars.items():
-            if col != self.target_var.get():  # Don't select target as feature
-                var.set(True)
-
-    def deselect_all_features(self):
-        """Deselect all features."""
-        for var in self.feature_vars.values():
-            var.set(False)
-
-    def select_numeric_features(self):
-        """Select only numeric features."""
-        if not hasattr(self, 'original_data'):
-            return
-
-        df = self.original_data
-        for col, var in self.feature_vars.items():
-            if col != self.target_var.get() and pd.api.types.is_numeric_dtype(df[col]):
-                var.set(True)
-            else:
-                var.set(False)
-
-    def apply_feature_selection(self):
-        """Apply the current feature selection."""
-        if not self.data_loaded:
-            messagebox.showwarning("Warning", "Please load data first.")
-            return
-
-        try:
-            # Get selected features
-            selected_features = []
-            for col, var in self.feature_vars.items():
-                if var.get() and col != self.target_var.get():
-                    selected_features.append(col)
-
-            # Get target column
-            target_column = self.target_var.get()
-
-            if not selected_features:
-                messagebox.showwarning("Warning", "Please select at least one feature.")
-                return
-
-            if not target_column:
-                messagebox.showwarning("Warning", "Please select a target column.")
-                return
-
-            # Initialize adaptive model
-            dataset_name = os.path.splitext(os.path.basename(self.current_data_file))[0]
-
-            # Create configuration
-            config = {
-                'target_column': target_column,
-                'feature_columns': selected_features,
-                'resol': int(self.config_vars.get('dbnn_resolution', tk.StringVar(value="100")).get()),
-                'gain': float(self.config_vars.get('dbnn_gain', tk.StringVar(value="2.0")).get()),
-                'margin': float(self.config_vars.get('dbnn_margin', tk.StringVar(value="0.2")).get()),
-                'patience': int(self.config_vars.get('dbnn_patience', tk.StringVar(value="10")).get()),
-                'max_epochs': int(self.config_vars.get('dbnn_max_epochs', tk.StringVar(value="100")).get()),
-                'min_improvement': float(self.config_vars.get('dbnn_min_improvement', tk.StringVar(value="0.0000001")).get()),
-
-                'adaptive_learning': {
-                    'enable_adaptive': True,
-                    'initial_samples_per_class': int(self.initial_samples_var.get()),
-                    'max_adaptive_rounds': int(self.max_rounds_var.get()),
-                    'max_margin_samples_per_class': int(self.max_samples_var.get()),
-                    'enable_acid_test': self.enable_acid_var.get(),
-                    'enable_kl_divergence': self.enable_kl_var.get(),
-                    'disable_sample_limit': self.disable_sample_limit_var.get(),
-                    'enable_visualization': self.enable_visualization_var.get(),  # NEW
-                    'margin_tolerance': float(self.config_vars.get('adaptive_margin_tolerance', tk.StringVar(value="0.15")).get()),
-                    'kl_threshold': float(self.config_vars.get('adaptive_kl_threshold', tk.StringVar(value="0.1")).get()),
-                    'patience': int(self.config_vars.get('dbnn_patience', tk.StringVar(value="10")).get()),
-                    'min_improvement': float(self.config_vars.get('dbnn_min_improvement', tk.StringVar(value="0.0000001")).get()),
-                }
-            }
-
-            self.adaptive_model = AdaptiveDBNN(dataset_name, config)
-
-            self.log_output(f"✅ Feature selection applied")
-            self.log_output(f"🎯 Target: {target_column}")
-            self.log_output(f"📊 Selected features: {len(selected_features)}")
-            self.log_output(f"🔧 Features: {', '.join(selected_features)}")
-
-            # Save configuration
-            self.save_configuration_for_file(self.current_data_file)
-
-        except Exception as e:
-            self.log_output(f"❌ Error applying feature selection: {e}")
 
     def load_default_parameters(self):
         """Load default hyperparameters."""
@@ -3536,8 +4069,11 @@ class DBNNWrapper:
         self.feature_names = []
         self.initialized_with_full_data = False
 
-    def load_data(self, file_path: str = None, feature_columns: List[str] = None):
-        """Load data from file with original column names"""
+    def load_data(self, file_path: str = None, feature_columns: List[str] = None, target_column: str = None):
+        """Load data from file with original column names - UPDATED to support None target"""
+        if target_column is not None:
+            self.target_column = target_column
+
         if file_path is None:
             # Auto-detect data file (existing logic)
             possible_files = [
@@ -3575,9 +4111,19 @@ class DBNNWrapper:
             try:
                 data = np.loadtxt(file_path)
                 if feature_columns is None:
-                    n_features = data.shape[1] - 1
+                    n_features = data.shape[1] - (0 if target_column is None else 1)  # Adjust for no target
                     feature_columns = [f'feature_{i}' for i in range(n_features)]
-                columns = feature_columns + [self.target_column]
+
+                # Handle target column
+                if target_column is None:
+                    # Prediction mode: all columns are features
+                    columns = feature_columns
+                    print(f"🔮 Prediction mode: No target column")
+                else:
+                    # Training mode: last column is target
+                    columns = feature_columns + [self.target_column]
+                    print(f"🎯 Training mode: Target column '{self.target_column}'")
+
                 self.data = pd.DataFrame(data, columns=columns)
                 print(f"✅ Loaded DAT data: {self.data.shape[0]} samples, {self.data.shape[1]} columns")
             except Exception as e:
@@ -3586,14 +4132,35 @@ class DBNNWrapper:
 
         return self.data
 
-    def preprocess_data(self, feature_columns: List[str] = None) -> Tuple[np.ndarray, np.ndarray, List[str]]:
-        """Preprocess the loaded data with specified feature columns"""
+    def preprocess_data(self, feature_columns: List[str] = None, target_column: str = None) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+        """Preprocess the loaded data with specified feature columns - UPDATED for None target"""
         if self.data is None:
             raise ValueError("No data loaded. Call load_data() first.")
 
-        X, y, feature_columns_used = self.preprocessor.preprocess_dataset(self.data, feature_columns)
+        if target_column is not None:
+            self.target_column = target_column
+
+        # Handle prediction mode (no target)
+        if self.target_column is None or self.target_column == 'None':
+            print("🔮 Prediction mode: Processing data without target column")
+            if feature_columns is None:
+                # Use all columns as features for prediction
+                feature_columns = list(self.data.columns)
+
+            X = self.data[feature_columns].values
+            y = np.array([])  # Empty array for prediction mode
+            feature_columns_used = feature_columns
+
+            print(f"✅ Preprocessed {len(X)} samples for prediction, {len(feature_columns_used)} features")
+
+        else:
+            # Original training mode logic
+            X, y, feature_columns_used = self.preprocessor.preprocess_dataset(self.data, feature_columns)
+            print(f"✅ Preprocessed {len(X)} samples for training, {len(feature_columns_used)} features")
+
         self.feature_columns = feature_columns_used  # Store for prediction
         return X, y, feature_columns_used
+
 
 
     def initialize_with_full_data(self, X: np.ndarray, y: np.ndarray, feature_columns: List[str]):
