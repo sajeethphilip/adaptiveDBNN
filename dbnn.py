@@ -55,7 +55,7 @@ def normalize_feature(value, min_val, max_val, resolution_val):
 
 @jit(nopython=True, parallel=False, fastmath=True)
 def process_training_sample(vects, tmpv, anti_net, anti_wts, binloc,
-                           resolution, dmyclass, min_val, max_val,
+                           resolution, class_labels, min_val, max_val,
                            innodes, outnodes):
     """Process single training sample - core algorithm unchanged"""
     normalized_vects = np.zeros(innodes + 2)
@@ -77,7 +77,7 @@ def process_training_sample(vects, tmpv, anti_net, anti_wts, binloc,
 
             # Find correct output class
             k_class = 1
-            while k_class <= outnodes and abs(tmpv - dmyclass[k_class]) > dmyclass[0]:
+            while k_class <= outnodes and abs(tmpv - class_labels[k_class]) > class_labels[0]:
                 k_class += 1
 
             if k_class <= outnodes:
@@ -88,7 +88,7 @@ def process_training_sample(vects, tmpv, anti_net, anti_wts, binloc,
 
 @jit(nopython=True, parallel=False, fastmath=True)
 def compute_class_probabilities_numba(vects, anti_net, anti_wts, binloc,
-                                    resolution, dmyclass, min_val, max_val,
+                                    resolution, class_labels, min_val, max_val,
                                     innodes, outnodes):
     """Compute class probabilities - core algorithm unchanged"""
     classval = np.ones(outnodes + 2)
@@ -127,7 +127,7 @@ def compute_class_probabilities_numba(vects, anti_net, anti_wts, binloc,
 
 @jit(nopython=True, parallel=False, fastmath=True)
 def update_weights_numba(vects, tmpv, classval, anti_wts, binloc, resolution,
-                        dmyclass, min_val, max_val, innodes, outnodes, gain):
+                        class_labels, min_val, max_val, innodes, outnodes, gain):
     """Update weights - core algorithm unchanged"""
     normalized_vects = np.zeros(innodes + 2)
 
@@ -149,7 +149,7 @@ def update_weights_numba(vects, tmpv, classval, anti_wts, binloc, resolution,
             kmax = k
 
     # Update weights if wrong
-    if abs(dmyclass[kmax] - tmpv) > dmyclass[0]:
+    if abs(class_labels[kmax] - tmpv) > class_labels[0]:
         for i in range(1, innodes + 1):
             j = bins[i]
             for l in range(1, innodes + 1):
@@ -157,7 +157,7 @@ def update_weights_numba(vects, tmpv, classval, anti_wts, binloc, resolution,
 
                 # Find correct class
                 k_correct = 1
-                while k_correct <= outnodes and abs(dmyclass[k_correct] - tmpv) > dmyclass[0]:
+                while k_correct <= outnodes and abs(class_labels[k_correct] - tmpv) > class_labels[0]:
                     k_correct += 1
 
                 if (k_correct <= outnodes and classval[kmax] > 0 and
@@ -191,18 +191,28 @@ class ClassEncoder:
         self.encoded_to_class = {}
         self.encoded_to_original = {}
         self.is_fitted = False
+        self.original_dtype = None  # Track original data type
 
     def fit(self, class_labels):
         """Fit encoder to class labels"""
+        # Detect original data type
+        sample_label = class_labels[0] if len(class_labels) > 0 else None
+        if isinstance(sample_label, (int, float, np.integer, np.floating)):
+            self.original_dtype = 'numeric'
+        else:
+            self.original_dtype = 'string'
         unique_classes = sorted(set(class_labels))
+        string_classes = [str(cls) for cls in unique_classes]
 
-        for encoded_val, original_class in enumerate(unique_classes, 1):
+        for encoded_val, (original_class, string_class) in enumerate(zip(unique_classes, string_classes), 1):
             self.class_to_encoded[original_class] = float(encoded_val)
+            self.class_to_encoded[string_class] = float(encoded_val)  # Add string representation
             self.encoded_to_class[float(encoded_val)] = original_class
-            self.encoded_to_original[float(encoded_val)] = str(original_class)
+            self.encoded_to_original[float(encoded_val)] = string_class
 
         self.is_fitted = True
         print(f"Fitted encoder with {len(unique_classes)} classes: {unique_classes}")
+        print(f"Original dtype: {self.original_dtype}")
 
     def transform(self, class_labels):
         """Transform class labels to encoded numeric values"""
@@ -211,10 +221,24 @@ class ClassEncoder:
 
         encoded = []
         for label in class_labels:
+            # Try multiple representations
             if label in self.class_to_encoded:
                 encoded.append(self.class_to_encoded[label])
+            elif str(label) in self.class_to_encoded:
+                encoded.append(self.class_to_encoded[str(label)])
             else:
-                raise ValueError(f"Unknown class label: {label}")
+                # Try numeric conversion for string labels
+                try:
+                    if self.original_dtype == 'numeric':
+                        numeric_label = float(label)
+                        if numeric_label in self.class_to_encoded:
+                            encoded.append(self.class_to_encoded[numeric_label])
+                        else:
+                            raise ValueError(f"Unknown class label: {label}")
+                    else:
+                        raise ValueError(f"Unknown class label: {label}")
+                except (ValueError, TypeError):
+                    raise ValueError(f"Unknown class label: {label}")
 
         return np.array(encoded, dtype=np.float64)
 
@@ -236,14 +260,15 @@ class ClassEncoder:
         return original
 
     def get_encoded_classes(self):
-        """Get the encoded class values used in dmyclass"""
+        """Get the encoded class values used in class_labels"""
         return sorted(self.encoded_to_class.keys())
 
     def get_class_mapping(self):
         """Get the complete class mapping"""
         return {
             'class_to_encoded': self.class_to_encoded,
-            'encoded_to_class': self.encoded_to_class
+            'encoded_to_class': self.encoded_to_class,
+            'original_dtype': self.original_dtype
         }
 
 class DBNNCore:
@@ -276,7 +301,7 @@ class DBNNCore:
         self.binloc = None
         self.max_val = None
         self.min_val = None
-        self.dmyclass = None
+        self.class_labels = None
         self.resolution_arr = None
 
         # Training state
@@ -298,6 +323,117 @@ class DBNNCore:
         # Visualization integration
         self.visualizer = None
         self.log_callback = None
+
+        # Complex Tensor mode flag
+        self.tensor_mode = False
+        self.tensor_core = None
+
+    def load_model_auto_config(self, model_path: str):
+        """
+        Load model with automatic configuration detection and setup
+        Enhanced version that handles both tensor and standard modes
+        """
+        try:
+            self.log(f"🔄 Loading model with auto-configuration: {model_path}")
+
+            # Use the existing load_model method
+            success = self.load_model(model_path)
+
+            if not success:
+                self.log("❌ Basic model loading failed")
+                return False
+
+            # AUTO-CONFIGURATION: Set up the core based on loaded model
+            self.log("🔧 Applying auto-configuration...")
+
+            # Set tensor mode if tensor arrays are detected
+            if (hasattr(self, 'tensor_mode') and
+                hasattr(self, 'tensor_core') and
+                self.tensor_core is not None and
+                hasattr(self.tensor_core, 'weight_matrix') and
+                self.tensor_core.weight_matrix is not None):
+
+                self.enable_tensor_mode(True)
+                self.log("✅ Auto-configured: Tensor mode detected")
+
+            # Verify feature configuration
+            if not hasattr(self, 'feature_columns') or not self.feature_columns:
+                self.log("⚠️ No feature columns found in model, attempting inference...")
+
+                # Try to infer from array dimensions
+                if hasattr(self, 'innodes') and self.innodes > 0:
+                    self.feature_columns = [f'feature_{i+1}' for i in range(self.innodes)]
+                    self.log(f"✅ Inferred {self.innodes} feature columns from model dimensions")
+
+            # Verify class encoder
+            if (hasattr(self, 'class_encoder') and
+                hasattr(self.class_encoder, 'is_fitted') and
+                not self.class_encoder.is_fitted):
+
+                self.log("⚠️ Class encoder not fitted, attempting recovery...")
+                # Try to recover from class_labels
+                if hasattr(self, 'class_labels') and self.class_labels is not None:
+                    try:
+                        # Extract class values from class_labels (skip margin at index 0)
+                        class_values = []
+                        for i in range(1, min(len(self.class_labels), self.outnodes + 1)):
+                            if self.class_labels[i] != 0:  # Skip zero values
+                                class_values.append(self.class_labels[i])
+
+                        if class_values:
+                            # Create basic encoder
+                            self.class_encoder.fit(class_values)
+                            self.log(f"✅ Recovered class encoder with {len(class_values)} classes")
+                    except Exception as e:
+                        self.log(f"❌ Class encoder recovery failed: {e}")
+
+            # Final validation
+            validation_passed = True
+
+            if not hasattr(self, 'innodes') or self.innodes <= 0:
+                self.log("❌ Auto-configuration failed: Invalid input nodes")
+                validation_passed = False
+
+            if not hasattr(self, 'outnodes') or self.outnodes <= 0:
+                self.log("❌ Auto-configuration failed: Invalid output nodes")
+                validation_passed = False
+
+            if not hasattr(self, 'is_trained') or not self.is_trained:
+                self.log("⚠️ Model marked as not trained, but continuing...")
+
+            if validation_passed:
+                self.log("✅ Auto-configuration completed successfully")
+
+                # Test model functionality
+                try:
+                    if self.innodes > 0:
+                        test_sample = np.random.randn(self.innodes)
+                        predictions, probabilities = self.predict_batch(test_sample.reshape(1, -1))
+                        self.log(f"✅ Model test passed - Prediction: {predictions[0]}")
+                except Exception as test_error:
+                    self.log(f"⚠️ Model test warning: {test_error}")
+
+            return validation_passed
+
+        except Exception as e:
+            self.log(f"❌ Auto-configuration load error: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def enable_tensor_mode(self, enabled=True):
+        """Enable or disable tensor transformation mode"""
+        self.tensor_mode = enabled
+        if enabled and self.tensor_core is None:
+            self.tensor_core = DBNNTensorCore(self.config)
+            # Copy essential state from main core to tensor core
+            if hasattr(self, 'class_encoder'):
+                self.tensor_core.class_encoder = self.class_encoder
+            if hasattr(self, 'class_labels') and self.class_labels is not None:
+                self.tensor_core.class_labels = self.class_labels.copy()
+            self.log("✅ Tensor transformation mode enabled")
+        elif not enabled:
+            self.log("✅ Standard iterative mode enabled")
 
     def _detect_optimal_workers(self):
         """Detect optimal number of workers for parallel processing"""
@@ -597,51 +733,50 @@ class DBNNCore:
                 'class_encoder': self.class_encoder.get_class_mapping() if hasattr(self.class_encoder, 'is_fitted') and self.class_encoder.is_fitted else {},
                 'feature_columns': feature_columns if feature_columns else [],
                 'target_column': target_column if target_column else '',
-                'arrays_format': 'numpy'  # Mark that arrays are stored as numpy objects
+                'arrays_format': 'numpy',  # Mark that arrays are stored as numpy objects
+                'training_mode': 'tensor' if (self.tensor_mode and self.tensor_core) else 'standard'
             }
 
-            # Add arrays with proper validation
-            if hasattr(self, 'anti_net') and self.anti_net is not None:
-                model_data['anti_net'] = self.anti_net
-            else:
-                model_data['anti_net'] = np.array([], dtype=np.int32)
+            # Add arrays with proper validation - ENHANCED BUT COMPATIBLE
+            array_mappings = [
+                ('anti_net', np.int32),
+                ('anti_wts', np.float64),
+                ('binloc', np.float64),
+                ('max_val', np.float64),
+                ('min_val', np.float64),
+                ('class_labels', np.float64),
+                ('resolution_arr', np.int32)
+            ]
 
-            if hasattr(self, 'anti_wts') and self.anti_wts is not None:
-                model_data['anti_wts'] = self.anti_wts
-            else:
-                model_data['anti_wts'] = np.array([], dtype=np.float64)
+            for field_name, dtype in array_mappings:
+                if hasattr(self, field_name) and getattr(self, field_name) is not None:
+                    model_data[field_name] = getattr(self, field_name)
+                else:
+                    model_data[field_name] = np.array([], dtype=dtype)
 
-            if hasattr(self, 'binloc') and self.binloc is not None:
-                model_data['binloc'] = self.binloc
-            else:
-                model_data['binloc'] = np.array([], dtype=np.float64)
+            # NEW: Add tensor-specific data if in tensor mode
+            if self.tensor_mode and self.tensor_core:
+                tensor_data = {}
+                tensor_arrays = ['orthogonal_basis', 'weight_matrix', 'feature_projection', 'class_projection']
+                for array_name in tensor_arrays:
+                    if hasattr(self.tensor_core, array_name) and getattr(self.tensor_core, array_name) is not None:
+                        tensor_data[array_name] = getattr(self.tensor_core, array_name)
 
-            if hasattr(self, 'max_val') and self.max_val is not None:
-                model_data['max_val'] = self.max_val
-            else:
-                model_data['max_val'] = np.array([], dtype=np.float64)
-
-            if hasattr(self, 'min_val') and self.min_val is not None:
-                model_data['min_val'] = self.min_val
-            else:
-                model_data['min_val'] = np.array([], dtype=np.float64)
-
-            if hasattr(self, 'dmyclass') and self.dmyclass is not None:
-                model_data['dmyclass'] = self.dmyclass
-            else:
-                model_data['dmyclass'] = np.array([], dtype=np.float64)
-
-            if hasattr(self, 'resolution_arr') and self.resolution_arr is not None:
-                model_data['resolution_arr'] = self.resolution_arr
-            else:
-                model_data['resolution_arr'] = np.array([], dtype=np.int32)
+                if tensor_data:  # Only add if we have tensor data
+                    model_data['tensor_arrays'] = tensor_data
 
             if use_json:
                 # Convert numpy arrays to lists for JSON
                 json_model_data = model_data.copy()
-                for key in ['anti_net', 'anti_wts', 'binloc', 'max_val', 'min_val', 'dmyclass', 'resolution_arr']:
+                for key in ['anti_net', 'anti_wts', 'binloc', 'max_val', 'min_val', 'class_labels', 'resolution_arr']:
                     if isinstance(json_model_data[key], np.ndarray):
                         json_model_data[key] = json_model_data[key].tolist()
+
+                # Handle tensor arrays for JSON
+                if 'tensor_arrays' in json_model_data:
+                    for tensor_key in json_model_data['tensor_arrays']:
+                        if isinstance(json_model_data['tensor_arrays'][tensor_key], np.ndarray):
+                            json_model_data['tensor_arrays'][tensor_key] = json_model_data['tensor_arrays'][tensor_key].tolist()
 
                 with open(model_path, 'w') as f:
                     json.dump(json_model_data, f, indent=2)
@@ -653,7 +788,8 @@ class DBNNCore:
                 self.log(f"Model saved in binary format to: {model_path}")
 
             if feature_columns:
-                self.log(f"✅ Feature configuration saved: {len(feature_columns)} features")
+                mode_info = "tensor" if (self.tensor_mode and self.tensor_core) else "standard"
+                self.log(f"✅ {mode_info.capitalize()} model saved: {len(feature_columns)} features")
             return True
 
         except Exception as e:
@@ -679,6 +815,15 @@ class DBNNCore:
 
             self.log(f"Loading model from: {model_path}")
 
+            # NEW: Detect and set training mode BEFORE loading arrays
+            training_mode = model_data.get('training_mode', 'standard')
+            if training_mode == 'tensor':
+                self.enable_tensor_mode(True)
+                self.log("✅ Detected tensor mode model")
+            else:
+                self.enable_tensor_mode(False)
+                self.log("✅ Detected standard mode model")
+
             # Load basic configuration FIRST
             self.config = model_data.get('config', {})
 
@@ -691,7 +836,7 @@ class DBNNCore:
                     ('binloc', np.float64),
                     ('max_val', np.float64),
                     ('min_val', np.float64),
-                    ('dmyclass', np.float64),
+                    ('class_labels', np.float64),  # CHANGED: class_labels → class_labels
                     ('resolution_arr', np.int32)
                 ]
 
@@ -711,7 +856,7 @@ class DBNNCore:
                     ('binloc', np.float64),
                     ('max_val', np.float64),
                     ('min_val', np.float64),
-                    ('dmyclass', np.float64),
+                    ('class_labels', np.float64),  # CHANGED: class_labels → class_labels
                     ('resolution_arr', np.int32)
                 ]
 
@@ -723,6 +868,16 @@ class DBNNCore:
                             self.log(f"Loaded {field_name}: shape {loaded_array.shape}")
                         except Exception as e:
                             self.log(f"Error loading {field_name}: {e}")
+
+            # NEW: Load tensor arrays if available and in tensor mode
+            if self.tensor_mode and self.tensor_core and 'tensor_arrays' in model_data:
+                tensor_data = model_data['tensor_arrays']
+                for array_name, array_data in tensor_data.items():
+                    if array_data is not None:
+                        if isinstance(array_data, list):
+                            array_data = np.array(array_data)
+                        setattr(self.tensor_core, array_name, array_data)
+                        self.log(f"Loaded tensor array {array_name}: shape {array_data.shape}")
 
             # FIX: Infer dimensions from ACTUAL loaded arrays, not from metadata
             if hasattr(self, 'anti_net') and self.anti_net is not None:
@@ -745,7 +900,7 @@ class DBNNCore:
             if 'best_accuracy' in model_data:
                 self.best_accuracy = model_data['best_accuracy']
 
-            # NEW: Load feature information from model
+            # Load feature information from model
             self.feature_columns = model_data.get('feature_columns', [])
             self.target_column = model_data.get('target_column', '')
 
@@ -833,9 +988,9 @@ class DBNNCore:
                             sample_classes = list(self.class_encoder.encoded_to_class.items())[:3]
                             self.log(f"Sample class mappings: {sample_classes}")
 
-                            # Also verify dmyclass alignment
-                            if hasattr(self, 'dmyclass') and self.dmyclass is not None:
-                                self.log(f"dmyclass values: {[self.dmyclass[i] for i in range(min(5, len(self.dmyclass)))]}...")
+                            # Also verify class_labels alignment
+                            if hasattr(self, 'class_labels') and self.class_labels is not None:
+                                self.log(f"class_labels values: {[self.class_labels[i] for i in range(min(5, len(self.class_labels)))]}...")
                     else:
                         self.log("❌ Class encoder failed to load properly")
 
@@ -844,15 +999,15 @@ class DBNNCore:
                     import traceback
                     traceback.print_exc()
 
-                    # EMERGENCY RECOVERY: Try to create basic encoder from dmyclass if available
-                    if hasattr(self, 'dmyclass') and self.dmyclass is not None:
-                        self.log("🔄 Attempting emergency encoder recovery from dmyclass...")
+                    # EMERGENCY RECOVERY: Try to create basic encoder from class_labels if available
+                    if hasattr(self, 'class_labels') and self.class_labels is not None:
+                        self.log("🔄 Attempting emergency encoder recovery from class_labels...")
                         try:
-                            # Extract class values from dmyclass (skip margin at index 0)
+                            # Extract class values from class_labels (skip margin at index 0)
                             class_values = []
-                            for i in range(1, min(len(self.dmyclass), self.outnodes + 1)):
-                                if self.dmyclass[i] != 0:  # Skip zero values
-                                    class_values.append(self.dmyclass[i])
+                            for i in range(1, min(len(self.class_labels), self.outnodes + 1)):
+                                if self.class_labels[i] != 0:  # Skip zero values
+                                    class_values.append(self.class_labels[i])
 
                             if class_values:
                                 # Create basic encoder mapping
@@ -865,20 +1020,20 @@ class DBNNCore:
                                 self.class_encoder.encoded_to_class = encoded_to_class
                                 self.class_encoder.class_to_encoded = class_to_encoded
                                 self.class_encoder.is_fitted = True
-                                self.log(f"✅ Emergency recovery: Created encoder with {len(class_values)} classes from dmyclass")
+                                self.log(f"✅ Emergency recovery: Created encoder with {len(class_values)} classes from class_labels")
                         except Exception as recovery_error:
                             self.log(f"❌ Emergency recovery failed: {recovery_error}")
             else:
                 self.log("❌ No class encoder data found in model file")
 
-                # Try to infer from dmyclass as last resort
-                if hasattr(self, 'dmyclass') and self.dmyclass is not None:
-                    self.log("🔄 Attempting to infer encoder from dmyclass...")
+                # Try to infer from class_labels as last resort
+                if hasattr(self, 'class_labels') and self.class_labels is not None:
+                    self.log("🔄 Attempting to infer encoder from class_labels...")
                     try:
                         class_values = []
-                        for i in range(1, min(len(self.dmyclass), self.outnodes + 1)):
-                            if self.dmyclass[i] != 0:
-                                class_values.append(self.dmyclass[i])
+                        for i in range(1, min(len(self.class_labels), self.outnodes + 1)):
+                            if self.class_labels[i] != 0:
+                                class_values.append(self.class_labels[i])
 
                         if class_values:
                             encoded_to_class = {}
@@ -890,12 +1045,13 @@ class DBNNCore:
                             self.class_encoder.encoded_to_class = encoded_to_class
                             self.class_encoder.class_to_encoded = class_to_encoded
                             self.class_encoder.is_fitted = True
-                            self.log(f"✅ Inferred encoder with {len(class_values)} classes from dmyclass")
+                            self.log(f"✅ Inferred encoder with {len(class_values)} classes from class_labels")
                     except Exception as infer_error:
-                        self.log(f"❌ Failed to infer encoder from dmyclass: {infer_error}")
+                        self.log(f"❌ Failed to infer encoder from class_labels: {infer_error}")
 
             # Final validation
-            self.log(f"✅ Model loaded successfully: {self.innodes} inputs, {self.outnodes} outputs")
+            mode_info = "tensor" if self.tensor_mode else "standard"
+            self.log(f"✅ {mode_info.capitalize()} model loaded successfully: {self.innodes} inputs, {self.outnodes} outputs")
             self.log(f"✅ Model is_trained: {self.is_trained}")
             self.log(f"✅ Class encoder is_fitted: {getattr(self.class_encoder, 'is_fitted', False)}")
             self.log(f"✅ Config resolution: {self.config.get('resol', 'N/A')}")
@@ -962,9 +1118,9 @@ class DBNNCore:
         self.min_val = np.zeros(innodes+2, dtype=np.float32)
         self.resolution_arr = np.zeros(innodes+8, dtype=np.int32)
 
-        # Initialize dmyclass
-        self.dmyclass = np.zeros(outnodes + 2, dtype=np.float32)
-        self.dmyclass[0] = self.config.get('margin', 0.2)
+        # Initialize class_labels
+        self.class_labels = np.zeros(outnodes + 2, dtype=np.float32)
+        self.class_labels[0] = self.config.get('margin', 0.2)
 
         print(f"Initialized arrays for {innodes} input nodes, {outnodes} output nodes, resolution {resol}")
 
@@ -1137,10 +1293,10 @@ class DBNNCore:
         all_original_targets = np.concatenate(original_targets_batches) if original_targets_batches else np.array([])
         self.class_encoder.fit(all_original_targets)
 
-        # Update dmyclass with encoded values
+        # Update class_labels with encoded values
         encoded_classes = self.class_encoder.get_encoded_classes()
         for i, encoded_val in enumerate(encoded_classes, 1):
-            self.dmyclass[i] = float(encoded_val)
+            self.class_labels[i] = float(encoded_val)
 
     def initialize_training(self, features_batches, encoded_targets_batches, resol: int):
         """Initialize training parameters and arrays"""
@@ -1201,7 +1357,7 @@ class DBNNCore:
 
             self.anti_net = process_training_sample(
                 vects, tmpv, self.anti_net, self.anti_wts, self.binloc,
-                self.resolution_arr, self.dmyclass, self.min_val, self.max_val,
+                self.resolution_arr, self.class_labels, self.min_val, self.max_val,
                 self.innodes, self.outnodes
             )
 
@@ -1246,7 +1402,7 @@ class DBNNCore:
 
             self.anti_net = process_training_sample(
                 vects, tmpv, self.anti_net, self.anti_wts, self.binloc,
-                self.resolution_arr, self.dmyclass, self.min_val, self.max_val,
+                self.resolution_arr, self.class_labels, self.min_val, self.max_val,
                 self.innodes, self.outnodes
             )
 
@@ -1273,7 +1429,7 @@ class DBNNCore:
                 # Compute probabilities
                 classval = compute_class_probabilities_numba(
                     vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
-                    self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes
+                    self.class_labels, self.min_val, self.max_val, self.innodes, self.outnodes
                 )
 
                 # Find predicted class
@@ -1285,10 +1441,10 @@ class DBNNCore:
                         kmax = k
 
                 # Update weights if wrong classification
-                if abs(self.dmyclass[kmax] - tmpv) > self.dmyclass[0]:
+                if abs(self.class_labels[kmax] - tmpv) > self.class_labels[0]:
                     self.anti_wts = update_weights_numba(
                         vects, tmpv, classval, self.anti_wts, self.binloc, self.resolution_arr,
-                        self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes, gain
+                        self.class_labels, self.min_val, self.max_val, self.innodes, self.outnodes, gain
                     )
 
     def _train_epoch_parallel(self, features_batches, encoded_targets_batches, gain: float):
@@ -1368,7 +1524,7 @@ class DBNNCore:
             # Compute probabilities
             classval = compute_class_probabilities_numba(
                 vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
-                self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes
+                self.class_labels, self.min_val, self.max_val, self.innodes, self.outnodes
             )
 
             # Find predicted class
@@ -1380,14 +1536,22 @@ class DBNNCore:
                     kmax = k
 
             # Update weights if wrong classification
-            if abs(self.dmyclass[kmax] - tmpv) > self.dmyclass[0]:
+            if abs(self.class_labels[kmax] - tmpv) > self.class_labels[0]:
                 self.anti_wts = update_weights_numba(
                     vects, tmpv, classval, self.anti_wts, self.binloc, self.resolution_arr,
-                    self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes, gain
+                    self.class_labels, self.min_val, self.max_val, self.innodes, self.outnodes, gain
                 )
 
     def evaluate(self, features_batches, encoded_targets_batches):
         """Evaluate model accuracy with parallel optimization"""
+        # Tensor mode: use tensor evaluation if available
+        if self.tensor_mode and self.tensor_core and hasattr(self.tensor_core, 'tensor_evaluate'):
+            try:
+                return self.tensor_core.tensor_evaluate(features_batches, encoded_targets_batches)
+            except Exception as e:
+                self.log(f"Tensor evaluation failed, falling back to standard: {e}")
+                # Fall through to standard evaluation
+
         if self.parallel_enabled and self.num_workers > 1:
             return self._evaluate_parallel(features_batches, encoded_targets_batches)
         else:
@@ -1412,7 +1576,7 @@ class DBNNCore:
                 # Compute class probabilities
                 classval = compute_class_probabilities_numba(
                     vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
-                    self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes
+                    self.class_labels, self.min_val, self.max_val, self.innodes, self.outnodes
                 )
 
                 # Find predicted class
@@ -1423,11 +1587,11 @@ class DBNNCore:
                         cmax = classval[k]
                         kmax = k
 
-                predicted = self.dmyclass[kmax]
+                predicted = self.class_labels[kmax]
                 all_predictions.append(predicted)
 
                 # Check if prediction is correct
-                if abs(actual - predicted) <= self.dmyclass[0]:
+                if abs(actual - predicted) <= self.class_labels[0]:
                     correct_predictions += 1
 
         accuracy = (correct_predictions / total_samples) * 100 if total_samples > 0 else 0
@@ -1448,7 +1612,7 @@ class DBNNCore:
             # Compute class probabilities
             classval = compute_class_probabilities_numba(
                 vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
-                self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes
+                self.class_labels, self.min_val, self.max_val, self.innodes, self.outnodes
             )
 
             # Find predicted class
@@ -1459,17 +1623,24 @@ class DBNNCore:
                     cmax = classval[k]
                     kmax = k
 
-            predicted = self.dmyclass[kmax]
+            predicted = self.class_labels[kmax]
             batch_predictions.append(predicted)
 
             # Check if prediction is correct
-            if abs(actual - predicted) <= self.dmyclass[0]:
+            if abs(actual - predicted) <= self.class_labels[0]:
                 batch_correct += 1
 
         return batch_correct, batch_total, batch_predictions
 
     def predict_batch(self, features_batch):
         """Predict classes for a batch of features with parallel optimization"""
+        # Tensor mode: use orthogonal prediction if available
+        if self.tensor_mode and self.tensor_core and hasattr(self.tensor_core, 'orthogonal_predict'):
+            try:
+                return self.tensor_core.orthogonal_predict(features_batch)
+            except Exception as e:
+                self.log(f"Tensor prediction failed, falling back to standard: {e}")
+                # Fall through to standard prediction
         if self.parallel_enabled and len(features_batch) > 1000 and self.num_workers > 1:
             return self._predict_batch_parallel(features_batch)
         else:
@@ -1488,7 +1659,7 @@ class DBNNCore:
             # Compute class probabilities
             classval = compute_class_probabilities_numba(
                 vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
-                self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes
+                self.class_labels, self.min_val, self.max_val, self.innodes, self.outnodes
             )
 
             # Find predicted class
@@ -1499,13 +1670,13 @@ class DBNNCore:
                     cmax = classval[k]
                     kmax = k
 
-            predicted = self.dmyclass[kmax]
+            predicted = self.class_labels[kmax]
             predictions.append(predicted)
 
             # Store probabilities
             prob_dict = {}
             for k in range(1, self.outnodes + 1):
-                class_val = self.dmyclass[k]
+                class_val = self.class_labels[k]
                 if self.class_encoder.is_fitted:
                     class_name = self.class_encoder.encoded_to_class.get(class_val, f"Class_{k}")
                 else:
@@ -1529,7 +1700,7 @@ class DBNNCore:
             # Compute class probabilities
             classval = compute_class_probabilities_numba(
                 vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
-                self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes
+                self.class_labels, self.min_val, self.max_val, self.innodes, self.outnodes
             )
 
             # Find predicted class
@@ -1540,13 +1711,13 @@ class DBNNCore:
                     cmax = classval[k]
                     kmax = k
 
-            predicted = self.dmyclass[kmax]
+            predicted = self.class_labels[kmax]
             chunk_predictions.append(predicted)
 
             # Store probabilities
             prob_dict = {}
             for k in range(1, self.outnodes + 1):
-                class_val = self.dmyclass[k]
+                class_val = self.class_labels[k]
                 if self.class_encoder.is_fitted:
                     class_name = self.class_encoder.encoded_to_class.get(class_val, f"Class_{k}")
                 else:
@@ -1561,11 +1732,59 @@ class DBNNCore:
         """Optimized batch prediction with periodic cache clearing"""
         return self.predict_batch(features_batch)
 
+    def generate_interactive_viz(self):
+        """Generate interactive 3D visualizations"""
+        if not self.core or not hasattr(self.core, 'visualizer'):
+            messagebox.showerror("Error", "No training data available for visualization")
+            return
+
+        try:
+            self.show_processing_indicator("Generating interactive 3D visualizations...")
+            outputs = self.core.generate_interactive_visualizations()
+
+            if outputs:
+                self.log("✅ Interactive visualizations generated:")
+                for viz_type, file_path in outputs.items():
+                    self.log(f"   {viz_type}: {file_path}")
+
+                # Ask if user wants to open the main visualization
+                if 'interactive_3d' in outputs:
+                    result = messagebox.askyesno(
+                        "Visualization Ready",
+                        f"Interactive 3D visualization generated!\n\n"
+                        f"File: {outputs['interactive_3d']}\n\n"
+                        f"Open in web browser?"
+                    )
+                    if result:
+                        import webbrowser
+                        webbrowser.open(f'file://{os.path.abspath(outputs["interactive_3d"])}')
+            else:
+                self.log("❌ No visualizations could be generated")
+
+        except Exception as e:
+            self.log(f"❌ Error generating visualizations: {e}")
+        finally:
+            self.hide_processing_indicator()
+
     def train_with_early_stopping(self, train_file: str, test_file: Optional[str] = None,
                                  use_csv: bool = True, target_column: Optional[str] = None,
-                                 feature_columns: Optional[List[str]] = None):
-        """Main training method with early stopping and automatic optimizations"""
-        self.log("Starting optimized model training with early stopping...")
+                                 feature_columns: Optional[List[str]] = None,
+                                 enable_interactive_viz: bool = False,
+                                 viz_capture_interval: int = 5):
+        """Main training method with early stopping and automatic optimizations
+        Now with optional interactive 3D visualization support
+        """
+        if self.tensor_mode and self.tensor_core:
+            self.log("🚀 Starting TENSOR TRANSFORMATION training...")
+            return self.tensor_core.tensor_train(
+                train_file, test_file, use_csv, target_column, feature_columns
+            )
+        else:
+            self.log("Starting optimized model training with early stopping...")
+
+        # Enable interactive visualization if requested
+        if enable_interactive_viz:
+            self._enable_interactive_visualization_internal(viz_capture_interval)
 
         # Load training data
         features_batches, targets_batches, feature_columns_used, original_targets_batches = self.load_data(
@@ -1585,6 +1804,10 @@ class DBNNCore:
 
         self.innodes = len(feature_columns_used)
         self.outnodes = len(self.class_encoder.get_encoded_classes())
+
+        # Store feature information for visualization
+        self.feature_columns = feature_columns_used
+        self.target_column = target_column if target_column else ""
 
         # Initialize arrays
         resol = self.config.get('resol', 100)
@@ -1616,6 +1839,9 @@ class DBNNCore:
         patience_counter = 0
         best_weights = None
 
+        # Initialize training iteration counter for visualization
+        self.training_iteration = 0
+
         for rnd in range(max_epochs + 1):
             if rnd == 0:
                 # Initial evaluation
@@ -1624,17 +1850,24 @@ class DBNNCore:
                 best_accuracy = current_accuracy
                 best_weights = self.anti_wts.copy()
                 best_round = rnd
+
+                # Capture initial visualization snapshot if interactive viz is enabled
+                if enable_interactive_viz and hasattr(self, '_capture_interactive_snapshot'):
+                    self._capture_interactive_snapshot(features_batches, encoded_targets_batches, rnd)
+
                 continue
 
             # Training pass
             self.train_epoch(features_batches, encoded_targets_batches, gain)
+            self.training_iteration = rnd  # Update iteration counter
 
             # Evaluation after training round
             current_accuracy, correct_predictions, _ = self.evaluate(features_batches, encoded_targets_batches)
             self.log(f"Round {rnd:3d}: Accuracy = {current_accuracy:.2f}% ({correct_predictions}/{total_samples})")
 
-            # Capture visualization snapshot if visualizer is attached
+            # Capture visualization snapshot if visualizer is attached - BOTH traditional and interactive
             if self.visualizer and rnd % 5 == 0:
+                # Traditional snapshot (existing functionality)
                 sample_features = np.vstack(features_batches)[:1000]  # Sample for performance
                 sample_targets = np.concatenate(encoded_targets_batches)[:1000]
                 sample_predictions, _ = self.predict_batch(sample_features)
@@ -1642,6 +1875,10 @@ class DBNNCore:
                     sample_features, sample_targets, self.anti_wts,
                     sample_predictions, current_accuracy, rnd
                 )
+
+                # Interactive 3D snapshot (new functionality)
+                if enable_interactive_viz and hasattr(self, '_capture_interactive_snapshot'):
+                    self._capture_interactive_snapshot(features_batches, encoded_targets_batches, rnd)
 
             # Early stopping logic
             if current_accuracy > best_accuracy + min_improvement:
@@ -1668,13 +1905,179 @@ class DBNNCore:
         self.best_accuracy = best_accuracy
         self.best_round = best_round
 
+        # Log interactive visualization info if enabled
+        if enable_interactive_viz and hasattr(self, 'visualizer') and hasattr(self.visualizer, 'feature_space_snapshots'):
+            num_snapshots = len(self.visualizer.feature_space_snapshots)
+            self.log(f"📊 Captured {num_snapshots} interactive 3D visualization snapshots")
+            self.log("   Use generate_interactive_visualizations() to create interactive plots")
+
         self.log("Optimized training completed successfully!")
         return True
 
-    # All other existing methods remain exactly the same...
-    # detect_system_resources, calculate_optimal_parameters, estimate_batch_memory,
-    # print_resource_report, save_model, load_model, attach_visualizer, etc.
-    # These methods are unchanged from the original implementation
+    def _enable_interactive_visualization_internal(self, capture_interval=5):
+        """Internal method to enable interactive visualization during training"""
+        if not hasattr(self, 'visualizer'):
+            self.visualizer = DBNNVisualizer()
+            self.log("✅ Visualizer attached for interactive 3D visualization")
+
+        def _capture_interactive_snapshot(features_batches, encoded_targets_batches, iteration):
+            """Capture feature space snapshot for interactive 3D visualization"""
+            try:
+                # Sample data for visualization (limit for performance)
+                all_features = np.vstack(features_batches)
+                all_targets = np.concatenate(encoded_targets_batches)
+
+                # Use smaller sample for performance
+                sample_size = min(500, len(all_features))
+                if sample_size < len(all_features):
+                    indices = np.random.choice(len(all_features), sample_size, replace=False)
+                    sample_features = all_features[indices]
+                    sample_targets = all_targets[indices]
+                else:
+                    sample_features = all_features
+                    sample_targets = all_targets
+
+                sample_predictions, _ = self.predict_batch(sample_features)
+
+                # Get feature names
+                feature_names = getattr(self, 'feature_columns', None)
+                if feature_names is None:
+                    feature_names = [f'Feature_{i+1}' for i in range(sample_features.shape[1])]
+
+                # Get class names from encoder
+                class_names = []
+                if hasattr(self, 'class_encoder') and self.class_encoder.is_fitted:
+                    for i in range(len(self.class_encoder.encoded_to_class)):
+                        class_val = self.class_encoder.encoded_to_class.get(i+1, f'Class_{i+1}')
+                        class_names.append(str(class_val))
+                else:
+                    unique_targets = np.unique(sample_targets)
+                    class_names = [f'Class_{int(t)}' for t in unique_targets]
+
+                # Capture the snapshot
+                self.visualizer.capture_feature_space_snapshot(
+                    sample_features, sample_targets, sample_predictions,
+                    iteration, feature_names, class_names
+                )
+
+                if iteration % 10 == 0:  # Log every 10 iterations to avoid spam
+                    self.log(f"📊 Captured feature space snapshot at iteration {iteration}")
+
+            except Exception as e:
+                self.log(f"⚠️ Could not capture interactive visualization snapshot: {e}")
+
+        # Store the capture method for use during training
+        self._capture_interactive_snapshot = _capture_interactive_snapshot
+        self.log(f"✅ Interactive 3D visualization enabled (capturing every {capture_interval} iterations)")
+
+
+    def enable_interactive_visualization(self, capture_interval=5):
+        """Enable automatic capture of feature space snapshots for interactive 3D visualization"""
+        if not hasattr(self, 'visualizer'):
+            self.visualizer = DBNNVisualizer()
+            self.log("✅ Visualizer attached for interactive 3D visualization")
+
+        # Store capture interval for use during training
+        self.viz_capture_interval = capture_interval
+        self.log(f"✅ Interactive 3D visualization enabled (will capture every {capture_interval} iterations)")
+
+
+
+    def _capture_interactive_snapshot(self, features_batches, encoded_targets_batches, iteration):
+        """Internal method to capture feature space snapshot for interactive visualization"""
+        try:
+            # Sample data for visualization (limit for performance)
+            all_features = np.vstack(features_batches)
+            all_targets = np.concatenate(encoded_targets_batches)
+
+            # Use smaller sample for performance
+            sample_size = min(500, len(all_features))
+            if len(all_features) > sample_size:
+                indices = np.random.choice(len(all_features), sample_size, replace=False)
+                sample_features = all_features[indices]
+                sample_targets = all_targets[indices]
+            else:
+                sample_features = all_features
+                sample_targets = all_targets
+
+            sample_predictions, _ = self.predict_batch(sample_features)
+
+            # Get feature names
+            feature_names = getattr(self, 'feature_columns', None)
+            if feature_names is None:
+                feature_names = [f'Feature_{i+1}' for i in range(sample_features.shape[1])]
+
+            # Get class names from encoder
+            class_names = []
+            if hasattr(self, 'class_encoder') and self.class_encoder.is_fitted:
+                for i in range(len(self.class_encoder.encoded_to_class)):
+                    class_val = self.class_encoder.encoded_to_class.get(i+1, f'Class_{i+1}')
+                    class_names.append(str(class_val))
+            else:
+                unique_targets = np.unique(sample_targets)
+                class_names = [f'Class_{int(t)}' for t in unique_targets]
+
+            # Capture the snapshot
+            self.visualizer.capture_feature_space_snapshot(
+                sample_features, sample_targets, sample_predictions,
+                iteration, feature_names, class_names
+            )
+
+            if iteration % 10 == 0:  # Log every 10 iterations to avoid spam
+                self.log(f"📊 Captured feature space snapshot at iteration {iteration}")
+
+        except Exception as e:
+            self.log(f"⚠️ Could not capture interactive visualization snapshot: {e}")
+
+    def generate_interactive_visualizations(self, output_dir="Visualisations"):
+        """Generate all interactive visualizations after training"""
+        if not hasattr(self, 'visualizer') or not hasattr(self.visualizer, 'feature_space_snapshots'):
+            self.log("❌ No interactive visualization data available.")
+            self.log("   Enable with enable_interactive_visualization() before training")
+            return None
+
+        try:
+            import os
+            # Create output directory
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+
+            # Create base filename
+            base_name = "dbnn_training"
+            if hasattr(self, 'feature_columns') and self.feature_columns:
+                base_name = f"dbnn_{len(self.feature_columns)}features"
+
+            outputs = {}
+
+            # Generate interactive 3D visualization
+            interactive_3d_file = os.path.join(output_dir, f"{base_name}_interactive_3d.html")
+            result = self.visualizer.generate_interactive_3d_visualization(interactive_3d_file)
+            if result:
+                outputs['interactive_3d'] = result
+                self.log(f"✅ Interactive 3D visualization: {result}")
+
+            # Generate advanced dashboard
+            dashboard_file = os.path.join(output_dir, f"{base_name}_advanced_dashboard.html")
+            result = self.visualizer.create_advanced_interactive_dashboard(dashboard_file)
+            if result:
+                outputs['advanced_dashboard'] = result
+                self.log(f"✅ Advanced dashboard: {result}")
+
+            # Generate traditional visualizations (existing functionality)
+            traditional_file = os.path.join(output_dir, f"{base_name}_traditional_dashboard.html")
+            if hasattr(self.visualizer, 'create_training_dashboard'):
+                result = self.visualizer.create_training_dashboard(traditional_file)
+                if result:
+                    outputs['traditional_dashboard'] = result
+                    self.log(f"✅ Traditional dashboard: {result}")
+
+            return outputs
+
+        except Exception as e:
+            self.log(f"❌ Error generating visualizations: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     def enable_parallel_processing(self, enabled=True):
         """Enable or disable parallel processing"""
@@ -1703,23 +2106,910 @@ class DBNNCore:
             self.binloc = self.binloc.astype(np.float32)
             self.max_val = self.max_val.astype(np.float32)
             self.min_val = self.min_val.astype(np.float32)
-            self.dmyclass = self.dmyclass.astype(np.float32)
+            self.class_labels = self.class_labels.astype(np.float32)
             self.memory_optimized = True
             self.log("✅ Memory optimized: arrays converted to float32")
 
+class DBNNTensorCore(DBNNCore):
+    """
+    DBNN with tensor space transformation instead of iterative learning
+    """
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        super().__init__(config)
+        self.orthogonal_basis = None
+        self.weight_matrix = None
+        self.feature_projection = None
+        self.class_projection = None
+
+        # Ensure class encoder exists
+        if not hasattr(self, 'class_encoder'):
+            self.class_encoder = ClassEncoder()
+
+        # Initialize arrays to prevent NoneType errors
+        self.innodes = 0
+        self.outnodes = 0
+        self.class_labels = None  # This will be initialized properly later
+
+    def orthogonal_predict(self, features_batch):
+        """Prediction using orthogonal projections with robust type handling"""
+        if self.weight_matrix is not None and features_batch.size > 0:
+            try:
+                # Direct projection: features @ W = class_scores
+                class_scores = features_batch @ self.weight_matrix
+
+                # Convert to probabilities using softmax
+                exp_scores = np.exp(class_scores - np.max(class_scores, axis=1, keepdims=True))
+                probabilities = exp_scores / np.sum(exp_scores, axis=1, keepdims=True)
+
+                # Get predictions - find which class has highest score
+                predicted_indices = np.argmax(class_scores, axis=1)
+
+                # Convert indices back to original class values using class_labels
+                predictions = []
+                for idx in predicted_indices:
+                    if 0 <= idx < len(self.class_labels) - 1:  # -1 because index 0 is margin
+                        class_val = self.class_labels[idx + 1]  # +1 because index 0 is margin
+                        predictions.append(class_val)
+                    else:
+                        # Fallback: use first class
+                        predictions.append(self.class_labels[1] if len(self.class_labels) > 1 else 1.0)
+
+                # Convert to probability dictionaries
+                prob_dicts = []
+                for prob_row in probabilities:
+                    prob_dict = {}
+                    for k in range(1, min(self.outnodes + 1, len(prob_row) + 1)):
+                        class_val = self.class_labels[k]
+                        if self.class_encoder.is_fitted:
+                            # Use the original class representation from encoder
+                            class_name = self.class_encoder.encoded_to_class.get(class_val, f"Class_{k}")
+                        else:
+                            class_name = f"Class_{k}"
+                        prob_dict[class_name] = float(prob_row[k-1])
+                    prob_dicts.append(prob_dict)
+
+                return predictions, prob_dicts
+            except Exception as e:
+                self.log(f"Orthogonal prediction failed: {e}")
+                # Fallback to standard prediction
+                return self.predict_batch(features_batch)
+        else:
+            # Fallback to standard method
+            return self.predict_batch(features_batch)
+
+    def tensor_evaluate(self, features_batches, encoded_targets_batches):
+        """Evaluate tensor model accuracy with robust type handling"""
+        correct_predictions = 0
+        total_samples = 0
+        all_predictions = []
+
+        for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
+            # Use orthogonal prediction for tensor mode
+            predictions, probabilities = self.orthogonal_predict(features_batch)
+
+            batch_size = len(features_batch)
+            total_samples += batch_size
+
+            # Convert predictions to encoded format for comparison - TYPE SAFE
+            try:
+                # Direct conversion if predictions are already encoded
+                if predictions and all(isinstance(p, (int, float, np.number)) for p in predictions):
+                    encoded_predictions = predictions
+                else:
+                    # Use encoder for conversion
+                    encoded_predictions = self.class_encoder.transform(predictions)
+            except Exception as e:
+                self.log(f"⚠️ Prediction encoding failed, using fallback: {e}")
+                # Fallback: assume predictions are already encoded
+                encoded_predictions = [float(p) if isinstance(p, (int, float, np.number)) else 1.0 for p in predictions]
+
+            for i in range(batch_size):
+                if i < len(encoded_predictions):
+                    predicted = encoded_predictions[i]
+                else:
+                    predicted = 1.0  # Default fallback
+
+                actual = targets_batch[i]
+                all_predictions.append(predicted)
+
+                # Check if prediction is correct (using margin)
+                if abs(actual - predicted) <= self.class_labels[0]:
+                    correct_predictions += 1
+
+        accuracy = (correct_predictions / total_samples) * 100 if total_samples > 0 else 0
+        return accuracy, correct_predictions, all_predictions
+
+
+    def build_tensor_transformation(self, features_batches, encoded_targets_batches):
+        """
+        Build orthogonal tensor transformation instead of iterative learning
+        FIXED: Correct method signature
+        """
+        self.log("Building tensor space transformation...")
+
+        # Combine all batches
+        all_features = np.vstack(features_batches)
+        all_targets = np.concatenate(encoded_targets_batches)
+
+        n_samples, n_features = all_features.shape
+        n_classes = len(np.unique(all_targets))
+
+        # Step 1: Create feature-class correlation tensor
+        feature_class_tensor = self._build_correlation_tensor(all_features, all_targets, n_features, n_classes)
+
+        # Step 2: Perform orthogonal decomposition
+        self.orthogonal_basis = self._tensor_orthogonal_decomposition(feature_class_tensor)
+
+        # Step 3: Build projection matrix - FIXED: Correct call with 2 arguments
+        self.weight_matrix = self._build_projection_matrix(all_features, all_targets)
+
+        # Step 4: Initialize anti_net with orthogonal projections
+        self._initialize_orthogonal_network()
+
+        self.log(f"✅ Tensor transformation built: {n_features} features → {n_classes} classes")
+        return True
+
+    def _build_projection_matrix(self, features, targets):
+        """
+        Build projection matrix that maps features to class probabilities
+        FIXED: Takes 3 arguments (self, features, targets) instead of 4
+        """
+        n_samples, n_features = features.shape
+        n_classes = len(np.unique(targets))
+
+        # Create one-hot encoded targets
+        target_one_hot = np.zeros((n_samples, n_classes))
+        for i, target in enumerate(targets):
+            target_one_hot[i, int(target)-1] = 1.0
+
+        # Solve for projection matrix: features @ W = target_one_hot
+        # Using ridge regression for stability
+        alpha = 0.1  # Regularization
+        W = np.linalg.solve(
+            features.T @ features + alpha * np.eye(n_features),
+            features.T @ target_one_hot
+        )
+
+        return W
+
+    def _build_correlation_tensor(self, features, targets, n_features, n_classes):
+        """
+        Build feature-class correlation tensor instead of iterative counting
+        """
+        resol = self.config.get('resol', 100)
+        correlation_tensor = np.zeros((n_features+2, resol+2, n_features+2, resol+2, n_classes+2))
+
+        # Discretize features into bins
+        feature_bins = {}
+        for i in range(n_features):
+            feature_min = np.min(features[:, i])
+            feature_max = np.max(features[:, i])
+            bins = np.linspace(feature_min, feature_max, resol)
+            feature_bins[i] = bins
+
+        # Build correlation counts in one pass (no iteration!)
+        for sample_idx in range(len(features)):
+            sample_features = features[sample_idx]
+            target_class = int(targets[sample_idx])
+
+            # For each feature pair, update correlation counts
+            for i in range(n_features):
+                # Find bin for feature i
+                bin_i = np.digitize(sample_features[i], feature_bins[i])
+                bin_i = np.clip(bin_i, 1, resol)
+
+                for j in range(i+1, n_features):  # Only upper triangle for efficiency
+                    # Find bin for feature j
+                    bin_j = np.digitize(sample_features[j], feature_bins[j])
+                    bin_j = np.clip(bin_j, 1, resol)
+
+                    # Update correlation tensor - this replaces iterative anti_net updates
+                    correlation_tensor[i+1, bin_i, j+1, bin_j, target_class] += 1
+                    correlation_tensor[j+1, bin_j, i+1, bin_i, target_class] += 1  # Symmetric
+
+        return correlation_tensor
+
+
+    def _tensor_orthogonal_decomposition(self, correlation_tensor):
+        """
+        Perform orthogonal decomposition of the correlation tensor with optimal variance threshold
+        """
+        n_features = correlation_tensor.shape[0] - 2
+        n_classes = correlation_tensor.shape[4] - 2
+
+        # Reshape tensor for decomposition
+        tensor_flat = correlation_tensor[1:n_features+1, 1:-1, 1:n_features+1, 1:-1, 1:n_classes+1]
+        tensor_2d = tensor_flat.reshape(n_features * (self.config['resol']),
+                                      n_features * (self.config['resol']) * n_classes)
+
+        # Perform SVD for orthogonal basis
+        U, s, Vt = np.linalg.svd(tensor_2d, full_matrices=False)
+
+        # Calculate optimal variance threshold based on data characteristics
+        optimal_threshold = self._calculate_optimal_variance_threshold(s, n_features, n_classes)
+
+        # Keep principal components that explain optimal variance
+        explained_variance = np.cumsum(s) / np.sum(s)
+        n_components = np.argmax(explained_variance >= optimal_threshold) + 1
+
+        # Ensure we don't take too many components (avoid overfitting)
+        max_reasonable_components = min(n_features * 10, len(s))  # Limit to avoid explosion
+        n_components = min(n_components, max_reasonable_components)
+
+        orthogonal_basis = U[:, :n_components]
+
+        self.log(f"🧠 Optimal orthogonal decomposition:")
+        self.log(f"   Components: {n_components} (max reasonable: {max_reasonable_components})")
+        self.log(f"   Variance explained: {explained_variance[n_components-1]:.3%}")
+        self.log(f"   Optimal threshold: {optimal_threshold:.3%}")
+        self.log(f"   Singular values range: {s[0]:.3f} to {s[-1]:.3f}")
+
+        return orthogonal_basis
+
+    def _calculate_optimal_variance_threshold(self, singular_values, n_features, n_classes):
+        """
+        Calculate optimal variance threshold based on data characteristics
+        Higher thresholds for simpler problems, adaptive for complex ones
+        """
+        total_variance = np.sum(singular_values)
+
+        # Calculate data complexity metrics
+        variance_ratio = singular_values[0] / total_variance if len(singular_values) > 0 else 0
+        effective_rank = np.sum(singular_values > 1e-10)  # Numerical rank
+
+        # Base threshold: higher for simpler problems (first component explains a lot)
+        if variance_ratio > 0.5:
+            # Simple problem - first component dominates
+            base_threshold = 0.98  # Very high threshold
+        elif variance_ratio > 0.3:
+            # Moderately complex
+            base_threshold = 0.95
+        else:
+            # Complex problem - need more components
+            base_threshold = 0.90
+
+        # Adjust based on feature-to-class ratio
+        feature_class_ratio = n_features / max(n_classes, 1)
+        if feature_class_ratio > 10:
+            # High dimensionality - be more conservative
+            base_threshold = min(base_threshold, 0.92)
+        elif feature_class_ratio < 2:
+            # Low dimensionality - can be more aggressive
+            base_threshold = max(base_threshold, 0.85)
+
+        # Adjust based on effective rank
+        max_possible_components = len(singular_values)
+        if effective_rank < max_possible_components * 0.3:
+            # Low effective rank - problem is simpler than it appears
+            base_threshold = min(base_threshold + 0.03, 0.99)
+
+        self.log(f"🔧 Variance threshold calculation:")
+        self.log(f"   First component ratio: {variance_ratio:.3f}")
+        self.log(f"   Feature/class ratio: {feature_class_ratio:.2f}")
+        self.log(f"   Effective rank: {effective_rank}/{max_possible_components}")
+        self.log(f"   Final threshold: {base_threshold:.3%}")
+
+        return base_threshold
+
+    def _build_projection_matrix(self, features, targets):
+        """
+        Build projection matrix with enhanced regularization for better generalization
+        """
+        n_samples, n_features = features.shape
+        n_classes = len(np.unique(targets))
+
+        # Create one-hot encoded targets
+        target_one_hot = np.zeros((n_samples, n_classes))
+        for i, target in enumerate(targets):
+            class_index = int(target) - 1
+            if 0 <= class_index < n_classes:
+                target_one_hot[i, class_index] = 1.0
+
+        # Enhanced regularization based on data characteristics
+        condition_number = np.linalg.cond(features.T @ features)
+
+        # Adaptive regularization strength
+        if condition_number > 1e10:
+            alpha = 1.0  # Strong regularization for ill-conditioned problems
+        elif condition_number > 1e6:
+            alpha = 0.5  # Moderate regularization
+        elif condition_number > 1e3:
+            alpha = 0.1  # Light regularization
+        else:
+            alpha = 0.01  # Minimal regularization for well-conditioned problems
+
+        # Add class balancing for imbalanced datasets
+        class_counts = np.sum(target_one_hot, axis=0)
+        class_weights = 1.0 / (class_counts + 1e-8)
+        class_weights = class_weights / np.sum(class_weights)
+
+        # Apply class weights
+        weighted_targets = target_one_hot * class_weights
+
+        # Solve for projection matrix with enhanced regularization
+        XTX = features.T @ features
+        XTY = features.T @ weighted_targets
+
+        # Add regularization to improve generalization
+        W = np.linalg.solve(
+            XTX + alpha * np.eye(n_features),
+            XTY
+        )
+
+        self.log(f"🔧 Enhanced projection matrix:")
+        self.log(f"   Condition number: {condition_number:.3e}")
+        self.log(f"   Regularization alpha: {alpha}")
+        self.log(f"   Matrix shape: {W.shape}")
+        self.log(f"   Class distribution: {class_counts}")
+
+        return W
+
+    def _initialize_orthogonal_network(self):
+        """
+        Initialize anti_net and anti_wts using orthogonal projections
+        """
+        n_features = self.innodes
+        resol = self.config.get('resol', 100)
+        n_classes = self.outnodes
+
+        # Initialize with orthogonal structure
+        self.anti_net = np.ones((n_features+2, resol+2, n_features+2, resol+2, n_classes+2), dtype=np.int32)
+        self.anti_wts = np.ones((n_features+2, resol+2, n_features+2, resol+2, n_classes+2), dtype=np.float32)
+
+        # Project orthogonal basis into the network structure
+        if self.orthogonal_basis is not None:
+            basis_3d = self.orthogonal_basis.reshape(n_features, resol, -1)
+
+            for k in range(1, n_classes+1):
+                for comp_idx in range(basis_3d.shape[2]):
+                    component = basis_3d[:, :, comp_idx]
+
+                    # Distribute component weights across the network
+                    for i in range(1, n_features+1):
+                        for j in range(1, resol+1):
+                            weight_val = abs(component[i-1, j-1])
+                            if weight_val > 0:
+                                # Spread influence to related features
+                                for l in range(1, n_features+1):
+                                    if l != i:
+                                        influence = weight_val * 0.1  # Reduced influence
+                                        self.anti_wts[i, j, l, 1, k] += influence
+                                        self.anti_wts[l, 1, i, j, k] += influence
+
+
+    def tensor_train(self, train_file: str, test_file: Optional[str] = None,
+                    use_csv: bool = True, target_column: Optional[str] = None,
+                    feature_columns: Optional[List[str]] = None):
+        """
+        Single-pass tensor transformation training with robust type handling
+        """
+        self.log("🧠 Starting tensor space transformation training...")
+
+        # Load data
+        features_batches, targets_batches, feature_columns_used, original_targets_batches = self.load_data(
+            train_file, target_column, feature_columns
+        )
+
+        if not features_batches:
+            self.log("No training data loaded")
+            return False
+
+        # Store feature configuration
+        self.feature_columns = feature_columns_used
+        self.target_column = target_column if target_column else ""
+
+        # Fit encoder and determine architecture
+        all_original_targets = np.concatenate(original_targets_batches) if original_targets_batches else np.array([])
+        self.class_encoder.fit(all_original_targets)
+
+        # Log encoder information for debugging
+        self.log(f"🔧 Encoder configuration:")
+        self.log(f"   Original dtype: {getattr(self.class_encoder, 'original_dtype', 'unknown')}")
+        self.log(f"   Class mappings: {len(self.class_encoder.class_to_encoded)}")
+
+        encoded_targets_batches = []
+        for batch in original_targets_batches:
+            encoded_batch = self.class_encoder.transform(batch)
+            encoded_targets_batches.append(encoded_batch)
+
+        self.innodes = len(feature_columns_used)
+        self.outnodes = len(self.class_encoder.get_encoded_classes())
+
+        # Initialize arrays
+        resol = self.config.get('resol', 100)
+        self.initialize_arrays(self.innodes, resol, self.outnodes)
+
+        # Set up class_labels with encoded values
+        encoded_classes = self.class_encoder.get_encoded_classes()
+        self.class_labels[0] = self.config.get('margin', 0.2)
+        for i, encoded_val in enumerate(encoded_classes, 1):
+            self.class_labels[i] = float(encoded_val)
+
+        # SINGLE PASS: Build tensor transformation
+        start_time = time.time()
+        success = self.build_tensor_transformation(features_batches, encoded_targets_batches)
+        training_time = time.time() - start_time
+
+        if not success:
+            self.log("❌ Tensor transformation failed")
+            return False
+
+        # Enhanced evaluation with robust type handling
+        accuracy, correct_predictions, predictions = self.tensor_evaluate(features_batches, encoded_targets_batches)
+        total_samples = sum(len(batch) for batch in features_batches)
+
+        self.is_trained = True
+        self.best_accuracy = accuracy
+
+        self.log(f"✅ Tensor training completed in {training_time:.2f}s")
+        self.log(f"✅ Final Accuracy = {accuracy:.2f}% ({correct_predictions}/{total_samples})")
+        self.log(f"✅ Feature configuration: {len(self.feature_columns)} features")
+
+        return True
+
 class DBNNVisualizer:
     """
-    Standalone visualization class that can be imported and used with DBNNCore
-    Provides standardized protocols for visualization
+    Enhanced visualization class with interactive 3D capabilities
+    All existing features preserved with new interactive 3D visualization
     """
 
     def __init__(self):
         self.training_history = []
         self.visualization_data = {}
+        self.tensor_snapshots = []
+
+        # NEW: Interactive 3D visualization components
+        self.feature_space_snapshots = []
+        self.feature_names = []
+        self.class_names = []
+        self.current_iteration = 0
+
+    # =========================================================================
+    # NEW INTERACTIVE 3D VISUALIZATION METHODS
+    # =========================================================================
+
+    def capture_feature_space_snapshot(self, features, targets, predictions, iteration,
+                                     feature_names=None, class_names=None):
+        """Capture feature space state for interactive 3D visualization"""
+
+        if feature_names is None:
+            feature_names = [f'Feature_{i+1}' for i in range(features.shape[1])]
+        if class_names is None:
+            unique_targets = np.unique(targets)
+            class_names = [f'Class_{int(t)}' for t in unique_targets]
+
+        snapshot = {
+            'iteration': iteration,
+            'features': features.copy(),
+            'targets': targets.copy(),
+            'predictions': predictions.copy(),
+            'feature_names': feature_names,
+            'class_names': class_names,
+            'timestamp': time.time()
+        }
+
+        self.feature_space_snapshots.append(snapshot)
+        self.feature_names = feature_names
+        self.class_names = class_names
+
+        return snapshot
+
+    def generate_interactive_3d_visualization(self, output_file="interactive_3d_visualization.html"):
+        """Generate complete interactive 3D visualization with controls"""
+        try:
+            import plotly.graph_objects as go
+            import plotly.express as px
+
+            if not self.feature_space_snapshots:
+                print("No feature space snapshots available for 3D visualization")
+                return None
+
+            # Create the main visualization with frames for each iteration
+            fig = go.Figure()
+
+            # Create frames for animation
+            frames = []
+            for i, snapshot in enumerate(self.feature_space_snapshots):
+                frame_fig = go.Figure()
+                self._add_3d_snapshot_to_plot(frame_fig, snapshot)
+
+                frame = go.Frame(
+                    data=frame_fig.data,
+                    name=f'frame_{i}',
+                    layout=go.Layout(
+                        title=f"Iteration {snapshot['iteration']}"
+                    )
+                )
+                frames.append(frame)
+
+            # Add first frame data
+            if frames:
+                for trace in frames[0].data:
+                    fig.add_trace(trace)
+
+            # Create feature selection dropdowns
+            feature_dropdowns = self._create_feature_dropdowns()
+
+            # Create iteration slider
+            iteration_slider = self._create_iteration_slider()
+
+            # Update layout with all controls
+            fig.update_layout(
+                title={
+                    'text': "DBNN Interactive 3D Feature Space Visualization",
+                    'x': 0.5,
+                    'xanchor': 'center',
+                    'font': {'size': 20}
+                },
+                scene=dict(
+                    xaxis_title=self.feature_names[0],
+                    yaxis_title=self.feature_names[1],
+                    zaxis_title=self.feature_names[2],
+                    camera=dict(eye=dict(x=1.5, y=1.5, z=1.5)),
+                    aspectmode='cube'
+                ),
+                width=1200,
+                height=800,
+                updatemenus=feature_dropdowns,
+                sliders=[iteration_slider]
+            )
+
+            # Add frames for animation
+            fig.frames = frames
+
+            # Add play/pause buttons
+            fig.update_layout(
+                updatemenus=[{
+                    'type': 'buttons',
+                    'showactive': False,
+                    'buttons': [
+                        {
+                            'label': 'Play',
+                            'method': 'animate',
+                            'args': [None, {
+                                'frame': {'duration': 500, 'redraw': True},
+                                'fromcurrent': True,
+                                'transition': {'duration': 300}
+                            }]
+                        },
+                        {
+                            'label': 'Pause',
+                            'method': 'animate',
+                            'args': [[None], {
+                                'frame': {'duration': 0, 'redraw': False},
+                                'mode': 'immediate'
+                            }]
+                        }
+                    ],
+                    'x': 0.1,
+                    'y': 0.02
+                }]
+            )
+
+            fig.write_html(output_file)
+            print(f"✅ Interactive 3D visualization saved: {output_file}")
+            return output_file
+
+        except Exception as e:
+            print(f"Error creating interactive 3D visualization: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _add_3d_snapshot_to_plot(self, fig, snapshot):
+        """Add a single snapshot to the 3D plot"""
+        features = snapshot['features']
+        targets = snapshot['targets']
+        predictions = snapshot['predictions']
+        feature_names = snapshot['feature_names']
+        class_names = snapshot['class_names']
+
+        # Use first 3 features for 3D visualization
+        if features.shape[1] >= 3:
+            x, y, z = features[:, 0], features[:, 1], features[:, 2]
+        else:
+            # Pad with zeros if fewer than 3 features
+            x = features[:, 0]
+            y = features[:, 1] if features.shape[1] > 1 else np.zeros(len(features))
+            z = np.zeros(len(features))
+
+        # Create color mapping for classes
+        unique_classes = np.unique(targets)
+        colors = px.colors.qualitative.Set1
+        color_map = {}
+        for i, cls in enumerate(unique_classes):
+            color_map[cls] = colors[i % len(colors)]
+
+        # Plot each class
+        for cls in unique_classes:
+            class_mask = targets == cls
+            correct_mask = predictions[class_mask] == cls
+
+            # Get class name
+            cls_name = class_names[int(cls)] if int(cls) < len(class_names) else f'Class_{int(cls)}'
+
+            # Correct predictions
+            if np.any(correct_mask):
+                fig.add_trace(go.Scatter3d(
+                    x=x[class_mask][correct_mask],
+                    y=y[class_mask][correct_mask],
+                    z=z[class_mask][correct_mask],
+                    mode='markers',
+                    marker=dict(
+                        size=6,
+                        color=color_map[cls],
+                        opacity=0.8,
+                        line=dict(width=1, color='white')
+                    ),
+                    name=f'{cls_name} (Correct)',
+                    legendgroup=f'class_{cls}',
+                    hovertemplate=(
+                        f'<b>{cls_name}</b><br>' +
+                        f'{feature_names[0]}: %{{x:.3f}}<br>' +
+                        f'{feature_names[1]}: %{{y:.3f}}<br>' +
+                        f'{feature_names[2]}: %{{z:.3f}}<br>' +
+                        '<extra></extra>'
+                    )
+                ))
+
+            # Incorrect predictions
+            if np.any(~correct_mask):
+                fig.add_trace(go.Scatter3d(
+                    x=x[class_mask][~correct_mask],
+                    y=y[class_mask][~correct_mask],
+                    z=z[class_mask][~correct_mask],
+                    mode='markers',
+                    marker=dict(
+                        size=6,
+                        color=color_map[cls],
+                        opacity=0.8,
+                        symbol='x',
+                        line=dict(width=1, color='black')
+                    ),
+                    name=f'{cls_name} (Incorrect)',
+                    legendgroup=f'class_{cls}',
+                    hovertemplate=(
+                        f'<b>{cls_name} - MISCLASSIFIED</b><br>' +
+                        f'{feature_names[0]}: %{{x:.3f}}<br>' +
+                        f'{feature_names[1]}: %{{y:.3f}}<br>' +
+                        f'{feature_names[2]}: %{{z:.3f}}<br>' +
+                        '<extra></extra>'
+                    )
+                ))
+
+    def _create_feature_dropdowns(self):
+        """Create dropdown menus for feature selection"""
+        if not self.feature_names:
+            return []
+
+        dropdowns = []
+
+        # X-axis feature dropdown
+        dropdowns.append({
+            'buttons': [
+                {
+                    'label': self.feature_names[i],
+                    'method': 'restyle',
+                    'args': [{'x': [self.feature_space_snapshots[0]['features'][:, i]]}]
+                } for i in range(len(self.feature_names))
+            ],
+            'direction': 'down',
+            'showactive': True,
+            'x': 0.1,
+            'xanchor': 'left',
+            'y': 0.95,
+            'yanchor': 'top',
+            'bgcolor': 'lightblue',
+            'bordercolor': 'black',
+            'borderwidth': 1,
+            'font': {'size': 12}
+        })
+
+        # Y-axis feature dropdown
+        dropdowns.append({
+            'buttons': [
+                {
+                    'label': self.feature_names[i],
+                    'method': 'restyle',
+                    'args': [{'y': [self.feature_space_snapshots[0]['features'][:, i]]}]
+                } for i in range(len(self.feature_names))
+            ],
+            'direction': 'down',
+            'showactive': True,
+            'x': 0.3,
+            'xanchor': 'left',
+            'y': 0.95,
+            'yanchor': 'top',
+            'bgcolor': 'lightgreen',
+            'bordercolor': 'black',
+            'borderwidth': 1,
+            'font': {'size': 12}
+        })
+
+        # Z-axis feature dropdown
+        dropdowns.append({
+            'buttons': [
+                {
+                    'label': self.feature_names[i],
+                    'method': 'restyle',
+                    'args': [{'z': [self.feature_space_snapshots[0]['features'][:, i]]}]
+                } for i in range(len(self.feature_names))
+            ],
+            'direction': 'down',
+            'showactive': True,
+            'x': 0.5,
+            'xanchor': 'left',
+            'y': 0.95,
+            'yanchor': 'top',
+            'bgcolor': 'lightcoral',
+            'bordercolor': 'black',
+            'borderwidth': 1,
+            'font': {'size': 12}
+        })
+
+        return dropdowns
+
+    def _create_iteration_slider(self):
+        """Create iteration slider"""
+        steps = []
+
+        for i, snapshot in enumerate(self.feature_space_snapshots):
+            step = {
+                'args': [
+                    [f'frame_{i}'],
+                    {
+                        'frame': {'duration': 300, 'redraw': True},
+                        'mode': 'immediate',
+                        'transition': {'duration': 300}
+                    }
+                ],
+                'label': f'Iter {snapshot["iteration"]}',
+                'method': 'animate'
+            }
+            steps.append(step)
+
+        slider = {
+            'active': 0,
+            'currentvalue': {
+                'prefix': 'Iteration: ',
+                'xanchor': 'right',
+                'font': {'size': 16, 'color': 'black'}
+            },
+            'transition': {'duration': 300, 'easing': 'cubic-in-out'},
+            'x': 0.1,
+            'len': 0.8,
+            'xanchor': 'left',
+            'y': 0.02,
+            'yanchor': 'bottom',
+            'bgcolor': 'lightgray',
+            'bordercolor': 'black',
+            'borderwidth': 1,
+            'tickwidth': 1,
+            'steps': steps
+        }
+
+        return slider
+
+    def create_advanced_interactive_dashboard(self, output_file="advanced_dbnn_dashboard.html"):
+        """Create a comprehensive dashboard with multiple interactive views"""
+        try:
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
+            import plotly.express as px
+
+            # Create subplots with 3D and 2D views
+            fig = make_subplots(
+                rows=2, cols=2,
+                specs=[
+                    [{"type": "scatter3d"}, {"type": "scatter"}],
+                    [{"type": "scatter"}, {"type": "scatter"}]
+                ],
+                subplot_titles=(
+                    "3D Feature Space Transformation",
+                    "2D Feature Pair View",
+                    "Accuracy Progression",
+                    "Feature Correlation Heatmap"
+                ),
+                vertical_spacing=0.08,
+                horizontal_spacing=0.08
+            )
+
+            # Add data to subplots
+            self._populate_dashboard_subplots(fig)
+
+            fig.update_layout(
+                title={
+                    'text': "DBNN Advanced Interactive Dashboard",
+                    'x': 0.5,
+                    'xanchor': 'center',
+                    'font': {'size': 24}
+                },
+                width=1400,
+                height=1000,
+                showlegend=True
+            )
+
+            fig.write_html(output_file)
+            print(f"✅ Advanced interactive dashboard saved: {output_file}")
+            return output_file
+
+        except Exception as e:
+            print(f"Error creating advanced dashboard: {e}")
+            return None
+
+    def _populate_dashboard_subplots(self, fig):
+        """Populate all subplots in the dashboard"""
+        try:
+            import plotly.graph_objects as go
+            import plotly.express as px
+
+            # Subplot 1: 3D Feature Space (latest snapshot)
+            if self.feature_space_snapshots:
+                latest_snapshot = self.feature_space_snapshots[-1]
+                features = latest_snapshot['features']
+                targets = latest_snapshot['targets']
+
+                if features.shape[1] >= 3:
+                    x, y, z = features[:, 0], features[:, 1], features[:, 2]
+                else:
+                    x, y, z = features[:, 0], np.zeros(len(features)), np.zeros(len(features))
+                    if features.shape[1] > 1:
+                        y = features[:, 1]
+
+                fig.add_trace(go.Scatter3d(
+                    x=x, y=y, z=z, mode='markers',
+                    marker=dict(size=4, color=targets, colorscale='viridis'),
+                    name='Feature Space'
+                ), row=1, col=1)
+
+            # Subplot 2: 2D Feature Pair View
+            if self.feature_space_snapshots:
+                latest_snapshot = self.feature_space_snapshots[-1]
+                features = latest_snapshot['features']
+                targets = latest_snapshot['targets']
+
+                if features.shape[1] >= 2:
+                    fig.add_trace(go.Scatter(
+                        x=features[:, 0], y=features[:, 1], mode='markers',
+                        marker=dict(size=6, color=targets, colorscale='viridis'),
+                        name='Feature Pair'
+                    ), row=1, col=2)
+
+            # Subplot 3: Accuracy Progression (from training history)
+            if self.training_history:
+                rounds = [s['round'] for s in self.training_history]
+                accuracies = [s['accuracy'] for s in self.training_history]
+                fig.add_trace(go.Scatter(
+                    x=rounds, y=accuracies, mode='lines+markers',
+                    name='Accuracy', line=dict(color='blue', width=3)
+                ), row=2, col=1)
+
+            # Subplot 4: Feature Correlation Heatmap
+            if self.feature_space_snapshots:
+                latest_snapshot = self.feature_space_snapshots[-1]
+                features = latest_snapshot['features']
+
+                if features.shape[1] > 1:
+                    correlation_matrix = np.corrcoef(features.T)
+                    fig.add_trace(go.Heatmap(
+                        z=correlation_matrix,
+                        colorscale='RdBu',
+                        zmid=0,
+                        name='Correlation'
+                    ), row=2, col=2)
+
+        except Exception as e:
+            print(f"Error populating dashboard: {e}")
+
+    # =========================================================================
+    # EXISTING METHODS (unchanged - fully preserved)
+    # =========================================================================
 
     def capture_training_snapshot(self, features, targets, weights,
-                                 predictions, accuracy, round_num):
-        """Standardized protocol for capturing training state"""
+                                 predictions, accuracy, round_num,
+                                 is_tensor_mode=False, tensor_data=None):
+        """Standardized protocol for capturing training state with tensor mode support"""
         snapshot = {
             'round': round_num,
             'features': features.copy() if hasattr(features, 'copy') else features,
@@ -1727,10 +3017,343 @@ class DBNNVisualizer:
             'weights': weights.copy() if hasattr(weights, 'copy') else weights,
             'predictions': predictions.copy() if hasattr(predictions, 'copy') else predictions,
             'accuracy': accuracy,
-            'timestamp': len(self.training_history)
+            'timestamp': len(self.training_history),
+            'is_tensor_mode': is_tensor_mode
         }
+
+        if is_tensor_mode and tensor_data is not None:
+            snapshot['tensor_data'] = tensor_data
+            self.tensor_snapshots.append(snapshot)
+
         self.training_history.append(snapshot)
         return snapshot
+
+    def capture_tensor_snapshot(self, features, targets, weight_matrix,
+                               orthogonal_basis, predictions, accuracy, iteration=0):
+        """Specialized snapshot for tensor mode training"""
+        tensor_data = {
+            'weight_matrix': weight_matrix.copy() if hasattr(weight_matrix, 'copy') else weight_matrix,
+            'orthogonal_basis': orthogonal_basis.copy() if hasattr(orthogonal_basis, 'copy') else orthogonal_basis,
+            'iteration': iteration,
+            'weight_matrix_norm': np.linalg.norm(weight_matrix) if weight_matrix is not None else 0,
+            'basis_rank': np.linalg.matrix_rank(orthogonal_basis) if orthogonal_basis is not None else 0
+        }
+
+        return self.capture_training_snapshot(
+            features, targets, weight_matrix, predictions, accuracy,
+            iteration, is_tensor_mode=True, tensor_data=tensor_data
+        )
+
+    def generate_tensor_space_plot(self, snapshot_idx: int, feature_indices: List[int] = [0, 1, 2]):
+        """Generate 3D tensor feature space plot"""
+        try:
+            import plotly.graph_objects as go
+            import plotly.express as px
+            import pandas as pd
+        except ImportError:
+            print("Plotly not available for visualization")
+            return None
+
+        if snapshot_idx >= len(self.training_history):
+            return None
+
+        snapshot = self.training_history[snapshot_idx]
+        features = snapshot['features']
+        targets = snapshot['targets']
+        predictions = snapshot['predictions']
+
+        # Create DataFrame for plotting
+        df = pd.DataFrame({
+            f'Feature_{feature_indices[0]}': features[:, feature_indices[0]],
+            f'Feature_{feature_indices[1]}': features[:, feature_indices[1]],
+            f'Feature_{feature_indices[2]}': features[:, feature_indices[2]],
+            'Actual_Class': targets,
+            'Predicted_Class': predictions,
+            'Correct': targets == predictions
+        })
+
+        fig = px.scatter_3d(
+            df,
+            x=f'Feature_{feature_indices[0]}',
+            y=f'Feature_{feature_indices[1]}',
+            z=f'Feature_{feature_indices[2]}',
+            color='Predicted_Class',
+            symbol='Correct',
+            title=f'Tensor Feature Space - Iteration {snapshot["round"]}<br>Accuracy: {snapshot["accuracy"]:.2f}%',
+            opacity=0.7,
+            color_discrete_sequence=px.colors.qualitative.Set1
+        )
+
+        return fig
+
+    def generate_weight_matrix_heatmap(self, snapshot_idx: int):
+        """Generate heatmap of the weight matrix for tensor mode"""
+        try:
+            import plotly.graph_objects as go
+            import plotly.express as px
+        except ImportError:
+            print("Plotly not available for visualization")
+            return None
+
+        if (snapshot_idx >= len(self.training_history) or
+            not self.training_history[snapshot_idx].get('is_tensor_mode', False) or
+            'tensor_data' not in self.training_history[snapshot_idx]):
+            return None
+
+        snapshot = self.training_history[snapshot_idx]
+        tensor_data = snapshot['tensor_data']
+        weight_matrix = tensor_data.get('weight_matrix')
+
+        if weight_matrix is None:
+            return None
+
+        fig = go.Figure(data=go.Heatmap(
+            z=weight_matrix,
+            colorscale='RdBu',
+            zmid=0,
+            colorbar=dict(title="Weight Value")
+        ))
+
+        fig.update_layout(
+            title=f'Weight Matrix - Iteration {snapshot["round"]}',
+            xaxis_title='Output Classes',
+            yaxis_title='Input Features',
+            width=600,
+            height=500
+        )
+
+        return fig
+
+    def generate_orthogonal_basis_plot(self, snapshot_idx: int):
+        """Generate visualization of orthogonal basis components"""
+        try:
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
+        except ImportError:
+            print("Plotly not available for visualization")
+            return None
+
+        if (snapshot_idx >= len(self.training_history) or
+            not self.training_history[snapshot_idx].get('is_tensor_mode', False) or
+            'tensor_data' not in self.training_history[snapshot_idx]):
+            return None
+
+        snapshot = self.training_history[snapshot_idx]
+        tensor_data = snapshot['tensor_data']
+        orthogonal_basis = tensor_data.get('orthogonal_basis')
+
+        if orthogonal_basis is None:
+            return None
+
+        # Show first few components
+        n_components = min(6, orthogonal_basis.shape[1])
+        fig = make_subplots(
+            rows=2, cols=3,
+            subplot_titles=[f'Component {i+1}' for i in range(n_components)]
+        )
+
+        for i in range(n_components):
+            row = i // 3 + 1
+            col = i % 3 + 1
+            component = orthogonal_basis[:, i]
+
+            fig.add_trace(
+                go.Scatter(
+                    y=component,
+                    mode='lines',
+                    name=f'Component {i+1}'
+                ),
+                row=row, col=col
+            )
+
+        fig.update_layout(
+            title=f'Orthogonal Basis Components - Iteration {snapshot["round"]}',
+            height=600,
+            showlegend=False
+        )
+
+        return fig
+
+    def generate_tensor_convergence_plot(self):
+        """Generate convergence plot for tensor mode training"""
+        try:
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
+        except ImportError:
+            print("Plotly not available for visualization")
+            return None
+
+        if not self.tensor_snapshots:
+            return None
+
+        # Extract tensor-specific metrics
+        iterations = []
+        accuracies = []
+        weight_norms = []
+        basis_ranks = []
+
+        for snapshot in self.tensor_snapshots:
+            if snapshot.get('is_tensor_mode', False) and 'tensor_data' in snapshot:
+                iterations.append(snapshot['round'])
+                accuracies.append(snapshot['accuracy'])
+                tensor_data = snapshot['tensor_data']
+                weight_norms.append(tensor_data.get('weight_matrix_norm', 0))
+                basis_ranks.append(tensor_data.get('basis_rank', 0))
+
+        if not iterations:
+            return None
+
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=('Accuracy Progression', 'Weight Matrix Norm',
+                          'Basis Rank', 'Training Metrics'),
+            specs=[[{"secondary_y": False}, {"secondary_y": False}],
+                   [{"secondary_y": False}, {"secondary_y": True}]]
+        )
+
+        # Accuracy plot
+        fig.add_trace(
+            go.Scatter(x=iterations, y=accuracies, mode='lines+markers',
+                      name='Accuracy', line=dict(color='blue')),
+            row=1, col=1
+        )
+
+        # Weight norm plot
+        fig.add_trace(
+            go.Scatter(x=iterations, y=weight_norms, mode='lines+markers',
+                      name='Weight Norm', line=dict(color='red')),
+            row=1, col=2
+        )
+
+        # Basis rank plot
+        fig.add_trace(
+            go.Scatter(x=iterations, y=basis_ranks, mode='lines+markers',
+                      name='Basis Rank', line=dict(color='green')),
+            row=2, col=1
+        )
+
+        # Combined metrics
+        fig.add_trace(
+            go.Scatter(x=iterations, y=accuracies, mode='lines',
+                      name='Accuracy', line=dict(color='blue')),
+            row=2, col=2, secondary_y=False
+        )
+
+        fig.add_trace(
+            go.Scatter(x=iterations, y=weight_norms, mode='lines',
+                      name='Weight Norm', line=dict(color='red')),
+            row=2, col=2, secondary_y=True
+        )
+
+        fig.update_layout(
+            height=800,
+            title_text="Tensor Mode Training Convergence",
+            showlegend=True
+        )
+
+        fig.update_xaxes(title_text="Iteration", row=2, col=1)
+        fig.update_xaxes(title_text="Iteration", row=2, col=2)
+        fig.update_yaxes(title_text="Accuracy (%)", row=1, col=1)
+        fig.update_yaxes(title_text="Norm", row=1, col=2)
+        fig.update_yaxes(title_text="Rank", row=2, col=1)
+        fig.update_yaxes(title_text="Accuracy (%)", row=2, col=2, secondary_y=False)
+        fig.update_yaxes(title_text="Weight Norm", row=2, col=2, secondary_y=True)
+
+        return fig
+
+    def create_tensor_dashboard(self, output_file: str = "tensor_training_dashboard.html"):
+        """Create comprehensive tensor training dashboard"""
+        try:
+            from plotly.subplots import make_subplots
+            import plotly.graph_objects as go
+        except ImportError:
+            print("Plotly not available for dashboard creation")
+            return None
+
+        if not self.tensor_snapshots:
+            print("No tensor snapshots available for dashboard")
+            return None
+
+        # Create subplots
+        fig = make_subplots(
+            rows=3, cols=2,
+            subplot_titles=('Tensor Feature Space', 'Accuracy Progression',
+                          'Weight Matrix', 'Orthogonal Basis',
+                          'Convergence Metrics', 'Training Summary'),
+            specs=[[{"type": "scatter3d"}, {"type": "xy"}],
+                   [{"type": "heatmap"}, {"type": "xy"}],
+                   [{"type": "xy"}, {"type": "domain"}]],
+            vertical_spacing=0.08,
+            horizontal_spacing=0.08
+        )
+
+        # Feature Space (latest tensor snapshot)
+        feature_fig = self.generate_tensor_space_plot(-1)
+        if feature_fig:
+            for trace in feature_fig.data:
+                fig.add_trace(trace, row=1, col=1)
+
+        # Accuracy Progression
+        iterations = [s['round'] for s in self.tensor_snapshots]
+        accuracies = [s['accuracy'] for s in self.tensor_snapshots]
+        fig.add_trace(go.Scatter(x=iterations, y=accuracies, mode='lines+markers',
+                               name='Accuracy', line=dict(color='blue')), row=1, col=2)
+
+        # Weight Matrix Heatmap (latest)
+        weight_fig = self.generate_weight_matrix_heatmap(-1)
+        if weight_fig:
+            for trace in weight_fig.data:
+                fig.add_trace(trace, row=2, col=1)
+
+        # Orthogonal Basis (latest)
+        basis_fig = self.generate_orthogonal_basis_plot(-1)
+        if basis_fig:
+            for trace in basis_fig.data:
+                fig.add_trace(trace, row=2, col=2)
+
+        # Convergence Metrics
+        convergence_fig = self.generate_tensor_convergence_plot()
+        if convergence_fig:
+            for trace in convergence_fig.data:
+                fig.add_trace(trace, row=3, col=1)
+
+        # Training Summary
+        best_snapshot = max(self.tensor_snapshots, key=lambda x: x['accuracy'])
+        final_accuracy = self.tensor_snapshots[-1]['accuracy'] if self.tensor_snapshots else 0
+
+        summary_text = f"""
+        <b>Tensor Training Summary:</b><br>
+        - Total Iterations: {len(self.tensor_snapshots)}<br>
+        - Best Accuracy: {best_snapshot['accuracy']:.2f}%<br>
+        - Best Iteration: {best_snapshot['round']}<br>
+        - Final Accuracy: {final_accuracy:.2f}%<br>
+        - Features: {best_snapshot['features'].shape[1]}<br>
+        - Classes: {len(np.unique(best_snapshot['targets']))}<br>
+        - Mode: Tensor Transformation
+        """
+
+        fig.add_trace(go.Scatter(
+            x=[0, 1], y=[0, 1],
+            mode='text',
+            text=[summary_text],
+            textposition="middle center",
+            showlegend=False,
+            textfont=dict(size=11)
+        ), row=3, col=2)
+
+        fig.update_layout(
+            height=1200,
+            title_text="DBNN Tensor Training Dashboard",
+            showlegend=True
+        )
+
+        try:
+            fig.write_html(output_file)
+            print(f"Tensor training dashboard saved to: {output_file}")
+            return output_file
+        except Exception as e:
+            print(f"Error saving tensor dashboard: {e}")
+            return None
 
     def get_training_history(self):
         """Standardized protocol for accessing training history"""
@@ -1740,6 +3363,10 @@ class DBNNVisualizer:
         """Clear visualization history"""
         self.training_history = []
         self.visualization_data = {}
+        self.tensor_snapshots = []
+        self.feature_space_snapshots = []  # NEW: Clear 3D snapshots too
+        self.feature_names = []
+        self.class_names = []
 
     def generate_feature_space_plot(self, snapshot_idx: int, feature_indices: List[int] = [0, 1, 2]):
         """Generate 3D feature space plot"""
@@ -1842,87 +3469,7 @@ class DBNNVisualizer:
 
         return fig
 
-    def create_training_dashboard(self, output_file: str = "training_dashboard.html"):
-        """Create comprehensive training dashboard with support for custom paths"""
-        try:
-            from plotly.subplots import make_subplots
-            import plotly.graph_objects as go
-        except ImportError:
-            print("Plotly not available for dashboard creation")
-            return None
 
-        if len(self.training_history) < 2:
-            return None
-
-        # Ensure the directory exists
-        output_dir = os.path.dirname(output_file)
-        if output_dir and not os.path.exists(output_dir):
-            os.makedirs(output_dir, exist_ok=True)
-
-        # Create subplots
-        fig = make_subplots(
-            rows=2, cols=2,
-            subplot_titles=('Feature Space', 'Accuracy Progression',
-                          'Weight Distribution', 'Training Summary'),
-            specs=[[{"type": "scatter3d"}, {"type": "xy"}],
-                   [{"type": "xy"}, {"type": "domain"}]]
-        )
-
-        # Feature Space (latest snapshot)
-        feature_fig = self.generate_feature_space_plot(-1)
-        if feature_fig:
-            for trace in feature_fig.data:
-                fig.add_trace(trace, row=1, col=1)
-
-        # Accuracy Progression
-        rounds = [s['round'] for s in self.training_history]
-        accuracies = [s['accuracy'] for s in self.training_history]
-        fig.add_trace(go.Scatter(x=rounds, y=accuracies, mode='lines+markers',
-                               name='Accuracy'), row=1, col=2)
-
-        # Weight Distribution (latest snapshot)
-        weight_fig = self.generate_weight_distribution_plot(-1)
-        if weight_fig:
-            for trace in weight_fig.data:
-                fig.add_trace(trace, row=2, col=1)
-
-        # Training Summary
-        best_round = np.argmax(accuracies)
-        best_accuracy = accuracies[best_round]
-        final_accuracy = accuracies[-1] if accuracies else 0
-
-        summary_text = f"""
-        <b>Training Summary:</b><br>
-        - Total Rounds: {len(self.training_history)}<br>
-        - Best Accuracy: {best_accuracy:.2f}%<br>
-        - Best Round: {best_round}<br>
-        - Final Accuracy: {final_accuracy:.2f}%<br>
-        - Improvement: {final_accuracy - accuracies[0] if accuracies else 0:+.2f}%
-        """
-
-        fig.add_trace(go.Scatter(
-            x=[0, 1], y=[0, 1],
-            mode='text',
-            text=[summary_text],
-            textposition="middle center",
-            showlegend=False,
-            textfont=dict(size=12)
-        ), row=2, col=2)
-
-        fig.update_layout(
-            height=800,
-            title_text="DBNN Training Dashboard",
-            showlegend=False
-        )
-
-        try:
-            fig.write_html(output_file)
-            print(f"Training dashboard saved to: {output_file}")
-            return output_file
-        except Exception as e:
-            print(f"Error saving dashboard: {e}")
-            return None
-# Example usage and integration
 class DBNNWorkflow:
     """
     Complete workflow manager that uses DBNNCore and DBNNVisualizer
@@ -1943,7 +3490,13 @@ class DBNNWorkflow:
 
         # Training
         success = self.core.train_with_early_stopping(
-            train_file, test_file, use_csv, target_column, feature_columns
+            train_file,
+            test_file,
+            use_csv,
+            target_column,
+            feature_columns,
+            enable_interactive_viz=True,      # Enable 3D visualization
+            viz_capture_interval=5            # Capture every 5 iterations
         )
 
         if not success:
@@ -2060,6 +3613,15 @@ class EnhancedDBNNInterface:
         # Setup configuration tab
         self.setup_configuration_tab()
 
+
+    def toggle_tensor_mode(self):
+        """Toggle between tensor and standard mode"""
+        if self.core:
+            self.core.enable_tensor_mode(self.tensor_mode.get())
+            mode_text = "Complex Tensor Mode" if self.tensor_mode.get() else "Standard Iterative Mode"
+            self.tensor_info.config(text=f"Current: {mode_text}")
+            self.log(f"Switched to {mode_text}")
+
     def setup_main_tab(self):
         """Setup the main working tab"""
         main_frame = ttk.Frame(self.notebook)
@@ -2097,7 +3659,7 @@ class EnhancedDBNNInterface:
 
         # Model name - auto-generated based on data file
         ttk.Label(config_frame, text="Model Name:").grid(row=0, column=0, sticky='w')
-        self.model_name = tk.StringVar(value="my_model")  # Default, will be updated when file is loaded
+        self.model_name = tk.StringVar(value="my_model")
         self.model_name_entry = ttk.Entry(config_frame, textvariable=self.model_name, width=30)
         self.model_name_entry.grid(row=0, column=1, sticky='w', padx=5, columnspan=2)
 
@@ -2118,6 +3680,31 @@ class EnhancedDBNNInterface:
             var = tk.StringVar(value=default)
             setattr(self, name, var)
             ttk.Entry(config_frame, textvariable=var, width=8).grid(row=1, column=i*2+1, sticky='w', padx=5)
+
+        # Learning Mode section
+        tensor_frame = ttk.LabelFrame(left_frame, text="Learning Mode", padding="5")
+        tensor_frame.pack(fill='x', pady=5)
+
+        self.tensor_mode = tk.BooleanVar(value=False)
+        tensor_check = ttk.Checkbutton(
+            tensor_frame,
+            text="Enable Complex Tensor Mode (Experimental)",
+            variable=self.tensor_mode,
+            command=self.toggle_tensor_mode
+        )
+        tensor_check.pack(anchor='w', pady=2)
+
+        # Tooltip for tensor mode
+        self.create_tooltip(tensor_check,
+            "Tensor Mode: Single-pass orthogonal projection\n"
+            "Standard Mode: Iterative error-correction learning\n\n"
+            "Tensor mode is faster but may have different accuracy characteristics"
+        )
+
+        # Tensor info label
+        self.tensor_info = ttk.Label(tensor_frame, text="Current: Standard Iterative Mode",
+                                   foreground="blue", font=('Arial', 9))
+        self.tensor_info.pack(anchor='w')
 
         # Enhanced feature selection
         self.feature_frame = ttk.LabelFrame(left_frame, text="Feature Selection", padding="5")
@@ -2151,7 +3738,7 @@ class EnhancedDBNNInterface:
         self.feature_canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
-        self.feature_vars = {}  # Dictionary to store checkbox variables
+        self.feature_vars = {}
 
         # Selection controls
         selection_frame = ttk.Frame(self.feature_frame)
@@ -2312,6 +3899,7 @@ class EnhancedDBNNInterface:
         info_label = ttk.Label(config_frame, text=info_text, justify=tk.LEFT, foreground="blue",
                               font=('Arial', 9))
         info_label.pack(pady=5)
+
 
     def create_tooltip(self, widget, text):
         """Create a tooltip for a widget"""
@@ -2574,7 +4162,7 @@ class EnhancedDBNNInterface:
         try:
             self.show_processing_indicator("Analyzing system resources...")
 
-            # Use the trained model's configuration, not external config
+            # Use the trained model's configuration
             if hasattr(self.core, 'feature_columns') and self.core.feature_columns:
                 training_features = self.core.feature_columns
                 self.log("=== PREDICTION USING TRAINED MODEL ===")
@@ -2585,20 +4173,19 @@ class EnhancedDBNNInterface:
                 self.hide_processing_indicator()
                 return
 
-            # Detect resources and calculate optimal parameters
-            resources = self.core.detect_system_resources()
-            opt_params = self.core.calculate_optimal_parameters(resources, "prediction")
+            # Load the ORIGINAL data first to preserve all columns
+            self.log("Loading original data with all columns...")
+            try:
+                import pandas as pd
+                original_df = pd.read_csv(predict_file)
+                self.log(f"Original data shape: {original_df.shape}")
+                self.log(f"Original columns: {list(original_df.columns)}")
+            except Exception as e:
+                self.log(f"❌ Error loading original data: {e}")
+                self.hide_processing_indicator()
+                return
 
-            self.log(f"System: {resources['cpu_cores']} CPU cores, {resources['system_memory_gb']:.1f}GB RAM")
-            if resources['has_gpu']:
-                self.log(f"GPU: {resources.get('gpu_name', 'Unknown')} with {resources['gpu_memory_gb']:.1f}GB")
-            self.log(f"Optimization: {opt_params['optimization_level']} mode")
-            self.log(f"Batch size: {opt_params['batch_size']}, Concurrent: {opt_params['max_concurrent_batches']}")
-
-            # Load data with trained model's feature configuration
-            self.show_processing_indicator("Loading data for prediction...")
-
-            # For prediction, use None for target and the trained model's features
+            # Now load just the features for prediction
             target_column = None  # No target in prediction mode
             feature_columns = training_features  # Use training features from model
 
@@ -2606,7 +4193,7 @@ class EnhancedDBNNInterface:
                 predict_file,
                 target_column=target_column,
                 feature_columns=feature_columns,
-                batch_size=opt_params['batch_size']
+                batch_size=10000
             )
 
             if not features_batches:
@@ -2616,7 +4203,7 @@ class EnhancedDBNNInterface:
 
             total_batches = len(features_batches)
             total_samples = sum(len(batch) for batch in features_batches)
-            self.log(f"Loaded {total_samples} samples in {total_batches} batches")
+            self.log(f"Loaded {total_samples} samples in {total_batches} batches for prediction")
 
             # Verify feature dimensions match the trained model
             if features_batches and len(features_batches[0]) > 0:
@@ -2633,93 +4220,75 @@ class EnhancedDBNNInterface:
                 else:
                     self.log(f"✅ Feature dimensions match: {actual_feature_count} features")
 
-            # Initialize output file
-            self._initialize_output_file(output_file, predict_file)
-
-            # Initialize performance monitoring
-            import time
-            start_time = time.time()
-            performance_stats = {
-                'batch_times': [],
-                'memory_usage': [],
-                'samples_processed': 0
-            }
-
-            # Process batches with resource-aware optimization
+            # Process batches and collect predictions
             all_predictions = []
             all_probabilities = []
-            batch_prediction_times = []
+            all_confidence_scores = []
 
             for batch_idx, features_batch in enumerate(features_batches):
-                batch_start = time.time()
+                self.show_processing_indicator(f"Predicting batch {batch_idx+1}/{total_batches}...")
 
-                # Adaptive progress updates
-                if self._should_update_progress(batch_idx, total_batches, performance_stats):
-                    memory_usage = self._get_memory_usage()
-                    elapsed = time.time() - start_time
-                    rate = performance_stats['samples_processed'] / elapsed if elapsed > 0 else 0
-
-                    self.show_processing_indicator(
-                        f"Batch {batch_idx+1}/{total_batches}\n"
-                        f"Samples: {performance_stats['samples_processed']}/{total_samples}\n"
-                        f"Rate: {rate:.1f} samples/sec\n"
-                        f"Memory: {memory_usage}"
-                    )
-
-                # Process batch using the trained model
-                predictions, probabilities = self.core.predict_batch_optimized(
-                    features_batch,
-                    clear_cache_every=opt_params['clear_cache_every']
-                )
-
-                batch_size = len(predictions)
+                predictions, probabilities = self.core.predict_batch(features_batch)
                 all_predictions.extend(predictions)
                 all_probabilities.extend(probabilities)
-                performance_stats['samples_processed'] += batch_size
 
-                # Monitor batch performance
-                batch_time = time.time() - batch_start
-                batch_prediction_times.append(batch_time)
-                performance_stats['batch_times'].append(batch_time)
+                # Calculate confidence scores (max probability)
+                for prob_dict in probabilities:
+                    if prob_dict:
+                        confidence = max(prob_dict.values())
+                    else:
+                        confidence = 0.0
+                    all_confidence_scores.append(confidence)
 
-                # Adaptive resource management
-                self._adaptive_resource_management(
-                    batch_idx, batch_prediction_times, performance_stats, opt_params
-                )
+            # Decode predictions to original class labels
+            decoded_predictions = self.core.class_encoder.inverse_transform(all_predictions)
 
-                # Periodic disk writing and memory cleanup
-                if (batch_idx % opt_params['write_to_disk_every'] == 0 or
-                    batch_idx == total_batches - 1):
+            # Log prediction distribution for debugging
+            from collections import Counter
+            prediction_counts = Counter(decoded_predictions)
+            self.log(f"📊 Prediction distribution: {dict(prediction_counts)}")
 
-                    if all_predictions:
-                        self._write_predictions_batch(
-                            output_file, all_predictions, all_probabilities,
-                            performance_stats['samples_processed'] - len(all_predictions)
-                        )
-                        # Clear memory
-                        all_predictions.clear()
-                        all_probabilities.clear()
+            # Check if we're getting all expected classes
+            expected_classes = list(self.core.class_encoder.encoded_to_class.values())
+            predicted_classes = list(prediction_counts.keys())
+            missing_classes = set(expected_classes) - set(predicted_classes)
+            if missing_classes:
+                self.log(f"⚠️ Warning: Some classes not predicted: {missing_classes}")
 
-                        # Adaptive garbage collection
-                        if self._should_collect_garbage(batch_idx, performance_stats):
-                            import gc
-                            gc.collect()
+            # Create enhanced output dataframe
+            self.log("Creating enhanced output with all original columns...")
 
-            # Final processing and summary
-            total_time = time.time() - start_time
-            self._print_performance_summary(performance_stats, total_samples, total_time)
+            # Start with the original dataframe
+            output_df = original_df.copy()
 
-            # Show prediction distribution
-            if all_predictions:  # Write any remaining predictions
-                self._write_predictions_batch(
-                    output_file, all_predictions, all_probabilities,
-                    performance_stats['samples_processed'] - len(all_predictions)
-                )
+            # Add prediction columns
+            output_df['prediction'] = decoded_predictions
+            output_df['prediction_encoded'] = all_predictions
+            output_df['confidence'] = all_confidence_scores
 
-            self.log(f"✅ Predictions saved to: {output_file}")
+            # Add probability columns for ALL classes (even if not predicted)
+            if all_probabilities and len(all_probabilities) > 0:
+                # Get all class names from the encoder
+                all_class_names = list(self.core.class_encoder.encoded_to_class.values())
 
-            # Show prediction summary
-            self._show_prediction_summary(output_file)
+                for class_name in all_class_names:
+                    prob_values = []
+                    for prob_dict in all_probabilities:
+                        prob_value = prob_dict.get(class_name, 0.0)
+                        prob_values.append(prob_value)
+                    output_df[f'prob_{class_name}'] = prob_values
+
+                self.log(f"✅ Added probability columns for {len(all_class_names)} classes")
+
+            # Save the enhanced output
+            output_df.to_csv(output_file, index=False)
+            self.log(f"✅ Enhanced predictions saved to: {output_file}")
+            self.log(f"   Original columns preserved: {len(original_df.columns)}")
+            self.log(f"   Prediction columns added: {len(output_df.columns) - len(original_df.columns)}")
+            self.log(f"   Total samples: {len(output_df)}")
+
+            # Show detailed prediction summary
+            self._show_detailed_prediction_summary(output_df, expected_classes)
 
             self.hide_processing_indicator()
 
@@ -2728,25 +4297,46 @@ class EnhancedDBNNInterface:
             self.log(f"❌ Prediction error: {e}")
             self.log(traceback.format_exc())
 
-    def _show_prediction_summary(self, output_file):
-        """Show summary of predictions made"""
+    def _show_detailed_prediction_summary(self, output_df, expected_classes):
+        """Show detailed prediction summary with class analysis - FIXED METHOD NAME"""
         try:
-            import pandas as pd
-            df = pd.read_csv(output_file)
+            total_predictions = len(output_df)
 
-            total_predictions = len(df)
-            if 'prediction' in df.columns:
-                prediction_counts = df['prediction'].value_counts()
+            self.log("\n📊 DETAILED PREDICTION SUMMARY:")
+            self.log("=" * 50)
+            self.log(f"Total predictions: {total_predictions}")
 
-                self.log("\n📊 PREDICTION SUMMARY:")
-                self.log(f"Total predictions: {total_predictions}")
-                self.log("Prediction distribution:")
-                for pred, count in prediction_counts.items():
-                    percentage = (count / total_predictions) * 100
-                    self.log(f"  {pred}: {count} ({percentage:.1f}%)")
+            # Prediction distribution
+            prediction_counts = output_df['prediction'].value_counts()
+            self.log("\nPrediction distribution:")
+            for pred, count in prediction_counts.items():
+                percentage = (count / total_predictions) * 100
+                self.log(f"  {pred}: {count} ({percentage:.1f}%)")
+
+            # Confidence statistics
+            avg_confidence = output_df['confidence'].mean()
+            min_confidence = output_df['confidence'].min()
+            max_confidence = output_df['confidence'].max()
+            self.log(f"\nConfidence statistics:")
+            self.log(f"  Average: {avg_confidence:.3f}")
+            self.log(f"  Range: {min_confidence:.3f} - {max_confidence:.3f}")
+
+            # Missing classes analysis
+            predicted_classes = set(prediction_counts.index)
+            missing_classes = set(expected_classes) - predicted_classes
+            if missing_classes:
+                self.log(f"\n⚠️  Classes NOT predicted: {missing_classes}")
+                self.log("   This may indicate:")
+                self.log("   - Class imbalance in training data")
+                self.log("   - Model needs more training")
+                self.log("   - Tensor mode convergence issues")
+            else:
+                self.log(f"\n✅ All {len(expected_classes)} classes were predicted")
+
+            self.log("=" * 50)
 
         except Exception as e:
-            self.log(f"Note: Could not generate prediction summary: {e}")
+            self.log(f"Error generating prediction summary: {e}")
 
     def _update_model_name_from_file(self):
         """Update model name based on the current data file"""
@@ -2770,10 +4360,14 @@ class EnhancedDBNNInterface:
             messagebox.showerror("Error", "Please select a training file first")
             return
 
-        # Confirm with user about overwriting
+        # Show mode information
+        mode = "TENSOR" if getattr(self.core, 'tensor_mode', False) else "STANDARD"
         result = messagebox.askyesno(
-            "Train Fresh",
-            "This will train a fresh model from scratch and overwrite any existing model.\n\nContinue?"
+            f"Train Fresh ({mode} Mode)",
+            f"This will train a fresh model using {mode} mode.\n\n"
+            f"Tensor Mode: Single-pass orthogonal projection\n"
+            f"Standard Mode: Iterative error-correction\n\n"
+            "Continue?"
         )
 
         if not result:
@@ -2785,6 +4379,10 @@ class EnhancedDBNNInterface:
 
             # Reset core to ensure fresh start
             self.initialize_core()
+
+            self.core.enable_interactive_visualization(capture_interval=5)
+            self.log("✅ Interactive 3D visualization enabled")
+
 
             # Set flag to indicate fresh training
             self.fresh_training = True
@@ -2825,6 +4423,9 @@ class EnhancedDBNNInterface:
             else:
                 self.log(f"Continuing from existing model (best accuracy: {getattr(self.core, 'best_accuracy', 0):.2f}%)")
                 # Continue from existing model
+                self.core.enable_interactive_visualization(capture_interval=5)
+                self.log("✅ Interactive 3D visualization enabled for continued training")
+
                 success = self._train_model_internal(fresh_training=False)
 
             if success:
@@ -2838,8 +4439,9 @@ class EnhancedDBNNInterface:
             self.log(f"Error: {e}")
             self.log(traceback.format_exc())
 
+
     def _train_model_internal(self, fresh_training=False):
-        """Internal training method that handles both fresh and continued training"""
+        """Internal training method that handles both fresh and continued training with tensor mode support"""
         try:
             # Load data
             if self.file_type == 'csv':
@@ -2888,202 +4490,293 @@ class EnhancedDBNNInterface:
             total_samples = sum(len(batch) for batch in features_batches)
             self.log(f"Loaded {total_samples} samples")
 
-            # For fresh training, reset the encoder and network
-            if fresh_training:
-                self.log("🔄 Initializing fresh training...")
-                # Fit encoder and setup network from scratch
+            # Check if we're in tensor mode
+            is_tensor_mode = getattr(self.core, 'tensor_mode', False) and getattr(self.core, 'tensor_core', None) is not None
+
+            if is_tensor_mode:
+                # TENSOR MODE TRAINING - Single pass transformation
+                self.log("🧠 Starting TENSOR TRANSFORMATION training...")
+                self.show_processing_indicator("Building tensor transformation...")
+
+                # Fit encoder
                 all_original_targets = np.concatenate(original_targets_batches) if original_targets_batches else np.array([])
                 self.core.class_encoder.fit(all_original_targets)
 
-                encoded_classes = self.core.class_encoder.get_encoded_classes()
-                self.log(f"Fresh network: {len(feature_columns_used)} inputs, {len(encoded_classes)} outputs")
+                # Use tensor core for training
+                success = self.core.tensor_core.tensor_train(
+                    self.current_file, None, self.file_type == 'csv',
+                    target_column, feature_columns
+                )
 
-                # Initialize arrays for fresh training
-                innodes = len(feature_columns_used)
-                outnodes = len(encoded_classes)
-                resol = int(self.resol.get())
+                if success:
+                    # Copy trained state from tensor core to main core for prediction compatibility
+                    self._sync_tensor_to_core()
 
-                # Validate dimensions before initializing arrays
-                if innodes <= 0:
-                    self.log("ERROR: No input features detected!")
+                    # AUTOMATIC MODEL SAVING AFTER TENSOR TRAINING
+                    self.log("=== Auto-saving Tensor Model ===")
+                    self.show_processing_indicator("Auto-saving tensor model...")
+
+                    # Get feature information
+                    feature_columns = self.get_selected_features() if hasattr(self, 'get_selected_features') else []
+                    target_column = self.target_col.get() if hasattr(self, 'target_col') else ""
+
+                    # Debug logging
+                    self.log(f"🔧 Auto-save feature configuration:")
+                    self.log(f"   From core.feature_columns: {feature_columns}")
+                    self.log(f"   From core.target_column: {target_column}")
+
+                    if not feature_columns:
+                        # Fallback to tensor core if main core doesn't have it
+                        if hasattr(self.core.tensor_core, 'feature_columns') and self.core.tensor_core.feature_columns:
+                            feature_columns = self.core.tensor_core.feature_columns
+                            target_column = self.core.tensor_core.target_column
+                            self.log(f"   Fallback to tensor core: {feature_columns}")
+                        else:
+                            # Final fallback to UI selection
+                            feature_columns = self.get_selected_features() if hasattr(self, 'get_selected_features') else []
+                            target_column = self.target_col.get() if hasattr(self, 'target_col') else ""
+                            self.log(f"   Fallback to UI selection: {feature_columns}")
+
+                    self.log(f"Saving model with features: {feature_columns}")
+
+                    # Use core's auto-save functionality
+                    saved_model_path = self.core.save_model_auto(
+                        model_dir="Model",
+                        data_filename=self.current_file,
+                        feature_columns=feature_columns,
+                        target_column=target_column
+                    )
+
+                    if saved_model_path:
+                        self.log(f"✅ Tensor model automatically saved to: {saved_model_path}")
+                        self.log(f"   Best accuracy: {self.core.best_accuracy:.2f}%")
+                    else:
+                        self.log("❌ Automatic tensor model saving failed!")
+
+                    # Test the model immediately after training
+                    self.log("Testing tensor model...")
+                    try:
+                        if hasattr(self.core, 'innodes') and self.core.innodes > 0:
+                            test_sample = np.random.randn(self.core.innodes)
+                            predictions, probabilities = self.core.predict_batch(test_sample.reshape(1, -1))
+                            self.log(f"✅ Post-training test - Prediction: {predictions[0]}")
+                            self.log("✅ Tensor model is ready for predictions")
+                    except Exception as e:
+                        self.log(f"❌ Post-training test failed: {e}")
+
+                    self.log("=== TENSOR TRANSFORMATION TRAINING COMPLETED ===")
+                    self.hide_processing_indicator()
+                    self.log(f"Final model: {self.core.innodes} inputs, {self.core.outnodes} outputs")
+                    self.log(f"Feature columns used: {feature_columns_used}")
+                    self.log(f"Target column: {target_column if self.file_type == 'csv' else 'last column (DAT)'}")
+
+                    encoded_classes = self.core.class_encoder.get_encoded_classes()
+                    self.log(f"Classes: {len(encoded_classes)} - {encoded_classes}")
+
+                    return True
+                else:
+                    self.log("❌ Tensor training failed!")
                     self.hide_processing_indicator()
                     return False
-                if outnodes <= 0:
-                    self.log("ERROR: No output classes detected!")
-                    self.hide_processing_indicator()
-                    return False
 
-                self.core.initialize_arrays(innodes, resol, outnodes)
+            else:
+                # STANDARD MODE TRAINING - Original iterative approach
+                # For fresh training, reset the encoder and network
+                if fresh_training:
+                    self.log("🔄 Initializing fresh training...")
+                    # Fit encoder and setup network from scratch
+                    all_original_targets = np.concatenate(original_targets_batches) if original_targets_batches else np.array([])
+                    self.core.class_encoder.fit(all_original_targets)
 
-                # Setup dmyclass
-                self.core.dmyclass[0] = float(self.margin.get())
-                for i, encoded_val in enumerate(encoded_classes, 1):
-                    self.core.dmyclass[i] = float(encoded_val)
+                    encoded_classes = self.core.class_encoder.get_encoded_classes()
+                    self.log(f"Fresh network: {len(feature_columns_used)} inputs, {len(encoded_classes)} outputs")
 
-            # Encode targets
-            encoded_targets_batches = []
-            for batch in original_targets_batches:
-                encoded_batch = self.core.class_encoder.transform(batch)
-                encoded_targets_batches.append(encoded_batch)
+                    # Initialize arrays for fresh training
+                    innodes = len(feature_columns_used)
+                    outnodes = len(encoded_classes)
+                    resol = int(self.resol.get())
 
-            # Initialize training (only for fresh training)
-            if fresh_training:
-                self.log("Initializing training parameters...")
-                omax, omin = self.core.initialize_training(features_batches, encoded_targets_batches, resol)
+                    # Validate dimensions before initializing arrays
+                    if innodes <= 0:
+                        self.log("ERROR: No input features detected!")
+                        self.hide_processing_indicator()
+                        return False
+                    if outnodes <= 0:
+                        self.log("ERROR: No output classes detected!")
+                        self.hide_processing_indicator()
+                        return False
 
-                # Build initial network
-                self.log("Building initial network...")
-                total_processed = 0
-                for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
-                    processed = self.core.process_training_batch(features_batch, targets_batch)
-                    total_processed += processed
-                    if batch_idx % 10 == 0:
-                        self.log(f"  Processed {total_processed}/{total_samples} samples")
-                        self.show_processing_indicator(f"Building network... {total_processed}/{total_samples}")
+                    self.core.initialize_arrays(innodes, resol, outnodes)
 
-                self.log(f"✅ Initial network built with {total_processed} samples")
+                    # Setup class_labels
+                    self.core.class_labels[0] = float(self.margin.get())
+                    for i, encoded_val in enumerate(encoded_classes, 1):
+                        self.core.class_labels[i] = float(encoded_val)
 
-            # Training with FIXED early stopping
-            gain = float(self.gain.get())
-            max_epochs = int(self.epochs.get())
-            patience = int(self.patience.get())
+                # Encode targets
+                encoded_targets_batches = []
+                for batch in original_targets_batches:
+                    encoded_batch = self.core.class_encoder.transform(batch)
+                    encoded_targets_batches.append(encoded_batch)
 
-            training_type = "FRESH" if fresh_training else "CONTINUED"
-            self.log(f"{training_type} TRAINING: {max_epochs} epochs, gain={gain}, patience={patience}")
+                # Initialize training (only for fresh training)
+                if fresh_training:
+                    self.log("Initializing training parameters...")
+                    omax, omin = self.core.initialize_training(features_batches, encoded_targets_batches, resol)
 
-            # Store current best accuracy for comparison
-            current_best_accuracy = getattr(self.core, 'best_accuracy', 0.0)
-            best_accuracy = current_best_accuracy
-            best_weights = self.core.anti_wts.copy() if hasattr(self.core, 'anti_wts') and self.core.anti_wts is not None else None
-            best_round = getattr(self.core, 'best_round', 0)
-            patience_counter = 0
+                    # Build initial network
+                    self.log("Building initial network...")
+                    total_processed = 0
+                    for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
+                        processed = self.core.process_training_batch(features_batch, targets_batch)
+                        total_processed += processed
+                        if batch_idx % 10 == 0:
+                            self.log(f"  Processed {total_processed}/{total_samples} samples")
+                            self.show_processing_indicator(f"Building network... {total_processed}/{total_samples}")
 
-            for rnd in range(max_epochs + 1):
-                if rnd == 0 and fresh_training:
-                    # Initial evaluation for fresh training
-                    current_accuracy, correct, _ = self.core.evaluate(features_batches, encoded_targets_batches)
-                    self.log(f"Epoch {rnd:3d}: Initial Accuracy = {current_accuracy:.2f}% ({correct}/{total_samples})")
-                    best_accuracy = current_accuracy
-                    best_weights = self.core.anti_wts.copy()
-                    best_round = rnd
-                    continue
-                elif rnd == 0 and not fresh_training:
-                    # For continued training, show current model accuracy
-                    current_accuracy, correct, _ = self.core.evaluate(features_batches, encoded_targets_batches)
-                    self.log(f"Epoch {rnd:3d}: Current Model Accuracy = {current_accuracy:.2f}% ({correct}/{total_samples})")
+                    self.log(f"✅ Initial network built with {total_processed} samples")
+
+                # Training with FIXED early stopping
+                gain = float(self.gain.get())
+                max_epochs = int(self.epochs.get())
+                patience = int(self.patience.get())
+
+                training_type = "FRESH" if fresh_training else "CONTINUED"
+                self.log(f"{training_type} TRAINING: {max_epochs} epochs, gain={gain}, patience={patience}")
+
+                # Store current best accuracy for comparison
+                current_best_accuracy = getattr(self.core, 'best_accuracy', 0.0)
+                best_accuracy = current_best_accuracy
+                best_weights = self.core.anti_wts.copy() if hasattr(self.core, 'anti_wts') and self.core.anti_wts is not None else None
+                best_round = getattr(self.core, 'best_round', 0)
+                patience_counter = 0
+
+                for rnd in range(max_epochs + 1):
+                    if rnd == 0 and fresh_training:
+                        # Initial evaluation for fresh training
+                        current_accuracy, correct, _ = self.core.evaluate(features_batches, encoded_targets_batches)
+                        self.log(f"Epoch {rnd:3d}: Initial Accuracy = {current_accuracy:.2f}% ({correct}/{total_samples})")
+                        best_accuracy = current_accuracy
+                        best_weights = self.core.anti_wts.copy()
+                        best_round = rnd
+                        continue
+                    elif rnd == 0 and not fresh_training:
+                        # For continued training, show current model accuracy
+                        current_accuracy, correct, _ = self.core.evaluate(features_batches, encoded_targets_batches)
+                        self.log(f"Epoch {rnd:3d}: Current Model Accuracy = {current_accuracy:.2f}% ({correct}/{total_samples})")
+                        if current_accuracy > best_accuracy:
+                            best_accuracy = current_accuracy
+                            best_weights = self.core.anti_wts.copy()
+                            best_round = rnd
+                        continue
+
+                    # Update processing indicator for training progress
+                    if rnd % 5 == 0:
+                        training_type_str = "Fresh" if fresh_training else "Continued"
+                        self.show_processing_indicator(f"{training_type_str} Training... Epoch {rnd}/{max_epochs}")
+
+                    # Training epoch
+                    self.core.train_epoch(features_batches, encoded_targets_batches, gain)
+
+                    # Evaluate
+                    current_accuracy, correct, predictions = self.core.evaluate(features_batches, encoded_targets_batches)
+
+                    # Update best weights only if we get a new best accuracy
                     if current_accuracy > best_accuracy:
                         best_accuracy = current_accuracy
                         best_weights = self.core.anti_wts.copy()
                         best_round = rnd
-                    continue
-
-                # Update processing indicator for training progress
-                if rnd % 5 == 0:
-                    training_type_str = "Fresh" if fresh_training else "Continued"
-                    self.show_processing_indicator(f"{training_type_str} Training... Epoch {rnd}/{max_epochs}")
-
-                # Training epoch
-                self.core.train_epoch(features_batches, encoded_targets_batches, gain)
-
-                # Evaluate
-                current_accuracy, correct, predictions = self.core.evaluate(features_batches, encoded_targets_batches)
-
-                # Update best weights only if we get a new best accuracy
-                if current_accuracy > best_accuracy:
-                    best_accuracy = current_accuracy
-                    best_weights = self.core.anti_wts.copy()
-                    best_round = rnd
-                    patience_counter = 0
-                    improvement = current_accuracy - current_best_accuracy
-                    if fresh_training:
-                        self.log(f"Epoch {rnd:3d}: Accuracy = {current_accuracy:.2f}% → NEW BEST")
+                        patience_counter = 0
+                        improvement = current_accuracy - current_best_accuracy
+                        if fresh_training:
+                            self.log(f"Epoch {rnd:3d}: Accuracy = {current_accuracy:.2f}% → NEW BEST")
+                        else:
+                            self.log(f"Epoch {rnd:3d}: Accuracy = {current_accuracy:.2f}% → NEW BEST (+{improvement:.2f}% from previous best)")
                     else:
-                        self.log(f"Epoch {rnd:3d}: Accuracy = {current_accuracy:.2f}% → NEW BEST (+{improvement:.2f}% from previous best)")
+                        patience_counter += 1
+                        improvement = current_accuracy - best_accuracy
+                        if improvement > 0:
+                            self.log(f"Epoch {rnd:3d}: Accuracy = {current_accuracy:.2f}% (+{improvement:.2f}%)")
+                        else:
+                            self.log(f"Epoch {rnd:3d}: Accuracy = {current_accuracy:.2f}%")
+
+                    # Visualization
+                    if self.visualizer and rnd % 5 == 0:
+                        sample_size = min(1000, total_samples)
+                        sample_features = np.vstack([batch[:100] for batch in features_batches])[:sample_size]
+                        sample_targets = np.concatenate([batch[:100] for batch in encoded_targets_batches])[:sample_size]
+                        sample_predictions, _ = self.core.predict_batch(sample_features)
+
+                        # Create visualization directory if it doesn't exist
+                        if self.current_file:
+                            base_name = os.path.splitext(os.path.basename(self.current_file))[0]
+                            viz_dir = f"Visualisations/{base_name}"
+                            os.makedirs(viz_dir, exist_ok=True)
+
+                        self.visualizer.capture_training_snapshot(
+                            sample_features, sample_targets, self.core.anti_wts,
+                            sample_predictions, current_accuracy, rnd
+                        )
+
+                    # Early stopping
+                    if patience_counter >= patience:
+                        self.log(f"Early stopping at epoch {rnd} (no improvement for {patience} epochs)")
+                        break
+
+                # Restore best weights
+                if best_weights is not None:
+                    self.core.anti_wts = best_weights
+                    self.log(f"Restored best weights from epoch {best_round}")
+
+                self.core.is_trained = True
+                self.core.best_accuracy = best_accuracy
+                self.core.best_round = best_round
+
+                # AUTOMATIC MODEL SAVING AFTER TRAINING
+                self.log("=== Auto-saving Trained Model ===")
+                self.show_processing_indicator("Auto-saving trained model...")
+
+                # Get feature information
+                feature_columns = self.get_selected_features() if hasattr(self, 'get_selected_features') else []
+                target_column = self.target_col.get() if hasattr(self, 'target_col') else ""
+
+                # Use core's auto-save functionality
+                saved_model_path = self.core.save_model_auto(
+                    model_dir="Model",
+                    data_filename=self.current_file,
+                    feature_columns=feature_columns,
+                    target_column=target_column
+                )
+
+                if saved_model_path:
+                    self.log(f"✅ Model automatically saved to: {saved_model_path}")
+                    self.log(f"   Best accuracy: {best_accuracy:.2f}% at epoch {best_round}")
                 else:
-                    patience_counter += 1
-                    improvement = current_accuracy - best_accuracy
-                    if improvement > 0:
-                        self.log(f"Epoch {rnd:3d}: Accuracy = {current_accuracy:.2f}% (+{improvement:.2f}%)")
-                    else:
-                        self.log(f"Epoch {rnd:3d}: Accuracy = {current_accuracy:.2f}%")
+                    self.log("❌ Automatic model saving failed!")
 
-                # Visualization
-                if self.visualizer and rnd % 5 == 0:
-                    sample_size = min(1000, total_samples)
-                    sample_features = np.vstack([batch[:100] for batch in features_batches])[:sample_size]
-                    sample_targets = np.concatenate([batch[:100] for batch in encoded_targets_batches])[:sample_size]
-                    sample_predictions, _ = self.core.predict_batch(sample_features)
+                # Test the model immediately after training
+                self.log("Testing trained model...")
+                try:
+                    if hasattr(self.core, 'innodes') and self.core.innodes > 0:
+                        test_sample = np.random.randn(self.core.innodes)
+                        predictions, probabilities = self.core.predict_batch(test_sample.reshape(1, -1))
+                        self.log(f"✅ Post-training test - Prediction: {predictions[0]}")
+                        self.log("✅ Model is ready for predictions")
+                except Exception as e:
+                    self.log(f"❌ Post-training test failed: {e}")
 
-                    # Create visualization directory if it doesn't exist
-                    if self.current_file:
-                        base_name = os.path.splitext(os.path.basename(self.current_file))[0]
-                        viz_dir = f"Visualisations/{base_name}"
-                        os.makedirs(viz_dir, exist_ok=True)
+                training_type_str = "Fresh" if fresh_training else "Continued"
+                self.log(f"=== {training_type_str.upper()} TRAINING COMPLETED ===")
+                self.hide_processing_indicator()
+                self.log(f"Best accuracy: {best_accuracy:.2f}% at epoch {best_round}")
+                self.log(f"Final model: {self.core.innodes} inputs, {self.core.outnodes} outputs")
+                self.log(f"Feature columns used: {feature_columns_used}")
+                self.log(f"Target column: {target_column if self.file_type == 'csv' else 'last column (DAT)'}")
 
-                    self.visualizer.capture_training_snapshot(
-                        sample_features, sample_targets, self.core.anti_wts,
-                        sample_predictions, current_accuracy, rnd
-                    )
+                encoded_classes = self.core.class_encoder.get_encoded_classes()
+                self.log(f"Classes: {len(encoded_classes)} - {encoded_classes}")
 
-                # Early stopping
-                if patience_counter >= patience:
-                    self.log(f"Early stopping at epoch {rnd} (no improvement for {patience} epochs)")
-                    break
-
-            # Restore best weights
-            if best_weights is not None:
-                self.core.anti_wts = best_weights
-                self.log(f"Restored best weights from epoch {best_round}")
-
-            self.core.is_trained = True
-            self.core.best_accuracy = best_accuracy
-            self.core.best_round = best_round
-
-            # AUTOMATIC MODEL SAVING AFTER TRAINING
-            self.log("=== Auto-saving Trained Model ===")
-            self.show_processing_indicator("Auto-saving trained model...")
-
-            # Get feature information
-            feature_columns = self.get_selected_features() if hasattr(self, 'get_selected_features') else []
-            target_column = self.target_col.get() if hasattr(self, 'target_col') else ""
-
-            # Use core's auto-save functionality
-            saved_model_path = self.core.save_model_auto(
-                model_dir="Model",
-                data_filename=self.current_file,
-                feature_columns=feature_columns,
-                target_column=target_column
-            )
-
-            if saved_model_path:
-                self.log(f"✅ Model automatically saved to: {saved_model_path}")
-                self.log(f"   Best accuracy: {best_accuracy:.2f}% at epoch {best_round}")
-            else:
-                self.log("❌ Automatic model saving failed!")
-
-            # Test the model immediately after training
-            self.log("Testing trained model...")
-            try:
-                if hasattr(self.core, 'innodes') and self.core.innodes > 0:
-                    test_sample = np.random.randn(self.core.innodes)
-                    predictions, probabilities = self.core.predict_batch(test_sample.reshape(1, -1))
-                    self.log(f"✅ Post-training test - Prediction: {predictions[0]}")
-                    self.log("✅ Model is ready for predictions")
-            except Exception as e:
-                self.log(f"❌ Post-training test failed: {e}")
-
-            training_type_str = "Fresh" if fresh_training else "Continued"
-            self.log(f"=== {training_type_str.upper()} TRAINING COMPLETED ===")
-            self.hide_processing_indicator()
-            self.log(f"Best accuracy: {best_accuracy:.2f}% at epoch {best_round}")
-            self.log(f"Final model: {self.core.innodes} inputs, {self.core.outnodes} outputs")
-            self.log(f"Feature columns used: {feature_columns_used}")
-            self.log(f"Target column: {target_column if self.file_type == 'csv' else 'last column (DAT)'}")
-
-            encoded_classes = self.core.class_encoder.get_encoded_classes()
-            self.log(f"Classes: {len(encoded_classes)} - {encoded_classes}")
-
-            return True
+                return True
 
         except Exception as e:
             self.hide_processing_indicator()
@@ -3092,8 +4785,54 @@ class EnhancedDBNNInterface:
             self.log(traceback.format_exc())
             return False
 
+    def _sync_tensor_to_core(self):
+        """Sync tensor core state to main core for prediction compatibility"""
+        if self.core.tensor_core and self.core.tensor_mode:
+            tensor_core = self.core.tensor_core
+
+            # Copy ALL essential state including feature configuration
+            state_attributes = [
+                'is_trained', 'best_accuracy', 'best_round', 'innodes', 'outnodes',
+                'feature_columns', 'target_column', 'class_labels', 'binloc',
+                'max_val', 'min_val', 'resolution_arr', 'anti_net', 'anti_wts'
+            ]
+
+            for attr in state_attributes:
+                if hasattr(tensor_core, attr) and getattr(tensor_core, attr) is not None:
+                    setattr(self.core, attr, getattr(tensor_core, attr))
+
+            # CRITICAL: Ensure feature_columns is properly set
+            if not hasattr(self.core, 'feature_columns') or not self.core.feature_columns:
+                # Try to get from tensor core or fallback to UI selection
+                if hasattr(tensor_core, 'feature_columns') and tensor_core.feature_columns:
+                    self.core.feature_columns = tensor_core.feature_columns
+                else:
+                    # Fallback to UI selection
+                    self.core.feature_columns = self.get_selected_features() if hasattr(self, 'get_selected_features') else []
+
+            # Ensure target_column is properly set
+            if not hasattr(self.core, 'target_column') or not self.core.target_column:
+                if hasattr(tensor_core, 'target_column') and tensor_core.target_column:
+                    self.core.target_column = tensor_core.target_column
+                else:
+                    # Fallback to UI selection
+                    self.core.target_column = self.target_col.get() if hasattr(self, 'target_col') else ""
+
+            # Ensure class encoder is properly set
+            if hasattr(tensor_core, 'class_encoder') and tensor_core.class_encoder.is_fitted:
+                self.core.class_encoder = tensor_core.class_encoder
+
+            # Log the synchronization
+            feature_count = len(self.core.feature_columns) if hasattr(self.core, 'feature_columns') else 0
+            self.log(f"✅ Tensor model synchronized to core: {feature_count} features, {self.core.outnodes} classes")
+
+            # Debug: Log what was actually synchronized
+            self.log(f"   Feature columns: {getattr(self.core, 'feature_columns', 'NOT SET')}")
+            self.log(f"   Target column: {getattr(self.core, 'target_column', 'NOT SET')}")
+            self.log(f"   is_trained: {getattr(self.core, 'is_trained', False)}")
+
     def auto_load_model(self):
-        """Automatically load model if it exists for current data file"""
+        """Automatically load model if it exists for current data file - PROPERLY FIXED"""
         if not self.current_file:
             return
 
@@ -3112,17 +4851,38 @@ class EnhancedDBNNInterface:
 
             try:
                 self.log(f"🔄 Auto-loading existing model: {latest_model}")
-                success = self.load_model_auto_config(latest_model)
 
-                if success:
-                    self.log(f"✅ Auto-loaded existing model: {latest_model}")
-                    if hasattr(self.core, 'best_accuracy'):
-                        self.log(f"   Best accuracy: {self.core.best_accuracy:.2f}%")
+                # FIX: The load_model method doesn't return a success value, it just loads
+                # We need to check if the model was loaded by verifying core state AFTER loading
+
+                # Store current core state to compare
+                was_trained_before = getattr(self.core, 'is_trained', False)
+
+                # Load the model - this method doesn't return anything, it modifies self.core
+                self.load_model(latest_model)  # This will show its own success/failure messages
+
+                # Check if the model was actually loaded by verifying core state changed
+                is_trained_after = getattr(self.core, 'is_trained', False)
+                has_innodes = hasattr(self.core, 'innodes') and self.core.innodes > 0
+
+                # FIX: Only log "failed" if the model clearly didn't load
+                if is_trained_after and has_innodes:
+                    # Model loaded successfully - the success message already came from load_model
+                    # Don't log "failed" because it already worked!
+                    pass  # Success was already logged in load_model method
                 else:
-                    self.log("❌ Failed to auto-load existing model")
+                    # Only log failure if the model didn't actually load
+                    if not was_trained_before and not is_trained_after:
+                        self.log("❌ Auto-load: Model file found but failed to load properly")
+                    else:
+                        self.log("⚠️ Auto-load: Model file found but loading had issues")
 
             except Exception as e:
-                self.log(f"⚠️ Could not auto-load model: {e}")
+                self.log(f"❌ Auto-load error: {e}")
+                import traceback
+                self.log(traceback.format_exc())
+        else:
+            self.log("ℹ️ No existing model found for auto-loading")
 
     def analyze_file(self):
         """Analyze the selected file and auto-load configuration and model"""
@@ -3249,8 +5009,8 @@ class EnhancedDBNNInterface:
             if not self.core:
                 self.initialize_core()
 
-            # Use core's auto-configuration loading
-            success = self.core.load_model_auto_config(model_path)
+            # Use core's load_model method (not load_model_auto_config since it doesn't exist)
+            success = self.core.load_model(model_path)
 
             if success:
                 # Update GUI with loaded configuration
@@ -3265,19 +5025,26 @@ class EnhancedDBNNInterface:
                 # Update main tab quick configuration
                 self.apply_core_config_to_main()
 
-                self.log("✅ Model loaded with auto-configuration")
+                self.log("✅ Model loaded successfully")
                 if hasattr(self.core, 'best_accuracy'):
                     self.log(f"   Best accuracy: {self.core.best_accuracy:.2f}%")
                 if hasattr(self.core, 'feature_columns'):
                     self.log(f"   Features: {len(self.core.feature_columns)}")
+
+                # Set tensor mode based on loaded model
+                if hasattr(self.core, 'tensor_mode'):
+                    current_mode = self.core.tensor_mode
+                    if hasattr(self, 'tensor_mode'):
+                        self.tensor_mode.set(current_mode)
+                        self.toggle_tensor_mode()
             else:
-                self.log("❌ Failed to load model with auto-configuration")
+                self.log("❌ Failed to load model")
 
             self.hide_processing_indicator()
             return success
 
         except Exception as e:
-            self.log(f"❌ Auto-configuration load error: {e}")
+            self.log(f"❌ Load error: {e}")
             self.hide_processing_indicator()
             return False
 
@@ -3532,6 +5299,17 @@ class EnhancedDBNNInterface:
             self.visualizer = DBNNVisualizer()
             self.core.attach_visualizer(self.visualizer)
 
+            # Set tensor mode based on checkbox
+            if hasattr(self, 'tensor_mode'):
+                self.core.enable_tensor_mode(self.tensor_mode.get())
+                mode_text = "Tensor" if self.tensor_mode.get() else "Standard"
+                self.log(f"DBNN core initialized in {mode_text} mode")
+            else:
+                self.log("DBNN core initialized in Standard mode")
+
+            self.log(f"Config: {config}")
+
+
             self.log("DBNN core initialized successfully")
             self.log(f"Config: {config}")
 
@@ -3627,10 +5405,10 @@ class EnhancedDBNNInterface:
 
             self.core.initialize_arrays(innodes, resol, outnodes)
 
-            # Setup dmyclass
-            self.core.dmyclass[0] = float(self.margin.get())
+            # Setup class_labels
+            self.core.class_labels[0] = float(self.margin.get())
             for i, encoded_val in enumerate(encoded_classes, 1):
-                self.core.dmyclass[i] = float(encoded_val)
+                self.core.class_labels[i] = float(encoded_val)
 
             # Encode targets
             encoded_targets_batches = []
@@ -3795,17 +5573,29 @@ class EnhancedDBNNInterface:
             try:
                 self.log(f"=== TESTING MODEL on: {test_file} ===")
 
-                # Use the trained model's configuration
+                # Use the trained model's configuration with better debugging
                 if hasattr(self.core, 'feature_columns') and self.core.feature_columns:
                     training_features = self.core.feature_columns
                     self.log(f"Using feature columns from trained model: {training_features}")
                 else:
                     self.log("❌ No feature configuration found in trained model")
+                    self.log("🔍 Debug: Available attributes in core:")
+                    core_attrs = [attr for attr in dir(self.core) if not attr.startswith('_')]
+                    for attr in sorted(core_attrs):
+                        try:
+                            value = getattr(self.core, attr)
+                            if attr in ['feature_columns', 'target_column', 'innodes', 'outnodes', 'is_trained']:
+                                self.log(f"   {attr}: {value}")
+                        except:
+                            self.log(f"   {attr}: <unable to access>")
                     return
 
                 # Load test data using model's feature configuration
-                # For testing, we need the target column to evaluate accuracy
                 target_column = self.core.target_column if hasattr(self.core, 'target_column') else ""
+
+                self.log(f"Loading test data with features: {training_features}")
+                if target_column:
+                    self.log(f"Target column: {target_column}")
 
                 features_batches, targets_batches, _, original_targets_batches = self.core.load_data(
                     test_file,
@@ -3826,6 +5616,7 @@ class EnhancedDBNNInterface:
                         self.log(f"❌ Feature dimension mismatch in test data!")
                         self.log(f"   Model expects: {expected_feature_count} features")
                         self.log(f"   Test data has: {actual_feature_count} features")
+                        self.log(f"   Expected features: {training_features}")
                         return
                     else:
                         self.log(f"✅ Feature dimensions match: {actual_feature_count} features")
@@ -4064,7 +5855,7 @@ class EnhancedDBNNInterface:
             # Compute class probabilities
             classval = compute_class_probabilities_numba(
                 vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
-                self.dmyclass, self.min_val, self.max_val, self.innodes, self.outnodes
+                self.class_labels, self.min_val, self.max_val, self.innodes, self.outnodes
             )
 
             # Find predicted class
@@ -4075,13 +5866,13 @@ class EnhancedDBNNInterface:
                     cmax = classval[k]
                     kmax = k
 
-            predicted = self.dmyclass[kmax]
+            predicted = self.class_labels[kmax]
             predictions.append(predicted)
 
             # Store probabilities
             prob_dict = {}
             for k in range(1, self.outnodes + 1):
-                class_val = self.dmyclass[k]
+                class_val = self.class_labels[k]
                 if self.class_encoder.is_fitted:
                     class_name = self.class_encoder.encoded_to_class.get(class_val, f"Class_{k}")
                 else:
@@ -4135,58 +5926,17 @@ class EnhancedDBNNInterface:
             else:
                 self.log("❌ Failed to save model")
 
+            # Add mode information to metadata
+            if hasattr(self.core, 'tensor_mode'):
+                mode_info = "tensor" if self.core.tensor_mode else "standard"
+                self.log(f"Saved model in {mode_info} mode")
+
         except Exception as e:
             self.log(f"Save error: {e}")
             self.log(traceback.format_exc())
-    def save_model_json(self):
-        """Save model in JSON format"""
-        if not self.core or not getattr(self.core, 'is_trained', False):
-            messagebox.showerror("Error", "No trained model to save")
-            return
-
-        model_path = filedialog.asksaveasfilename(
-            title="Save Model As JSON",
-            defaultextension=".json",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
-        )
-
-        if not model_path:
-            return  # User cancelled
-
-        try:
-            # Ensure .json extension
-            if not model_path.endswith('.json'):
-                model_path += '.json'
-
-            # Get feature information from UI
-            feature_columns = []
-            target_column = ""
-
-            if hasattr(self, 'get_selected_features'):
-                feature_columns = self.get_selected_features()
-            if hasattr(self, 'target_col'):
-                target_column = self.target_col.get()
-
-            success = self.core.save_model(
-                model_path,
-                feature_columns=feature_columns,
-                target_column=target_column,
-                use_json=True
-            )
-
-            if success:
-                self.log(f"✅ Model saved in JSON format: {model_path}")
-                messagebox.showinfo("Success", f"Model saved in JSON format:\n{model_path}")
-            else:
-                self.log("❌ Failed to save model in JSON format")
-                messagebox.showerror("Error", "Failed to save model in JSON format")
-
-        except Exception as e:
-            self.log(f"JSON save error: {e}")
-            messagebox.showerror("Error", f"Failed to save JSON model: {e}")
 
     def load_model(self, model_path=None):
-        """Load a previously saved model with proper error handling"""
+        """Load a previously saved model with proper error handling - FIXED VERSION"""
         # If no model_path provided, ask the user to select one
         if model_path is None:
             model_path = filedialog.askopenfilename(
@@ -4194,48 +5944,89 @@ class EnhancedDBNNInterface:
                 filetypes=[("Model files", "*.json *.bin *.gz"), ("JSON files", "*.json"), ("Binary files", "*.bin *.gz"), ("All files", "*.*")]
             )
 
-        if model_path:
-            try:
-                self.show_processing_indicator("Loading model...")
-                if not self.core:
-                    self.initialize_core()
+        if not model_path:
+            return
 
-                self.core.load_model(model_path)
-                self.model_name.set(os.path.splitext(os.path.basename(model_path))[0])
+        try:
+            self.show_processing_indicator("Loading model...")
 
-                # Verify the model was loaded correctly
-                if hasattr(self.core, 'innodes') and self.core.innodes > 0:
-                    self.log(f"Model loaded successfully")
-                    self.log(f"Model architecture: {self.core.innodes} inputs, {self.core.outnodes} outputs")
-                    self.log(f"Configuration: resolution={self.core.config.get('resol', 'N/A')}")
+            # Ensure core is initialized
+            if not self.core:
+                self.initialize_core()
 
-                    # Update UI with loaded model info
-                    if hasattr(self.core, 'class_encoder') and self.core.class_encoder.is_fitted:
-                        classes = list(self.core.class_encoder.encoded_to_class.values())
-                        self.log(f"Classes: {len(classes)} - {classes[:5]}{'...' if len(classes) > 5 else ''}")
+            self.log(f"Loading model from: {model_path}")
 
-                    # Test if model is functional
-                    self.log("Testing model functionality...")
-                    try:
-                        if self.core.innodes > 0:
-                            test_sample = np.random.randn(self.core.innodes)
-                            predictions, probabilities = self.core.predict_batch(test_sample.reshape(1, -1))
-                            self.log(f"Model test: Prediction = {predictions[0]}")
-                    except Exception as e:
-                        self.log(f"Model test failed: {e}")
-                else:
-                    self.log("ERROR: Model failed to load properly - invalid dimensions")
+            # Use core's load_model method
+            self.core.load_model(model_path)
 
-                self.log("=== Model Loading Completed ===")
-                self.hide_processing_indicator()
+            # Update model name
+            self.model_name.set(os.path.splitext(os.path.basename(model_path))[0])
 
-            except Exception as e:
-                self.log(f"Load error: {e}")
-                self.log(traceback.format_exc())
-                self.hide_processing_indicator()
+            # Verify the model was loaded correctly
+            if hasattr(self.core, 'innodes') and self.core.innodes > 0:
+                self.log("✅ Model loaded successfully")
+                self.log(f"   Architecture: {self.core.innodes} inputs, {self.core.outnodes} outputs")
+                self.log(f"   Trained: {getattr(self.core, 'is_trained', False)}")
+                self.log(f"   Best accuracy: {getattr(self.core, 'best_accuracy', 0):.2f}%")
+
+                # Update configuration with loaded model's config
+                if hasattr(self, 'config_vars') and hasattr(self.core, 'config'):
+                    for key, value in self.core.config.items():
+                        if key in self.config_vars:
+                            self.config_vars[key].set(str(value))
+                    self.log("✅ Configuration synchronized from loaded model")
+
+                # Update tensor mode
+                if hasattr(self.core, 'tensor_mode'):
+                    tensor_mode = self.core.tensor_mode
+                    if hasattr(self, 'tensor_mode'):
+                        self.tensor_mode.set(tensor_mode)
+                        mode_text = "Tensor" if tensor_mode else "Standard"
+                        self.log(f"✅ {mode_text} mode detected and set")
+
+                        # Update tensor info label
+                        if hasattr(self, 'tensor_info'):
+                            self.tensor_info.config(text=f"Current: {mode_text} Mode")
+
+                # Test model functionality
+                self.log("Testing loaded model functionality...")
+                try:
+                    if self.core.innodes > 0 and self.core.is_trained:
+                        test_sample = np.random.randn(self.core.innodes)
+                        predictions, probabilities = self.core.predict_batch(test_sample.reshape(1, -1))
+                        self.log(f"✅ Model test passed - Prediction: {predictions[0]}")
+                    else:
+                        self.log("⚠️ Model loaded but not trained or invalid dimensions")
+                except Exception as test_error:
+                    self.log(f"⚠️ Model test warning: {test_error}")
+
+            else:
+                self.log("❌ ERROR: Model failed to load properly - invalid dimensions")
+                self.log(f"   innodes: {getattr(self.core, 'innodes', 'NOT SET')}")
+                self.log(f"   outnodes: {getattr(self.core, 'outnodes', 'NOT SET')}")
+                self.log(f"   is_trained: {getattr(self.core, 'is_trained', 'NOT SET')}")
+
+            self.log("=== Model Loading Completed ===")
+            self.hide_processing_indicator()
+
+        except Exception as e:
+            self.log(f"❌ Load error: {e}")
+            self.log(traceback.format_exc())
+            self.hide_processing_indicator()
+
+            # Show detailed error information
+            error_msg = f"Failed to load model: {e}\n\n"
+            error_msg += "Possible causes:\n"
+            error_msg += "• Model file is corrupted\n"
+            error_msg += "• Model was saved with a different DBNN version\n"
+            error_msg += "• File format mismatch\n"
+            error_msg += "• Insufficient permissions to read the file"
+
+            messagebox.showerror("Load Error", error_msg)
 
     def visualize(self):
-        """Generate visualizations and save them in Visualisations/<databasename>/ folder"""
+        """Generate ALL visualizations including new interactive 3D"""
+        mode = "Tensor" if getattr(self.core, 'tensor_mode', False) else "Standard"
         if not self.visualizer or not hasattr(self.visualizer, 'training_history') or not self.visualizer.training_history:
             messagebox.showerror("Error", "No training history available for visualization")
             return
@@ -4246,7 +6037,10 @@ class EnhancedDBNNInterface:
             # Create visualization directory based on data file name
             if self.current_file:
                 base_name = os.path.splitext(os.path.basename(self.current_file))[0]
-                viz_dir = f"Visualisations/{base_name}"
+                # Detect mode for directory naming
+                is_tensor_mode = getattr(self.core, 'tensor_mode', False)
+                mode_suffix = "_tensor" if is_tensor_mode else "_standard"
+                viz_dir = f"Visualisations/{base_name}{mode_suffix}"
             else:
                 base_name = self.model_name.get().replace("Model/", "")
                 viz_dir = f"Visualisations/{base_name}"
@@ -4258,47 +6052,57 @@ class EnhancedDBNNInterface:
             viz_count = 0
             generated_files = []
 
-            # Generate accuracy plot
-            try:
-                accuracy_fig = self.visualizer.generate_accuracy_plot()
-                if accuracy_fig:
-                    accuracy_file = f"{viz_dir}/{base_name}_accuracy.html"
-                    accuracy_fig.write_html(accuracy_file)
-                    self.log(f"✓ Accuracy plot: {accuracy_file}")
-                    viz_count += 1
-                    generated_files.append(accuracy_file)
-            except Exception as e:
-                self.log(f"✗ Accuracy plot failed: {e}")
+            # FIRST: Generate NEW INTERACTIVE 3D VISUALIZATIONS
+            self.log("🎨 Generating INTERACTIVE 3D visualizations...")
 
-            # Generate feature space plot
             try:
-                if len(self.visualizer.training_history) > 0:
-                    feature_fig = self.visualizer.generate_feature_space_plot(-1)
-                    if feature_fig:
-                        feature_file = f"{viz_dir}/{base_name}_features.html"
-                        feature_fig.write_html(feature_file)
-                        self.log(f"✓ Feature space: {feature_file}")
+                # Generate interactive 3D visualization
+                interactive_3d_file = f"{viz_dir}/{base_name}_interactive_3d.html"
+                result = self.visualizer.generate_interactive_3d_visualization(interactive_3d_file)
+                if result:
+                    self.log(f"✓ Interactive 3D: {result}")
+                    viz_count += 1
+                    generated_files.append(result)
+            except Exception as e:
+                self.log(f"✗ Interactive 3D failed: {e}")
+
+            try:
+                # Generate advanced dashboard
+                advanced_dashboard_file = f"{viz_dir}/{base_name}_advanced_dashboard.html"
+                result = self.visualizer.create_advanced_interactive_dashboard(advanced_dashboard_file)
+                if result:
+                    self.log(f"✓ Advanced Dashboard: {result}")
+                    viz_count += 1
+                    generated_files.append(result)
+            except Exception as e:
+                self.log(f"✗ Advanced Dashboard failed: {e}")
+
+            # THEN: Generate standard visualizations
+            self.log("🔄 Generating STANDARD visualizations...")
+
+            # Standard mode visualizations
+            standard_viz_methods = [
+                (self.visualizer.generate_accuracy_plot, "_accuracy.html", "Accuracy Plot"),
+                (self.visualizer.generate_feature_space_plot, "_features.html", "Feature Space"),
+                (self.visualizer.generate_weight_distribution_plot, "_weights.html", "Weight Distribution")
+            ]
+
+            for viz_method, suffix, description in standard_viz_methods:
+                try:
+                    viz_fig = viz_method(-1) if viz_method != self.visualizer.generate_accuracy_plot else viz_method()
+                    if viz_fig:
+                        viz_file = f"{viz_dir}/{base_name}{suffix}"
+                        viz_fig.write_html(viz_file)
+                        self.log(f"✓ {description}: {viz_file}")
                         viz_count += 1
-                        generated_files.append(feature_file)
-            except Exception as e:
-                self.log(f"✗ Feature space failed: {e}")
+                        generated_files.append(viz_file)
+                except Exception as e:
+                    self.log(f"✗ {description} failed: {e}")
 
-            # Generate weight distribution plot
-            try:
-                weight_fig = self.visualizer.generate_weight_distribution_plot(-1)
-                if weight_fig:
-                    weight_file = f"{viz_dir}/{base_name}_weights.html"
-                    weight_fig.write_html(weight_file)
-                    self.log(f"✓ Weight distribution: {weight_file}")
-                    viz_count += 1
-                    generated_files.append(weight_file)
-            except Exception as e:
-                self.log(f"✗ Weight distribution failed: {e}")
-
-            # Generate dashboard
+            # Generate dashboard (with fix)
             try:
                 dashboard_file = f"{viz_dir}/{base_name}_dashboard.html"
-                created_file = self.visualizer.create_training_dashboard(dashboard_file)
+                created_file = self.create_training_dashboard(dashboard_file)  # Use fixed version
                 if created_file:
                     self.log(f"✓ Training dashboard: {created_file}")
                     viz_count += 1
@@ -4307,7 +6111,8 @@ class EnhancedDBNNInterface:
                 self.log(f"✗ Dashboard failed: {e}")
 
             if viz_count > 0:
-                self.log(f"=== Visualization Completed ===")
+                mode_info = "Tensor" if is_tensor_mode else "Standard"
+                self.log(f"=== {mode_info.upper()} MODE VISUALIZATION COMPLETED ===")
                 self.log(f"Generated {viz_count} visualization files in {viz_dir}")
                 self.log("Open the .html files in your web browser to view interactive plots")
 
@@ -4319,6 +6124,76 @@ class EnhancedDBNNInterface:
         except Exception as e:
             self.log(f"Visualization error: {e}")
             self.log(traceback.format_exc())
+
+    def create_training_dashboard(self, output_file: str = "training_dashboard.html"):
+        """Fixed version of training dashboard"""
+        try:
+            from plotly.subplots import make_subplots
+            import plotly.graph_objects as go
+            import numpy as np
+        except ImportError:
+            print("Plotly not available for dashboard creation")
+            return None
+
+        if len(self.visualizer.training_history) < 2:
+            return None
+
+        # Use simpler layout to avoid subplot issues
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=('Accuracy Progression', 'Feature Space',
+                          'Weight Distribution', 'Model Info'),
+            specs=[
+                [{"type": "xy"}, {"type": "scatter3d"}],
+                [{"type": "xy"}, {"type": "xy"}]
+            ]
+        )
+
+        # Accuracy Progression
+        rounds = [s['round'] for s in self.visualizer.training_history]
+        accuracies = [s['accuracy'] for s in self.visualizer.training_history]
+        fig.add_trace(go.Scatter(x=rounds, y=accuracies, mode='lines+markers',
+                               name='Accuracy', line=dict(color='blue')), row=1, col=1)
+
+        # Feature Space (if available)
+        if len(self.visualizer.training_history) > 0:
+            feature_fig = self.visualizer.generate_feature_space_plot(-1)
+            if feature_fig:
+                for trace in feature_fig.data:
+                    fig.add_trace(trace, row=1, col=2)
+
+        # Weight Distribution
+        if len(self.visualizer.training_history) > 0:
+            weight_fig = self.visualizer.generate_weight_distribution_plot(-1)
+            if weight_fig:
+                for trace in weight_fig.data:
+                    fig.add_trace(trace, row=2, col=1)
+
+        # Model Info as text
+        best_round = np.argmax(accuracies)
+        best_accuracy = accuracies[best_round]
+
+        fig.add_trace(go.Scatter(
+            x=[0, 1], y=[0.5, 0.5],
+            mode='text',
+            text=[f"Best Accuracy: {best_accuracy:.2f}%<br>Best Round: {best_round}<br>Total Rounds: {len(rounds)}"],
+            textposition="middle center",
+            showlegend=False
+        ), row=2, col=2)
+
+        fig.update_layout(
+            height=800,
+            title_text="DBNN Training Dashboard",
+            showlegend=False
+        )
+
+        try:
+            fig.write_html(output_file)
+            print(f"Training dashboard saved to: {output_file}")
+            return output_file
+        except Exception as e:
+            print(f"Error saving dashboard: {e}")
+            return None
 
     def _ask_to_open_visualizations(self, generated_files, base_name, viz_dir):
         """Ask user whether to open visualization files or folder"""
@@ -4848,7 +6723,9 @@ Start interactive mode with: python runDBNN_cmd.py --interactive
                 target_column=args.target,
                 feature_columns=args.features,
                 auto_save_model=True,  # Enable automatic saving
-                model_dir=args.model_dir
+                model_dir=args.model_dir,
+                enable_interactive_viz=True,      # Enable 3D visualization
+                viz_capture_interval=5            # Capture every 5 iterations
             )
 
             training_time = time.time() - start_time
