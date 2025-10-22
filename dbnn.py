@@ -23,6 +23,7 @@ from tkinter import ttk, filedialog, messagebox, scrolledtext
 import pandas as pd
 import traceback
 import multiprocessing as mp
+import plotly.express as px
 
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import threading
@@ -182,6 +183,3459 @@ def find_closest_bin_numba(value, binloc_row, resolution_val):
     if best_bin > 0:
         best_bin -= 1
     return best_bin
+
+class DBNNVisualizer:
+    """
+    Enhanced visualization class for DBNN with interactive 3D capabilities,
+    educational visualizations, and comprehensive training monitoring.
+
+    This class provides multiple visualization types:
+    - Standard 2D/3D plots for training monitoring
+    - Enhanced interactive 3D visualizations with animation
+    - Tensor mode specific visualizations
+    - Educational dashboards with multiple subplots
+    - Real-time training progression tracking
+    """
+
+    def __init__(self):
+        """
+        Initialize DBNNVisualizer with empty data structures for storing
+        training history and visualization data.
+        """
+        # Core training history storage
+        self.training_history = []  # List of training snapshots
+        self.visualization_data = {}  # Additional visualization metadata
+        self.tensor_snapshots = []  # Tensor-specific training data
+
+        # Enhanced data storage for advanced visualizations
+        self.feature_space_snapshots = []  # 3D feature space evolution
+        self.feature_names = []  # Names of features for labeling
+        self.current_iteration = 0
+        self.class_names = []  # Names of classes for labeling
+        self.accuracy_progression = []  # Accuracy over training rounds
+        self.weight_evolution = []  # Weight statistics over time
+        self.confusion_data = []  # Confusion matrix data
+
+        # Educational visualization data
+        self.decision_boundaries = []  # Decision boundary evolution
+        self.feature_importance_data = []  # Feature importance metrics
+        self.learning_curves = []  # Learning curve data
+        self.network_topology_data = []  # Network structure information
+
+    # =========================================================================
+    # CORE TRAINING DATA CAPTURE METHODS
+    # =========================================================================
+
+    def capture_training_snapshot(self, features, targets, weights, predictions, accuracy, round_num):
+        """
+        Capture comprehensive training snapshot for visualization and analysis.
+
+        Args:
+            features (numpy.ndarray): Feature matrix (samples x features)
+            targets (numpy.ndarray): True target values
+            weights (numpy.ndarray): Current network weights
+            predictions (numpy.ndarray): Model predictions
+            accuracy (float): Current accuracy percentage
+            round_num (int): Training iteration/round number
+
+        Returns:
+            dict: Snapshot containing all training data
+        """
+        snapshot = {
+            'round': round_num,
+            'features': features.copy() if features is not None else None,
+            'targets': targets.copy() if targets is not None else None,
+            'weights': weights.copy() if weights is not None else None,
+            'predictions': predictions.copy() if predictions is not None else None,
+            'accuracy': accuracy,
+            'timestamp': time.time()
+        }
+
+        self.training_history.append(snapshot)
+
+        # Store accuracy progression
+        self.accuracy_progression.append({
+            'round': round_num,
+            'accuracy': accuracy,
+            'timestamp': time.time()
+        })
+
+        # Store weight statistics for educational purposes
+        if weights is not None:
+            flat_weights = weights.flatten()
+            flat_weights = flat_weights[(flat_weights != 0) & (np.abs(flat_weights) < 100)]
+
+            self.weight_evolution.append({
+                'round': round_num,
+                'mean': np.mean(flat_weights) if len(flat_weights) > 0 else 0,
+                'std': np.std(flat_weights) if len(flat_weights) > 0 else 0,
+                'min': np.min(flat_weights) if len(flat_weights) > 0 else 0,
+                'max': np.max(flat_weights) if len(flat_weights) > 0 else 0
+            })
+
+        # Capture enhanced visualization data if features are available
+        if hasattr(self, 'feature_space_snapshots') and features is not None:
+            try:
+                feature_names = getattr(self, 'feature_names',
+                                      [f'Feature_{i+1}' for i in range(features.shape[1])])
+                class_names = getattr(self, 'class_names',
+                                    [f'Class_{int(c)}' for c in np.unique(targets)])
+
+                enhanced_snapshot = {
+                    'iteration': round_num,
+                    'features': features.copy(),
+                    'targets': targets.copy(),
+                    'predictions': predictions.copy(),
+                    'feature_names': feature_names,
+                    'class_names': class_names,
+                    'timestamp': time.time(),
+                    'accuracy': accuracy
+                }
+                self.feature_space_snapshots.append(enhanced_snapshot)
+            except Exception as e:
+                print(f"Enhanced visualization capture warning: {e}")
+
+        return snapshot
+
+    def capture_tensor_snapshot(self, features, targets, weight_matrix, orthogonal_basis,
+                               predictions, accuracy, iteration=0):
+        """
+        Capture specialized snapshot for tensor mode training.
+
+        Args:
+            features (numpy.ndarray): Input features
+            targets (numpy.ndarray): True targets
+            weight_matrix (numpy.ndarray): Tensor weight matrix
+            orthogonal_basis (numpy.ndarray): Orthogonal basis vectors
+            predictions (numpy.ndarray): Model predictions
+            accuracy (float): Current accuracy
+            iteration (int): Training iteration
+
+        Returns:
+            dict: Tensor-specific snapshot
+        """
+        tensor_data = {
+            'weight_matrix': weight_matrix.copy() if hasattr(weight_matrix, 'copy') else weight_matrix,
+            'orthogonal_basis': orthogonal_basis.copy() if hasattr(orthogonal_basis, 'copy') else orthogonal_basis,
+            'iteration': iteration,
+            'weight_matrix_norm': np.linalg.norm(weight_matrix) if weight_matrix is not None else 0,
+            'basis_rank': np.linalg.matrix_rank(orthogonal_basis) if orthogonal_basis is not None else 0
+        }
+
+        # Use the main snapshot method but add tensor data
+        snapshot = self.capture_training_snapshot(
+            features, targets, weight_matrix, predictions, accuracy, iteration
+        )
+        snapshot['is_tensor_mode'] = True
+        snapshot['tensor_data'] = tensor_data
+
+        self.tensor_snapshots.append(snapshot)
+        return snapshot
+
+    def capture_feature_space_snapshot(self, features, targets, predictions, iteration,
+                                     feature_names=None, class_names=None):
+        """
+        Capture feature space state for interactive 3D visualization.
+
+        Args:
+            features (numpy.ndarray): Feature matrix
+            targets (numpy.ndarray): True targets
+            predictions (numpy.ndarray): Model predictions
+            iteration (int): Training iteration
+            feature_names (list): Names of features for labeling
+            class_names (list): Names of classes for labeling
+
+        Returns:
+            dict: Feature space snapshot
+        """
+        if feature_names is None:
+            feature_names = [f'Feature_{i+1}' for i in range(features.shape[1])]
+        if class_names is None:
+            unique_targets = np.unique(targets)
+            class_names = [f'Class_{int(t)}' for t in unique_targets]
+
+        snapshot = {
+            'iteration': iteration,
+            'features': features.copy(),
+            'targets': targets.copy(),
+            'predictions': predictions.copy(),
+            'feature_names': feature_names,
+            'class_names': class_names,
+            'timestamp': time.time()
+        }
+
+        self.feature_space_snapshots.append(snapshot)
+        self.feature_names = feature_names
+        self.class_names = class_names
+
+        return snapshot
+
+    # =========================================================================
+    # ENHANCED INTERACTIVE 3D VISUALIZATION METHODS
+    # =========================================================================
+
+    def generate_animated_confusion_matrix(self, output_file="confusion_animation.html", frame_delay=500):
+        """Generate animated confusion matrix showing evolution over training iterations"""
+        try:
+            import plotly.graph_objects as go
+            import numpy as np
+            from sklearn.metrics import confusion_matrix
+            import os
+
+            if not self.feature_space_snapshots:
+                print("❌ No feature space snapshots available for confusion matrix animation")
+                return None
+
+            print(f"🔄 Generating animated confusion matrix from {len(self.feature_space_snapshots)} snapshots...")
+
+            # Collect all unique classes across all snapshots
+            unique_classes_all = set()
+            for snapshot in self.feature_space_snapshots:
+                if 'targets' in snapshot and 'predictions' in snapshot:
+                    targets = snapshot['targets']
+                    predictions = snapshot['predictions']
+                    all_labels = np.concatenate([targets, predictions])
+                    unique_classes_all.update(all_labels)
+
+            if not unique_classes_all:
+                print("❌ No class data found in snapshots")
+                return None
+
+            unique_classes = sorted(unique_classes_all)
+            class_names = [f'Class {int(cls)}' for cls in unique_classes]
+
+            print(f"📊 Found {len(unique_classes)} unique classes: {unique_classes}")
+
+            # Create frames for each snapshot
+            frames = []
+
+            for i, snapshot in enumerate(self.feature_space_snapshots):
+                if 'targets' not in snapshot or 'predictions' not in snapshot:
+                    continue
+
+                targets = snapshot['targets']
+                predictions = snapshot['predictions']
+                iteration = snapshot.get('iteration', i)
+
+                # Create confusion matrix
+                try:
+                    cm = confusion_matrix(targets, predictions, labels=unique_classes)
+
+                    # Normalize by row (true classes)
+                    cm_normalized = cm.astype('float') / (cm.sum(axis=1)[:, np.newaxis] + 1e-8)
+                    cm_normalized = np.nan_to_num(cm_normalized)
+
+                    # Create heatmap trace
+                    heatmap = go.Heatmap(
+                        z=cm_normalized,
+                        x=class_names,
+                        y=class_names,
+                        colorscale='Blues',
+                        zmin=0,
+                        zmax=1,
+                        colorbar=dict(title="Normalized<br>Probability"),
+                        hovertemplate=(
+                            'True: %{y}<br>' +
+                            'Predicted: %{x}<br>' +
+                            'Probability: %{z:.3f}<br>' +
+                            'Iteration: ' + str(iteration) + '<br>' +
+                            '<extra></extra>'
+                        ),
+                        name=f"Iteration {iteration}"
+                    )
+
+                    # Calculate accuracy for this iteration
+                    accuracy = np.mean(targets == predictions) * 100 if len(targets) > 0 else 0
+
+                    # Create frame
+                    frame = go.Frame(
+                        data=[heatmap],
+                        name=f'frame_{i}',
+                        layout=go.Layout(
+                            title_text=f"Confusion Matrix Evolution<br>Iteration {iteration} | Accuracy: {accuracy:.1f}%",
+                            annotations=[
+                                dict(
+                                    text=f'Iteration: {iteration} | Accuracy: {accuracy:.1f}%',
+                                    x=0.5, y=1.08,
+                                    xref='paper', yref='paper',
+                                    showarrow=False,
+                                    font=dict(size=14, color='darkblue')
+                                )
+                            ]
+                        )
+                    )
+                    frames.append(frame)
+
+                except Exception as e:
+                    print(f"⚠️ Could not create confusion matrix for iteration {iteration}: {e}")
+                    continue
+
+            if not frames:
+                print("❌ No valid frames created for confusion matrix animation")
+                return None
+
+            print(f"✅ Created {len(frames)} frames for confusion matrix animation")
+
+            # Create initial figure with first frame
+            fig = go.Figure(data=frames[0].data, frames=frames)
+
+            # Update layout
+            fig.update_layout(
+                title={
+                    'text': "Confusion Matrix Evolution During Training",
+                    'x': 0.5,
+                    'xanchor': 'center',
+                    'font': {'size': 20, 'color': 'darkblue'}
+                },
+                xaxis_title="Predicted Class",
+                yaxis_title="True Class",
+                width=900,
+                height=800,
+                plot_bgcolor='white',
+                paper_bgcolor='lightgray',
+                font=dict(size=12),
+                # Animation controls
+                updatemenus=[{
+                    'type': 'buttons',
+                    'showactive': False,
+                    'buttons': [
+                        {
+                            'label': '▶️ Play',
+                            'method': 'animate',
+                            'args': [
+                                None,
+                                {
+                                    'frame': {'duration': frame_delay, 'redraw': True},
+                                    'fromcurrent': True,
+                                    'transition': {'duration': 300, 'easing': 'cubic-in-out'}
+                                }
+                            ]
+                        },
+                        {
+                            'label': '⏸️ Pause',
+                            'method': 'animate',
+                            'args': [
+                                [None],
+                                {
+                                    'frame': {'duration': 0, 'redraw': False},
+                                    'mode': 'immediate'
+                                }
+                            ]
+                        },
+                        {
+                            'label': '⏭️ Next',
+                            'method': 'animate',
+                            'args': [
+                                None,
+                                {
+                                    'mode': 'next',
+                                    'frame': {'duration': frame_delay, 'redraw': True},
+                                    'transition': {'duration': 300}
+                                }
+                            ]
+                        }
+                    ],
+                    'x': 0.1,
+                    'y': 0,
+                    'xanchor': 'left',
+                    'yanchor': 'bottom',
+                    'bgcolor': 'lightblue',
+                    'bordercolor': 'navy',
+                    'borderwidth': 2
+                }]
+            )
+
+            # Add slider for manual control
+            steps = []
+            for i, snapshot in enumerate(self.feature_space_snapshots):
+                if i >= len(frames):
+                    continue
+                iteration = snapshot.get('iteration', i)
+                accuracy = np.mean(snapshot['targets'] == snapshot['predictions']) * 100 if 'targets' in snapshot and 'predictions' in snapshot else 0
+
+                step = {
+                    'args': [
+                        [f'frame_{i}'],
+                        {
+                            'frame': {'duration': 300, 'redraw': True},
+                            'mode': 'immediate',
+                            'transition': {'duration': 300}
+                        }
+                    ],
+                    'label': f'Iter {iteration}',
+                    'method': 'animate'
+                }
+                steps.append(step)
+
+            fig.update_layout(
+                sliders=[{
+                    'active': 0,
+                    'currentvalue': {
+                        'prefix': 'Iteration: ',
+                        'xanchor': 'right',
+                        'font': {'size': 16, 'color': 'black'}
+                    },
+                    'transition': {'duration': 300, 'easing': 'cubic-in-out'},
+                    'x': 0.1,
+                    'len': 0.8,
+                    'xanchor': 'left',
+                    'y': 0,
+                    'yanchor': 'top',
+                    'bgcolor': 'lightgray',
+                    'bordercolor': 'black',
+                    'borderwidth': 1,
+                    'steps': steps
+                }]
+            )
+
+            # Add educational annotations
+            fig.add_annotation(
+                text="🎓 <b>Educational Insight:</b><br>Watch how the model's confusion patterns evolve during training.<br>Perfect classification would show high values only on the diagonal.",
+                xref="paper", yref="paper",
+                x=0.02, y=0.98,
+                showarrow=False,
+                bgcolor="lightyellow",
+                bordercolor="black",
+                borderwidth=2,
+                font=dict(size=12, color='black')
+            )
+
+            # Add colorbar title
+            fig.add_annotation(
+                text="Color Intensity = Classification Probability",
+                xref="paper", yref="paper",
+                x=0.98, y=0.02,
+                showarrow=False,
+                font=dict(size=12, color='darkblue'),
+                bgcolor="white",
+                bordercolor="blue",
+                borderwidth=1
+            )
+
+            # Ensure output directory exists
+            os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+            fig.write_html(output_file)
+            print(f"✅ Animated confusion matrix saved: {output_file}")
+
+            # Print some statistics
+            if frames:
+                first_frame = frames[0]
+                last_frame = frames[-1]
+                first_acc = np.mean(self.feature_space_snapshots[0]['targets'] == self.feature_space_snapshots[0]['predictions']) * 100
+                last_acc = np.mean(self.feature_space_snapshots[-1]['targets'] == self.feature_space_snapshots[-1]['predictions']) * 100
+                print(f"📈 Accuracy progression: {first_acc:.1f}% → {last_acc:.1f}%")
+
+            return output_file
+
+        except Exception as e:
+            print(f"❌ Error creating animated confusion matrix: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+
+    def generate_feature_orthogonality_plot(self, output_file="feature_orthogonality.html"):
+        """Generate visualization showing feature orthogonality evolution"""
+        try:
+            import plotly.graph_objects as go
+            import numpy as np
+
+            if not self.feature_space_snapshots:
+                return None
+
+            # Calculate orthogonality scores over time
+            iterations = []
+            orthogonality_scores = []
+
+            for snapshot in self.feature_space_snapshots:
+                features = snapshot['features']
+                iteration = snapshot['iteration']
+
+                # Calculate feature correlation matrix
+                if features.shape[1] > 1:
+                    corr_matrix = np.corrcoef(features.T)
+                    # Measure orthogonality (lower correlation = more orthogonal)
+                    mask = ~np.eye(corr_matrix.shape[0], dtype=bool)
+                    avg_correlation = np.mean(np.abs(corr_matrix[mask]))
+                    orthogonality = 1.0 - avg_correlation
+                else:
+                    orthogonality = 0.0
+
+                iterations.append(iteration)
+                orthogonality_scores.append(orthogonality)
+
+            fig = go.Figure()
+
+            fig.add_trace(go.Scatter(
+                x=iterations, y=orthogonality_scores,
+                mode='lines+markers',
+                name='Feature Orthogonality',
+                line=dict(color='purple', width=3),
+                marker=dict(size=6),
+                hovertemplate='Iteration: %{x}<br>Orthogonality: %{y:.3f}<extra></extra>'
+            ))
+
+            fig.update_layout(
+                title="Feature Orthogonality Evolution",
+                xaxis_title="Training Iteration",
+                yaxis_title="Orthogonality Score (1 = Perfect Orthogonality)",
+                height=500,
+                showlegend=True
+            )
+
+            os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+            fig.write_html(output_file)
+            print(f"✅ Feature orthogonality plot saved: {output_file}")
+            return output_file
+
+        except Exception as e:
+            print(f"Error creating feature orthogonality plot: {e}")
+            return None
+
+    def generate_class_separation_evolution(self, output_file="class_separation.html"):
+        """Generate visualization showing class separation evolution in complex space"""
+        try:
+            import plotly.graph_objects as go
+            import numpy as np
+            from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+
+            if not self.feature_space_snapshots:
+                return None
+
+            iterations = []
+            separation_scores = []
+
+            for snapshot in self.feature_space_snapshots:
+                features = snapshot['features']
+                targets = snapshot['targets']
+                iteration = snapshot['iteration']
+
+                if len(np.unique(targets)) > 1 and features.shape[1] > 1:
+                    try:
+                        # Use LDA to measure class separation
+                        lda = LinearDiscriminantAnalysis()
+                        lda.fit(features, targets)
+                        # Use between-class variance as separation metric
+                        separation = np.trace(lda.between_class_scatter) / np.trace(lda.within_class_scatter)
+                    except:
+                        separation = 0.0
+                else:
+                    separation = 0.0
+
+                iterations.append(iteration)
+                separation_scores.append(separation)
+
+            fig = go.Figure()
+
+            fig.add_trace(go.Scatter(
+                x=iterations, y=separation_scores,
+                mode='lines+markers',
+                name='Class Separation',
+                line=dict(color='orange', width=3),
+                marker=dict(size=6),
+                hovertemplate='Iteration: %{x}<br>Separation: %{y:.3f}<extra></extra>'
+            ))
+
+            fig.update_layout(
+                title="Class Separation Evolution in Complex Space",
+                xaxis_title="Training Iteration",
+                yaxis_title="Separation Score (Higher = Better Separation)",
+                height=500,
+                showlegend=True
+            )
+
+            os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+            fig.write_html(output_file)
+            print(f"✅ Class separation evolution saved: {output_file}")
+            return output_file
+
+        except Exception as e:
+            print(f"Error creating class separation plot: {e}")
+            return None
+
+    def generate_complex_phase_diagram(self, output_file="complex_phase_diagram.html"):
+        """Generate phase diagram showing feature vectors in complex space"""
+        try:
+            import plotly.graph_objects as go
+            import plotly.express as px
+            from plotly.subplots import make_subplots
+            import numpy as np
+
+            if not self.feature_space_snapshots:
+                return None
+
+            # Use the latest snapshot
+            snapshot = self.feature_space_snapshots[-1]
+            features = snapshot['features']
+            targets = snapshot['targets']
+            iteration = snapshot['iteration']
+
+            # Sample for performance
+            sample_size = min(1000, len(features))
+            if len(features) > sample_size:
+                indices = np.random.choice(len(features), sample_size, replace=False)
+                features = features[indices]
+                targets = targets[indices]
+
+            n_features = min(features.shape[1], 6)  # Limit for visualization
+
+            # Create complex representation
+            complex_features = self._create_complex_representation(features, n_features)
+            unique_classes = np.unique(targets)
+            colors = px.colors.qualitative.Set1
+
+            # Create subplots for each feature pair
+            fig = make_subplots(
+                rows=2, cols=3,
+                subplot_titles=[f'Features {i+1}-{j+1}' for i in range(2) for j in range(3)],
+                specs=[[{'type': 'scatter'} for _ in range(3)] for _ in range(2)]
+            )
+
+            plot_idx = 0
+            for i in range(n_features):
+                for j in range(i+1, min(i+4, n_features)):
+                    if plot_idx < 6:  # Max 6 subplots
+                        row = plot_idx // 3 + 1
+                        col = plot_idx % 3 + 1
+
+                        for class_idx, cls in enumerate(unique_classes):
+                            class_mask = targets == cls
+                            if np.any(class_mask):
+                                # Get complex components
+                                real_i = complex_features[class_mask, i].real
+                                imag_i = complex_features[class_mask, i].imag
+                                real_j = complex_features[class_mask, j].real
+                                imag_j = complex_features[class_mask, j].imag
+
+                                # Create phase plot
+                                fig.add_trace(go.Scatter(
+                                    x=real_i, y=real_j,
+                                    mode='markers',
+                                    marker=dict(
+                                        size=6,
+                                        color=colors[class_idx % len(colors)],
+                                        opacity=0.7,
+                                        line=dict(width=1, color='white')
+                                    ),
+                                    name=f'Class {int(cls)}',
+                                    legendgroup=f'class_{cls}',
+                                    showlegend=(plot_idx == 0),  # Only show legend in first plot
+                                    hovertemplate=(
+                                        f'Class {int(cls)}<br>' +
+                                        f'Feature {i+1}: %{{x:.3f}}<br>' +
+                                        f'Feature {j+1}: %{{y:.3f}}<br>' +
+                                        '<extra></extra>'
+                                    )
+                                ), row=row, col=col)
+
+                        plot_idx += 1
+
+            fig.update_layout(
+                title={
+                    'text': f"Complex Phase Diagram - Iteration {iteration}",
+                    'x': 0.5,
+                    'xanchor': 'center',
+                    'font': {'size': 20}
+                },
+                height=800,
+                showlegend=True
+            )
+
+            # Add educational annotation
+            fig.add_annotation(
+                text="🎓 <b>Complex Phase Diagram</b><br>Each subplot shows the relationship between two features in complex space.<br>As training progresses, classes should separate into distinct directional patterns.",
+                xref="paper", yref="paper",
+                x=0.02, y=0.98,
+                showarrow=False,
+                bgcolor="lightyellow",
+                bordercolor="black",
+                borderwidth=1,
+                font=dict(size=12)
+            )
+
+            os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+            fig.write_html(output_file)
+            print(f"✅ Complex phase diagram saved: {output_file}")
+            return output_file
+
+        except Exception as e:
+            print(f"Error creating phase diagram: {e}")
+            return None
+
+    def generate_complex_tensor_evolution(self, output_file="complex_tensor_evolution.html", max_features=8):
+        """Generate animated visualization of complex tensor evolution showing feature orthogonality"""
+        try:
+            import plotly.graph_objects as go
+            import plotly.express as px
+            from plotly.subplots import make_subplots
+            import numpy as np
+            from sklearn.decomposition import PCA
+            import colorsys
+
+            if not self.feature_space_snapshots:
+                print("No feature space snapshots available for complex tensor visualization")
+                return None
+
+            # Collect all data across snapshots
+            all_features = []
+            all_targets = []
+            all_iterations = []
+
+            for snapshot in self.feature_space_snapshots:
+                features = snapshot['features']
+                targets = snapshot['targets']
+                iteration = snapshot['iteration']
+
+                # Sample for performance
+                sample_size = min(500, len(features))
+                if len(features) > sample_size:
+                    indices = np.random.choice(len(features), sample_size, replace=False)
+                    features = features[indices]
+                    targets = targets[indices]
+
+                all_features.append(features)
+                all_targets.extend([f"Iter {iteration}"] * len(features))
+                all_iterations.extend([iteration] * len(features))
+
+            if not all_features:
+                return None
+
+            # Combine all features
+            combined_features = np.vstack(all_features)
+            unique_classes = np.unique(np.concatenate([snapshot['targets'] for snapshot in self.feature_space_snapshots]))
+
+            # Limit features for visualization
+            n_features = min(combined_features.shape[1], max_features)
+
+            # Create complex tensor representation
+            # Each feature dimension becomes a complex component
+            complex_features = self._create_complex_representation(combined_features, n_features)
+
+            # Create the main visualization
+            fig = make_subplots(
+                rows=2, cols=2,
+                specs=[
+                    [{"type": "scatter3d", "rowspan": 2}, {"type": "scatter"}],
+                    [None, {"type": "scatter"}]
+                ],
+                subplot_titles=(
+                    "Complex Tensor Evolution - Feature Space",
+                    "Orthogonality Progress",
+                    "Feature Vector Alignment by Class"
+                )
+            )
+
+            # Create frames for animation
+            frames = []
+            colors = px.colors.qualitative.Set1
+
+            for i, snapshot in enumerate(self.feature_space_snapshots):
+                features = snapshot['features']
+                targets = snapshot['targets']
+                iteration = snapshot['iteration']
+
+                # Sample for performance
+                sample_size = min(300, len(features))
+                if len(features) > sample_size:
+                    indices = np.random.choice(len(features), sample_size, replace=False)
+                    features = features[indices]
+                    targets = targets[indices]
+
+                # Create complex representation for this snapshot
+                complex_snapshot = self._create_complex_representation(features, n_features)
+
+                # Calculate orthogonality metrics
+                orthogonality_score = self._calculate_orthogonality(complex_snapshot, targets)
+                alignment_metrics = self._calculate_feature_alignment(complex_snapshot, targets)
+
+                frame_data = []
+
+                # 3D Complex Space Visualization (left-top)
+                if complex_snapshot.shape[1] >= 3:
+                    # Use first 3 complex components for 3D visualization
+                    x, y, z = complex_snapshot[:, 0].real, complex_snapshot[:, 1].real, complex_snapshot[:, 2].real
+
+                    for class_idx, cls in enumerate(unique_classes):
+                        class_mask = targets == cls
+                        if np.any(class_mask):
+                            # Calculate class centroid
+                            centroid = np.mean(complex_snapshot[class_mask], axis=0)
+
+                            # Plot samples
+                            frame_data.append(go.Scatter3d(
+                                x=x[class_mask], y=y[class_mask], z=z[class_mask],
+                                mode='markers',
+                                marker=dict(
+                                    size=4,
+                                    color=colors[class_idx % len(colors)],
+                                    opacity=0.7,
+                                    line=dict(width=1, color='white')
+                                ),
+                                name=f'Class {int(cls)}',
+                                legendgroup=f'class_{cls}'
+                            ))
+
+                            # Plot class direction vector
+                            direction = centroid / np.linalg.norm(centroid) * 2
+                            frame_data.append(go.Scatter3d(
+                                x=[0, direction[0].real], y=[0, direction[1].real], z=[0, direction[2].real],
+                                mode='lines',
+                                line=dict(
+                                    color=colors[class_idx % len(colors)],
+                                    width=6
+                                ),
+                                name=f'Class {int(cls)} Direction',
+                                legendgroup=f'class_{cls}_dir',
+                                showlegend=False
+                            ))
+
+                # Orthogonality Progress (right-top)
+                iterations_so_far = [s['iteration'] for s in self.feature_space_snapshots[:i+1]]
+                orth_scores_so_far = [self._calculate_orthogonality(
+                    self._create_complex_representation(s['features'], n_features), s['targets']
+                ) for s in self.feature_space_snapshots[:i+1]]
+
+                frame_data.append(go.Scatter(
+                    x=iterations_so_far, y=orth_scores_so_far,
+                    mode='lines+markers',
+                    line=dict(color='blue', width=3),
+                    name='Orthogonality Score',
+                    xaxis='x2', yaxis='y2'
+                ))
+
+                # Feature Alignment (right-bottom)
+                feature_names = [f'F{j+1}' for j in range(n_features)]
+                alignment_values = list(alignment_metrics.values())[:n_features]
+
+                frame_data.append(go.Scatter(
+                    x=feature_names, y=alignment_values,
+                    mode='lines+markers',
+                    line=dict(color='green', width=2),
+                    name='Feature Alignment',
+                    xaxis='x3', yaxis='y3'
+                ))
+
+                frame = go.Frame(
+                    data=frame_data,
+                    name=f'frame_{i}',
+                    layout=go.Layout(
+                        title_text=f"Complex Tensor Evolution - Iteration {iteration}",
+                        annotations=[
+                            dict(
+                                text=f'Orthogonality: {orthogonality_score:.3f}',
+                                x=0.02, y=0.98, xref='paper', yref='paper',
+                                showarrow=False, bgcolor='white', bordercolor='black',
+                                borderwidth=1
+                            )
+                        ]
+                    )
+                )
+                frames.append(frame)
+
+            # Add initial data
+            if frames:
+                for trace in frames[0].data:
+                    fig.add_trace(trace)
+
+            # Update layout
+            fig.update_layout(
+                title={
+                    'text': "Complex Tensor Evolution in Feature Space",
+                    'x': 0.5,
+                    'xanchor': 'center',
+                    'font': {'size': 20}
+                },
+                scene=dict(
+                    xaxis_title='Complex Component 1 (Real)',
+                    yaxis_title='Complex Component 2 (Real)',
+                    zaxis_title='Complex Component 3 (Real)',
+                    camera=dict(eye=dict(x=1.5, y=1.5, z=1.5))
+                ),
+                scene2=dict(xaxis_title='Iteration', yaxis_title='Orthogonality Score'),
+                scene3=dict(xaxis_title='Features', yaxis_title='Alignment Metric'),
+                width=1200,
+                height=800,
+                showlegend=True
+            )
+
+            # Add animation controls
+            fig.update_layout(
+                updatemenus=[{
+                    'type': 'buttons',
+                    'showactive': False,
+                    'buttons': [
+                        {
+                            'label': '▶️ Play',
+                            'method': 'animate',
+                            'args': [None, {
+                                'frame': {'duration': 500, 'redraw': True},
+                                'fromcurrent': True,
+                                'transition': {'duration': 300}
+                            }]
+                        },
+                        {
+                            'label': '⏸️ Pause',
+                            'method': 'animate',
+                            'args': [[None], {
+                                'frame': {'duration': 0, 'redraw': False},
+                                'mode': 'immediate'
+                            }]
+                        }
+                    ],
+                    'x': 0.1, 'y': 0
+                }]
+            )
+
+            # Add slider
+            steps = []
+            for i, snapshot in enumerate(self.feature_space_snapshots):
+                step = {
+                    'args': [
+                        [f'frame_{i}'],
+                        {
+                            'frame': {'duration': 300, 'redraw': True},
+                            'mode': 'immediate',
+                            'transition': {'duration': 300}
+                        }
+                    ],
+                    'label': f'Iter {snapshot["iteration"]}',
+                    'method': 'animate'
+                }
+                steps.append(step)
+
+            fig.update_layout(
+                sliders=[{
+                    'active': 0,
+                    'currentvalue': {'prefix': 'Iteration: '},
+                    'steps': steps,
+                    'x': 0.1, 'len': 0.8
+                }]
+            )
+
+            fig.frames = frames
+
+            # Ensure output directory exists
+            os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+            fig.write_html(output_file)
+            print(f"✅ Complex tensor evolution visualization saved: {output_file}")
+            return output_file
+
+        except Exception as e:
+            print(f"Error creating complex tensor visualization: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _create_complex_representation(self, features, n_components):
+        """Create complex representation of features using Hilbert transform"""
+        try:
+            from scipy import signal
+
+            n_samples, n_features = features.shape
+            n_components = min(n_components, n_features)
+
+            # Create complex features using Hilbert transform (analytic signal)
+            complex_features = np.zeros((n_samples, n_components), dtype=complex)
+
+            for i in range(n_components):
+                # Use Hilbert transform to create analytic signal
+                analytic_signal = signal.hilbert(features[:, i])
+                complex_features[:, i] = analytic_signal
+
+            return complex_features
+
+        except ImportError:
+            # Fallback: create complex features using simple transformation
+            n_samples, n_features = features.shape
+            n_components = min(n_components, n_features)
+
+            complex_features = np.zeros((n_samples, n_components), dtype=complex)
+
+            for i in range(n_components):
+                # Simple complex representation: real part = feature value, imaginary part = normalized position
+                complex_features[:, i] = features[:, i] + 1j * (features[:, i] - np.mean(features[:, i])) / np.std(features[:, i])
+
+            return complex_features
+
+    def _calculate_orthogonality(self, complex_features, targets):
+        """Calculate orthogonality metric between class centroids in complex space"""
+        try:
+            unique_classes = np.unique(targets)
+            n_classes = len(unique_classes)
+
+            if n_classes < 2:
+                return 0.0
+
+            # Calculate class centroids in complex space
+            centroids = []
+            for cls in unique_classes:
+                class_mask = targets == cls
+                if np.sum(class_mask) > 0:
+                    centroid = np.mean(complex_features[class_mask], axis=0)
+                    centroids.append(centroid)
+
+            if len(centroids) < 2:
+                return 0.0
+
+            # Calculate pairwise orthogonality
+            orthogonality_scores = []
+            for i in range(len(centroids)):
+                for j in range(i+1, len(centroids)):
+                    # Complex dot product
+                    dot_product = np.vdot(centroids[i], centroids[j])
+                    norm_i = np.linalg.norm(centroids[i])
+                    norm_j = np.linalg.norm(centroids[j])
+
+                    if norm_i > 0 and norm_j > 0:
+                        cosine_sim = np.abs(dot_product) / (norm_i * norm_j)
+                        orthogonality = 1.0 - cosine_sim
+                        orthogonality_scores.append(orthogonality)
+
+            return np.mean(orthogonality_scores) if orthogonality_scores else 0.0
+
+        except Exception as e:
+            print(f"Error calculating orthogonality: {e}")
+            return 0.0
+
+    def _calculate_feature_alignment(self, complex_features, targets):
+        """Calculate how well features align with class separation"""
+        try:
+            unique_classes = np.unique(targets)
+            n_features = complex_features.shape[1]
+
+            alignment_scores = {}
+
+            for feature_idx in range(n_features):
+                feature_values = complex_features[:, feature_idx]
+
+                # Calculate between-class variance vs within-class variance
+                overall_mean = np.mean(feature_values)
+                between_var = 0.0
+                within_var = 0.0
+
+                for cls in unique_classes:
+                    class_mask = targets == cls
+                    if np.sum(class_mask) > 0:
+                        class_mean = np.mean(feature_values[class_mask])
+                        between_var += np.sum(class_mask) * np.abs(class_mean - overall_mean)**2
+                        within_var += np.sum(np.abs(feature_values[class_mask] - class_mean)**2)
+
+                if within_var > 0:
+                    alignment = between_var / within_var
+                else:
+                    alignment = 0.0
+
+                alignment_scores[f'Feature_{feature_idx+1}'] = alignment
+
+            return alignment_scores
+
+        except Exception as e:
+            print(f"Error calculating feature alignment: {e}")
+            return {}
+
+    def generate_interactive_visualizations(self, output_dir="Visualisations"):
+        """Generate all interactive visualizations after training - COMPLETE UPDATED VERSION"""
+        if not hasattr(self, 'visualizer') or not self.visualizer:
+            print("❌ No visualizer available. Please enable enhanced visualization before training.")
+            return None
+
+        # Check if we have any visualization data
+        has_data = (hasattr(self.visualizer, 'training_history') and self.visualizer.training_history) or \
+                   (hasattr(self.visualizer, 'feature_space_snapshots') and self.visualizer.feature_space_snapshots) or \
+                   (hasattr(self.visualizer, 'accuracy_progression') and self.visualizer.accuracy_progression)
+
+        if not has_data:
+            print("❌ No visualization data available.")
+            print("   Enable with enable_enhanced_visualization() before training")
+            return None
+
+        try:
+            import os
+
+            # Create organized directory structure based on data file
+            if hasattr(self, 'current_file') and self.current_file:
+                base_name = os.path.splitext(os.path.basename(self.current_file))[0]
+            else:
+                base_name = "dbnn_training"
+
+            if hasattr(self, 'feature_columns') and self.feature_columns:
+                feature_info = f"{len(self.feature_columns)}features"
+                base_name = f"{base_name}_{feature_info}"
+
+            # Create main visualization folder for this dataset
+            main_viz_dir = os.path.join(output_dir, base_name)
+            standard_dir = os.path.join(main_viz_dir, "Standard")
+            enhanced_dir = os.path.join(main_viz_dir, "Enhanced")
+            os.makedirs(standard_dir, exist_ok=True)
+            os.makedirs(enhanced_dir, exist_ok=True)
+
+            # Store the main visualization directory for easy access
+            self.main_viz_directory = main_viz_dir
+
+            print(f"📁 Creating visualizations in: {main_viz_dir}")
+
+            outputs = {}
+
+            # 1. Generate ENHANCED visualizations
+            print("🔄 Generating enhanced visualizations...")
+
+            # Enhanced 3D
+            enhanced_3d_file = os.path.join(enhanced_dir, f"{base_name}_enhanced_3d.html")
+            result = self.visualizer.generate_enhanced_interactive_3d(enhanced_3d_file)
+            if result:
+                outputs['enhanced_3d'] = result
+                print(f"✅ Enhanced 3D: {result}")
+            else:
+                print("❌ Failed to generate enhanced_3d")
+
+            # Advanced Dashboard
+            dashboard_file = os.path.join(enhanced_dir, f"{base_name}_advanced_dashboard.html")
+            result = self.visualizer.create_advanced_interactive_dashboard(dashboard_file)
+            if result:
+                outputs['advanced_dashboard'] = result
+                print(f"✅ Advanced dashboard: {result}")
+            else:
+                print("❌ Failed to generate advanced_dashboard")
+
+            # Complex Tensor Evolution
+            complex_file = os.path.join(enhanced_dir, f"{base_name}_complex_tensor.html")
+            result = self.visualizer.generate_complex_tensor_evolution(complex_file)
+            if result:
+                outputs['complex_tensor'] = result
+                print(f"✅ Complex tensor evolution: {result}")
+            else:
+                print("❌ Failed to generate complex tensor evolution")
+
+            # Phase Diagram
+            phase_file = os.path.join(enhanced_dir, f"{base_name}_phase_diagram.html")
+            result = self.visualizer.generate_complex_phase_diagram(phase_file)
+            if result:
+                outputs['phase_diagram'] = result
+                print(f"✅ Complex phase diagram: {result}")
+            else:
+                print("❌ Failed to generate phase diagram")
+
+            # 2. Generate STANDARD visualizations
+            print("🔄 Generating standard visualizations...")
+
+            # Traditional Dashboard
+            traditional_file = os.path.join(standard_dir, f"{base_name}_traditional_dashboard.html")
+            result = self.visualizer.create_training_dashboard(traditional_file)
+            if result:
+                outputs['traditional_dashboard'] = result
+                print(f"✅ Traditional dashboard: {result}")
+            else:
+                print("❌ Failed to generate traditional_dashboard")
+
+            # Performance Metrics
+            performance_file = os.path.join(standard_dir, f"{base_name}_performance.html")
+            result = self.visualizer.generate_performance_metrics(performance_file)
+            if result:
+                outputs['performance'] = result
+                print(f"✅ Performance metrics: {result}")
+            else:
+                print("❌ Failed to generate performance")
+
+            # Correlation Matrix
+            correlation_file = os.path.join(standard_dir, f"{base_name}_correlation.html")
+            result = self.visualizer.generate_correlation_matrix(correlation_file)
+            if result:
+                outputs['correlation'] = result
+                print(f"✅ Correlation matrix: {result}")
+            else:
+                print("❌ Failed to generate correlation")
+
+            # Feature Explorer
+            feature_file = os.path.join(standard_dir, f"{base_name}_feature_explorer.html")
+            result = self.visualizer.generate_basic_3d_visualization(feature_file)
+            if result:
+                outputs['feature_explorer'] = result
+                print(f"✅ Feature explorer: {result}")
+            else:
+                print("❌ Failed to generate feature_explorer")
+
+            # Animated Training
+            animated_file = os.path.join(standard_dir, f"{base_name}_animated.html")
+            result = self.visualizer.generate_animated_training(animated_file)
+            if result:
+                outputs['animated'] = result
+                print(f"✅ Animated training: {result}")
+            else:
+                print("❌ Failed to generate animated")
+
+            # Animated Confusion Matrix
+            confusion_file = os.path.join(standard_dir, f"{base_name}_confusion_animation.html")
+            result = self.visualizer.generate_animated_confusion_matrix(confusion_file)
+            if result:
+                outputs['confusion_animation'] = result
+                print(f"✅ Animated confusion matrix: {result}")
+            else:
+                print("❌ Failed to generate confusion animation")
+
+            # 3. Generate additional complex space visualizations
+            print("🔄 Generating complex space visualizations...")
+
+            # Complex Feature Orthogonality
+            orthogonality_file = os.path.join(enhanced_dir, f"{base_name}_feature_orthogonality.html")
+            result = self.visualizer.generate_feature_orthogonality_plot(orthogonality_file)
+            if result:
+                outputs['feature_orthogonality'] = result
+                print(f"✅ Feature orthogonality: {result}")
+            else:
+                print("❌ Failed to generate feature orthogonality")
+
+            # Class Separation Evolution
+            separation_file = os.path.join(enhanced_dir, f"{base_name}_class_separation.html")
+            result = self.visualizer.generate_class_separation_evolution(separation_file)
+            if result:
+                outputs['class_separation'] = result
+                print(f"✅ Class separation evolution: {result}")
+            else:
+                print("❌ Failed to generate class separation")
+
+            # Generate summary
+            successful = len(outputs)
+            total_attempted = 13  # Total visualization types we attempt to generate
+            print(f"📊 Visualization Summary: {successful}/{total_attempted} successful")
+
+            if successful == 0:
+                print("💡 Tips to get visualizations working:")
+                print("   - Enable enhanced visualization before training")
+                print("   - Ensure you have plotly installed: pip install plotly")
+                print("   - Train for multiple iterations to capture evolution")
+                print("   - Make sure you have sufficient features (at least 2-3)")
+            else:
+                print(f"🎉 Successfully generated {successful} visualizations!")
+                print(f"📂 All files saved in: {main_viz_dir}")
+
+                # List generated files
+                print("\n📋 Generated Files:")
+                for viz_type, file_path in outputs.items():
+                    print(f"   📄 {viz_type}: {os.path.basename(file_path)}")
+
+            return outputs
+
+        except Exception as e:
+            print(f"❌ Error generating visualizations: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def generate_interactive_3d_visualization(self, output_file="interactive_3d_visualization.html"):
+        """
+        Generate complete interactive 3D visualization with animation controls.
+
+        Args:
+            output_file (str): Path for output HTML file
+
+        Returns:
+            str or None: Path to generated file if successful, None otherwise
+        """
+        try:
+            import plotly.graph_objects as go
+            import plotly.express as px
+
+            if not self.feature_space_snapshots:
+                print("No feature space snapshots available for 3D visualization")
+                return None
+
+            # Create the main visualization with frames for each iteration
+            fig = go.Figure()
+
+            # Create frames for animation
+            frames = []
+            for i, snapshot in enumerate(self.feature_space_snapshots):
+                frame_fig = go.Figure()
+                self._add_3d_snapshot_to_plot(frame_fig, snapshot)
+
+                frame = go.Frame(
+                    data=frame_fig.data,
+                    name=f'frame_{i}',
+                    layout=go.Layout(
+                        title=f"Iteration {snapshot['iteration']}"
+                    )
+                )
+                frames.append(frame)
+
+            # Add first frame data
+            if frames:
+                for trace in frames[0].data:
+                    fig.add_trace(trace)
+
+            # Create feature selection dropdowns
+            feature_dropdowns = self._create_feature_dropdowns()
+
+            # Create iteration slider
+            iteration_slider = self._create_iteration_slider()
+
+            # Update layout with all controls
+            fig.update_layout(
+                title={
+                    'text': "DBNN Interactive 3D Feature Space Visualization",
+                    'x': 0.5,
+                    'xanchor': 'center',
+                    'font': {'size': 20}
+                },
+                scene=dict(
+                    xaxis_title=self.feature_names[0] if self.feature_names else "Feature 1",
+                    yaxis_title=self.feature_names[1] if len(self.feature_names) > 1 else "Feature 2",
+                    zaxis_title=self.feature_names[2] if len(self.feature_names) > 2 else "Feature 3",
+                    camera=dict(eye=dict(x=1.5, y=1.5, z=1.5)),
+                    aspectmode='cube'
+                ),
+                width=1200,
+                height=800,
+                updatemenus=feature_dropdowns,
+                sliders=[iteration_slider]
+            )
+
+            # Add frames for animation
+            fig.frames = frames
+
+            # Add play/pause buttons
+            fig.update_layout(
+                updatemenus=[{
+                    'type': 'buttons',
+                    'showactive': False,
+                    'buttons': [
+                        {
+                            'label': 'Play',
+                            'method': 'animate',
+                            'args': [None, {
+                                'frame': {'duration': 500, 'redraw': True},
+                                'fromcurrent': True,
+                                'transition': {'duration': 300}
+                            }]
+                        },
+                        {
+                            'label': 'Pause',
+                            'method': 'animate',
+                            'args': [[None], {
+                                'frame': {'duration': 0, 'redraw': False},
+                                'mode': 'immediate'
+                            }]
+                        }
+                    ],
+                    'x': 0.1,
+                    'y': 0.02
+                }]
+            )
+
+            # Ensure output directory exists
+            os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+            fig.write_html(output_file)
+            print(f"✅ Interactive 3D visualization saved: {output_file}")
+            return output_file
+
+        except Exception as e:
+            print(f"Error creating interactive 3D visualization: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def generate_correlation_matrix(self, output_file=None):
+        """Generate feature correlation matrix"""
+        try:
+            if not self.feature_space_snapshots:
+                return None
+
+            import plotly.graph_objects as go
+            import plotly.express as px
+
+            latest = self.feature_space_snapshots[-1]
+            features = latest['features']
+
+            if features.shape[1] <= 1:
+                return None
+
+            # Calculate correlation matrix
+            corr_matrix = np.corrcoef(features.T)
+            feature_names = latest.get('feature_names', [f'F{i+1}' for i in range(features.shape[1])])
+
+            fig = go.Figure(data=go.Heatmap(
+                z=corr_matrix,
+                x=feature_names,
+                y=feature_names,
+                colorscale='RdBu',
+                zmid=0
+            ))
+
+            fig.update_layout(title='Feature Correlation Matrix')
+
+            if output_file:
+                fig.write_html(output_file)
+                return output_file
+            return fig
+
+        except Exception as e:
+            print(f"Error generating correlation matrix: {e}")
+            return None
+
+    def generate_performance_metrics(self, output_file="performance_metrics.html"):
+        """Generate performance metrics visualization - FIXED VERSION"""
+        try:
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
+            import numpy as np
+
+            if not self.accuracy_progression:
+                print("❌ No accuracy progression data available for performance metrics")
+                return None
+
+            print(f"📊 Generating performance metrics from {len(self.accuracy_progression)} data points")
+
+            rounds = [s['round'] for s in self.accuracy_progression]
+            accuracies = [s['accuracy'] for s in self.accuracy_progression]
+
+            # Create a more comprehensive performance dashboard
+            fig = make_subplots(
+                rows=2, cols=2,
+                specs=[
+                    [{"type": "xy", "colspan": 2}, None],
+                    [{"type": "indicator"}, {"type": "indicator"}]
+                ],
+                subplot_titles=(
+                    'Accuracy Progression Over Training',
+                    'Training Summary',
+                    'Performance Indicators'
+                )
+            )
+
+            # 1. Accuracy progression plot
+            fig.add_trace(go.Scatter(
+                x=rounds, y=accuracies, mode='lines+markers',
+                name='Accuracy', line=dict(color='blue', width=3),
+                hovertemplate='Round: %{x}<br>Accuracy: %{y:.2f}%<extra></extra>'
+            ), row=1, col=1)
+
+            # Calculate performance metrics
+            best_acc = max(accuracies) if accuracies else 0
+            final_acc = accuracies[-1] if accuracies else 0
+            initial_acc = accuracies[0] if accuracies else 0
+            improvement = final_acc - initial_acc
+
+            # Find convergence point
+            convergence_round = self._find_convergence_point(accuracies)
+
+            # 2. Performance indicators
+            fig.add_trace(go.Indicator(
+                mode="number+delta",
+                value=final_acc,
+                number={'suffix': "%", 'font': {'size': 24}},
+                delta={'reference': initial_acc, 'relative': False, 'suffix': '%'},
+                title={"text": "Final Accuracy"},
+                domain={'row': 2, 'column': 0}
+            ), row=2, col=1)
+
+            fig.add_trace(go.Indicator(
+                mode="number",
+                value=best_acc,
+                number={'suffix': "%", 'font': {'size': 24}},
+                title={"text": "Best Accuracy"},
+                domain={'row': 2, 'column': 1}
+            ), row=2, col=2)
+
+            # Add convergence point marker if found
+            if convergence_round is not None:
+                fig.add_trace(go.Scatter(
+                    x=[rounds[convergence_round]], y=[accuracies[convergence_round]],
+                    mode='markers+text',
+                    marker=dict(size=12, color='red', symbol='star'),
+                    text=['Convergence'],
+                    textposition='top center',
+                    name='Convergence Point',
+                    hovertemplate=f'Convergence at round {rounds[convergence_round]}<br>Accuracy: {accuracies[convergence_round]:.2f}%<extra></extra>'
+                ), row=1, col=1)
+
+            # Update layout
+            fig.update_layout(
+                height=600,
+                title_text="DBNN Performance Metrics Dashboard",
+                showlegend=True,
+                template="plotly_white"
+            )
+
+            # Update axis labels
+            fig.update_xaxes(title_text="Training Round", row=1, col=1)
+            fig.update_yaxes(title_text="Accuracy (%)", row=1, col=1)
+
+            # Add performance summary annotation
+            summary_text = f"""
+            <b>Performance Summary:</b><br>
+            • Initial Accuracy: {initial_acc:.2f}%<br>
+            • Final Accuracy: {final_acc:.2f}%<br>
+            • Best Accuracy: {best_acc:.2f}%<br>
+            • Total Improvement: {improvement:.2f}%<br>
+            • Training Rounds: {len(rounds)}<br>
+            • Convergence: Round {convergence_round if convergence_round else 'N/A'}
+            """
+
+            fig.add_annotation(
+                text=summary_text,
+                xref="paper", yref="paper",
+                x=0.98, y=0.98,
+                xanchor="right", yanchor="top",
+                showarrow=False,
+                bgcolor="lightblue",
+                bordercolor="blue",
+                borderwidth=2,
+                font=dict(size=10)
+            )
+
+            # Ensure output directory exists
+            import os
+            os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+            fig.write_html(output_file)
+            print(f"✅ Performance metrics saved: {output_file}")
+            return output_file
+
+        except Exception as e:
+            print(f"❌ Error generating performance metrics: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _find_convergence_point(self, accuracies, window=5, threshold=1.0):
+        """Find where the model converges (accuracy changes become small)"""
+        if len(accuracies) < window * 2:
+            return None
+
+        for i in range(window, len(accuracies) - window):
+            prev_mean = np.mean(accuracies[i-window:i])
+            next_mean = np.mean(accuracies[i:i+window])
+            if abs(next_mean - prev_mean) < threshold:
+                return i
+        return None
+
+    def generate_animated_training(self, output_file="animated_training.html"):
+        """Generate animated training progression - FIXED NAME"""
+        return self.generate_animated(output_file)
+
+    def generate_standard_dashboard(self, output_file="standard_dashboard.html"):
+        """Generate standard dashboard - FIXED METHOD NAME"""
+        return self.create_training_dashboard(output_file)
+
+    def generate_all_standard_visualizations(self, output_dir="Visualisations/Standard"):
+        """Generate all standard visualizations - FIXED METHOD NAME"""
+        try:
+            import os
+            os.makedirs(output_dir, exist_ok=True)
+
+            outputs = {}
+
+            # Generate each visualization
+            viz_methods = [
+                ('performance', self.generate_performance_metrics),
+                ('correlation', self.generate_correlation_matrix),
+                ('feature_explorer', self.generate_basic_3d_visualization),
+                ('animated', self.generate_animated_training),
+                ('standard_dashboard', self.create_training_dashboard)
+            ]
+
+            for name, method in viz_methods:
+                output_file = os.path.join(output_dir, f"{name}.html")
+                result = method(output_file)
+                if result:
+                    outputs[name] = result
+                    print(f"✅ Generated {name}: {result}")
+                else:
+                    print(f"❌ Failed to generate {name}")
+
+            return outputs
+
+        except Exception as e:
+            print(f"Error generating standard visualizations: {e}")
+            return None
+
+    def _add_enhanced_3d_snapshot(self, fig, snapshot):
+        """Enhanced version of 3D snapshot with better visualization"""
+        try:
+            features = snapshot['features']
+            targets = snapshot['targets']
+            predictions = snapshot['predictions']
+            feature_names = snapshot['feature_names']
+            class_names = snapshot['class_names']
+
+            # Use first 3 features for 3D visualization
+            if features.shape[1] >= 3:
+                x, y, z = features[:, 0], features[:, 1], features[:, 2]
+            else:
+                # Pad with zeros if fewer than 3 features
+                x = features[:, 0]
+                y = features[:, 1] if features.shape[1] > 1 else np.zeros(len(features))
+                z = np.zeros(len(features))
+
+            # Create color mapping for classes
+            unique_classes = np.unique(targets)
+            colors = px.colors.qualitative.Bold
+
+            # Plot each class with enhanced visualization
+            for i, cls in enumerate(unique_classes):
+                class_indices = np.where(targets == cls)[0]
+
+                if len(class_indices) == 0:
+                    continue
+
+                class_predictions = predictions[class_indices]
+                class_targets = targets[class_indices]
+
+                correct_indices = class_indices[class_predictions == class_targets]
+                incorrect_indices = class_indices[class_predictions != class_targets]
+
+                cls_name = class_names[int(cls)] if int(cls) < len(class_names) else f'Class_{int(cls)}'
+
+                # Correct predictions - larger, brighter markers
+                if len(correct_indices) > 0:
+                    fig.add_trace(go.Scatter3d(
+                        x=x[correct_indices],
+                        y=y[correct_indices],
+                        z=z[correct_indices],
+                        mode='markers',
+                        marker=dict(
+                            size=8,
+                            color=colors[i % len(colors)],
+                            opacity=0.9,
+                            line=dict(width=2, color='white')
+                        ),
+                        name=f'{cls_name} ✓',
+                        legendgroup=f'class_{cls}',
+                        hovertemplate=(
+                            f'<b>{cls_name} - Correct</b><br>' +
+                            f'{feature_names[0]}: %{{x:.3f}}<br>' +
+                            f'{feature_names[1]}: %{{y:.3f}}<br>' +
+                            f'{feature_names[2]}: %{{z:.3f}}<br>' +
+                            '<extra></extra>'
+                        )
+                    ))
+
+                # Incorrect predictions - different symbol
+                if len(incorrect_indices) > 0:
+                    fig.add_trace(go.Scatter3d(
+                        x=x[incorrect_indices],
+                        y=y[incorrect_indices],
+                        z=z[incorrect_indices],
+                        mode='markers',
+                        marker=dict(
+                            size=8,
+                            color=colors[i % len(colors)],
+                            opacity=0.7,
+                            symbol='diamond',
+                            line=dict(width=2, color='black')
+                        ),
+                        name=f'{cls_name} ✗',
+                        legendgroup=f'class_{cls}',
+                        hovertemplate=(
+                            f'<b>{cls_name} - Incorrect</b><br>' +
+                            f'{feature_names[0]}: %{{x:.3f}}<br>' +
+                            f'{feature_names[1]}: %{{y:.3f}}<br>' +
+                            f'{feature_names[2]}: %{{z:.3f}}<br>' +
+                            '<extra></extra>'
+                        )
+                    ))
+
+        except Exception as e:
+            print(f"Error in enhanced 3D snapshot: {e}")
+
+
+    def _add_3d_snapshot_to_plot(self, fig, snapshot):
+        """Add a single snapshot to the 3D plot - COMPLETELY FIXED VERSION"""
+        try:
+            import plotly.graph_objects as go
+            import plotly.express as px
+        except ImportError:
+            print("Plotly not available for 3D visualization")
+            return
+
+        try:
+            features = snapshot['features']
+            targets = snapshot['targets']
+            predictions = snapshot['predictions']
+            feature_names = snapshot.get('feature_names', ['Feature_1', 'Feature_2', 'Feature_3'])
+            class_names = snapshot.get('class_names', ['Class_1', 'Class_2', 'Class_3', 'Class_4', 'Class_5'])
+
+            # Ensure we have at least 3 feature names
+            while len(feature_names) < 3:
+                feature_names.append(f'Feature_{len(feature_names) + 1}')
+
+            # Use first 3 features for 3D visualization
+            if features.shape[1] >= 3:
+                x, y, z = features[:, 0], features[:, 1], features[:, 2]
+            else:
+                # Pad with zeros if fewer than 3 features
+                x = features[:, 0]
+                y = features[:, 1] if features.shape[1] > 1 else np.zeros(len(features))
+                z = np.zeros(len(features))
+
+            # Create color mapping for classes
+            unique_classes = np.unique(targets)
+            colors = px.colors.qualitative.Set1
+            color_map = {}
+            for i, cls in enumerate(unique_classes):
+                color_map[cls] = colors[i % len(colors)]
+
+            # Plot each class - COMPLETELY FIXED INDEXING
+            for cls in unique_classes:
+                # Convert to integer for reliable indexing
+                cls_int = int(cls)
+
+                # Get indices for this class using numpy where (SAFE)
+                class_indices = np.where(targets == cls)[0]
+
+                if len(class_indices) == 0:
+                    continue
+
+                # Get predictions and targets for this class
+                class_predictions = np.array(predictions)[class_indices]
+                class_targets = targets[class_indices]
+
+                # Create correct/incorrect masks
+                correct_mask = class_predictions == class_targets
+                correct_indices = class_indices[correct_mask]
+                incorrect_indices = class_indices[~correct_mask]
+
+                # Get class name safely
+                if cls_int < len(class_names):
+                    cls_name = class_names[cls_int]
+                else:
+                    cls_name = f'Class_{cls_int}'
+
+                # Correct predictions
+                if len(correct_indices) > 0:
+                    fig.add_trace(go.Scatter3d(
+                        x=x[correct_indices],
+                        y=y[correct_indices],
+                        z=z[correct_indices],
+                        mode='markers',
+                        marker=dict(
+                            size=6,
+                            color=color_map[cls],
+                            opacity=0.8,
+                            line=dict(width=1, color='white')
+                        ),
+                        name=f'{cls_name} (Correct)',
+                        legendgroup=f'class_{cls}',
+                        hovertemplate=(
+                            f'<b>{cls_name}</b><br>' +
+                            f'{feature_names[0]}: %{{x:.3f}}<br>' +
+                            f'{feature_names[1]}: %{{y:.3f}}<br>' +
+                            f'{feature_names[2]}: %{{z:.3f}}<br>' +
+                            '<extra></extra>'
+                        )
+                    ))
+
+                # Incorrect predictions
+                if len(incorrect_indices) > 0:
+                    fig.add_trace(go.Scatter3d(
+                        x=x[incorrect_indices],
+                        y=y[incorrect_indices],
+                        z=z[incorrect_indices],
+                        mode='markers',
+                        marker=dict(
+                            size=6,
+                            color=color_map[cls],
+                            opacity=0.8,
+                            symbol='x',
+                            line=dict(width=1, color='black')
+                        ),
+                        name=f'{cls_name} (Incorrect)',
+                        legendgroup=f'class_{cls}',
+                        hovertemplate=(
+                            f'<b>{cls_name} - MISCLASSIFIED</b><br>' +
+                            f'{feature_names[0]}: %{{x:.3f}}<br>' +
+                            f'{feature_names[1]}: %{{y:.3f}}<br>' +
+                            f'{feature_names[2]}: %{{z:.3f}}<br>' +
+                            '<extra></extra>'
+                        )
+                    ))
+
+        except Exception as e:
+            print(f"Error in _add_3d_snapshot_to_plot: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _create_feature_dropdowns(self):
+        """
+        Create dropdown menus for feature selection in 3D visualization.
+
+        Returns:
+            list: List of dropdown menu configurations
+        """
+        if not self.feature_names:
+            return []
+
+        dropdowns = []
+
+        # X-axis feature dropdown
+        dropdowns.append({
+            'buttons': [
+                {
+                    'label': self.feature_names[i],
+                    'method': 'restyle',
+                    'args': [{'x': [self.feature_space_snapshots[0]['features'][:, i]]}]
+                } for i in range(len(self.feature_names))
+            ],
+            'direction': 'down',
+            'showactive': True,
+            'x': 0.1,
+            'xanchor': 'left',
+            'y': 0.95,
+            'yanchor': 'top',
+            'bgcolor': 'lightblue',
+            'bordercolor': 'black',
+            'borderwidth': 1,
+            'font': {'size': 12}
+        })
+
+        # Y-axis feature dropdown
+        dropdowns.append({
+            'buttons': [
+                {
+                    'label': self.feature_names[i],
+                    'method': 'restyle',
+                    'args': [{'y': [self.feature_space_snapshots[0]['features'][:, i]]}]
+                } for i in range(len(self.feature_names))
+            ],
+            'direction': 'down',
+            'showactive': True,
+            'x': 0.3,
+            'xanchor': 'left',
+            'y': 0.95,
+            'yanchor': 'top',
+            'bgcolor': 'lightgreen',
+            'bordercolor': 'black',
+            'borderwidth': 1,
+            'font': {'size': 12}
+        })
+
+        # Z-axis feature dropdown
+        dropdowns.append({
+            'buttons': [
+                {
+                    'label': self.feature_names[i],
+                    'method': 'restyle',
+                    'args': [{'z': [self.feature_space_snapshots[0]['features'][:, i]]}]
+                } for i in range(len(self.feature_names))
+            ],
+            'direction': 'down',
+            'showactive': True,
+            'x': 0.5,
+            'xanchor': 'left',
+            'y': 0.95,
+            'yanchor': 'top',
+            'bgcolor': 'lightcoral',
+            'bordercolor': 'black',
+            'borderwidth': 1,
+            'font': {'size': 12}
+        })
+
+        return dropdowns
+
+    def _create_iteration_slider(self):
+        """
+        Create iteration slider for animation control.
+
+        Returns:
+            dict: Slider configuration
+        """
+        steps = []
+
+        for i, snapshot in enumerate(self.feature_space_snapshots):
+            step = {
+                'args': [
+                    [f'frame_{i}'],
+                    {
+                        'frame': {'duration': 300, 'redraw': True},
+                        'mode': 'immediate',
+                        'transition': {'duration': 300}
+                    }
+                ],
+                'label': f'Iter {snapshot["iteration"]}',
+                'method': 'animate'
+            }
+            steps.append(step)
+
+        slider = {
+            'active': 0,
+            'currentvalue': {
+                'prefix': 'Iteration: ',
+                'xanchor': 'right',
+                'font': {'size': 16, 'color': 'black'}
+            },
+            'transition': {'duration': 300, 'easing': 'cubic-in-out'},
+            'x': 0.1,
+            'len': 0.8,
+            'xanchor': 'left',
+            'y': 0.02,
+            'yanchor': 'bottom',
+            'bgcolor': 'lightgray',
+            'bordercolor': 'black',
+            'borderwidth': 1,
+            'tickwidth': 1,
+            'steps': steps
+        }
+
+        return slider
+
+    # =========================================================================
+    # ADVANCED DASHBOARD AND EDUCATIONAL VISUALIZATIONS
+    # =========================================================================
+
+    def create_advanced_interactive_dashboard(self, output_file="advanced_dbnn_dashboard.html"):
+        """Create a comprehensive dashboard with multiple interactive visualizations - FIXED VERSION"""
+        try:
+            from plotly.subplots import make_subplots
+            import plotly.graph_objects as go
+            import plotly.express as px
+            import numpy as np
+            from sklearn.metrics import confusion_matrix
+
+            # Check if we have sufficient data
+            if not self.training_history and not self.feature_space_snapshots:
+                print("❌ No training data available for advanced dashboard")
+                return None
+
+            # Create a simpler but more robust dashboard layout
+            fig = make_subplots(
+                rows=2, cols=2,
+                subplot_titles=(
+                    "Training Accuracy Progression",
+                    "Feature Space Overview",
+                    "Weight Distribution",
+                    "Training Summary"
+                ),
+                specs=[
+                    [{"type": "xy"}, {"type": "scatter3d"}],
+                    [{"type": "xy"}, {"type": "domain"}]
+                ]
+            )
+
+            # 1. Accuracy Progression (top-left)
+            if self.accuracy_progression:
+                rounds = [s['round'] for s in self.accuracy_progression]
+                accuracies = [s['accuracy'] for s in self.accuracy_progression]
+
+                fig.add_trace(go.Scatter(
+                    x=rounds, y=accuracies, mode='lines+markers',
+                    name='Accuracy', line=dict(color='blue', width=3),
+                    hovertemplate='Round: %{x}<br>Accuracy: %{y:.2f}%<extra></extra>'
+                ), row=1, col=1)
+            else:
+                # Add placeholder if no accuracy data
+                fig.add_trace(go.Scatter(
+                    x=[0, 1], y=[0, 100], mode='text',
+                    text=['No accuracy data available'],
+                    textposition='middle center',
+                    showlegend=False
+                ), row=1, col=1)
+
+            # 2. Feature Space (top-right) - use latest snapshot
+            if self.feature_space_snapshots:
+                latest_snapshot = self.feature_space_snapshots[-1]
+                features = latest_snapshot['features']
+                targets = latest_snapshot['targets']
+
+                if features.shape[1] >= 3:
+                    # Use first 3 features for 3D plot
+                    x, y, z = features[:, 0], features[:, 1], features[:, 2]
+                    unique_classes = np.unique(targets)
+                    colors = px.colors.qualitative.Set1
+
+                    for i, cls in enumerate(unique_classes):
+                        class_mask = targets == cls
+                        if np.any(class_mask):
+                            fig.add_trace(go.Scatter3d(
+                                x=x[class_mask], y=y[class_mask], z=z[class_mask],
+                                mode='markers',
+                                name=f'Class {int(cls)}',
+                                marker=dict(
+                                    size=4,
+                                    color=colors[i % len(colors)],
+                                    opacity=0.7
+                                ),
+                                hovertemplate=f'Class {int(cls)}<br>X: %{{x:.3f}}<br>Y: %{{y:.3f}}<br>Z: %{{z:.3f}}<extra></extra>'
+                            ), row=1, col=2)
+                else:
+                    # Handle cases with fewer than 3 features
+                    fig.add_trace(go.Scatter3d(
+                        x=[0], y=[0], z=[0], mode='text',
+                        text=['Insufficient features for 3D visualization'],
+                        textposition='middle center',
+                        showlegend=False
+                    ), row=1, col=2)
+            else:
+                # Add placeholder if no feature data
+                fig.add_trace(go.Scatter3d(
+                    x=[0], y=[0], z=[0], mode='text',
+                    text=['No feature space data available'],
+                    textposition='middle center',
+                    showlegend=False
+                ), row=1, col=2)
+
+            # 3. Weight Distribution (bottom-left)
+            if self.weight_evolution:
+                latest_weights = self.weight_evolution[-1]
+                # Create simulated weight distribution
+                weights = np.random.normal(latest_weights['mean'], latest_weights['std'], 1000)
+                weights = weights[(weights > -10) & (weights < 10)]  # Filter extremes
+
+                fig.add_trace(go.Histogram(
+                    x=weights, nbinsx=30,
+                    name='Weight Distribution',
+                    marker_color='lightgreen', opacity=0.7,
+                    hovertemplate='Weight: %{x:.3f}<br>Count: %{y}<extra></extra>'
+                ), row=2, col=1)
+            else:
+                # Add placeholder if no weight data
+                fig.add_trace(go.Scatter(
+                    x=[0, 1], y=[0, 1], mode='text',
+                    text=['No weight distribution data available'],
+                    textposition='middle center',
+                    showlegend=False
+                ), row=2, col=1)
+
+            # 4. Training Summary (bottom-right)
+            summary_text = self._generate_training_summary()
+
+            fig.add_trace(go.Scatter(
+                x=[0, 1, 2, 3], y=[1, 1, 1, 1], mode='text',
+                text=[summary_text],
+                textposition='middle center',
+                showlegend=False,
+                hoverinfo='none'
+            ), row=2, col=2)
+
+            # Update layout for better appearance
+            fig.update_layout(
+                title={
+                    'text': "DBNN Advanced Training Dashboard",
+                    'x': 0.5,
+                    'xanchor': 'center',
+                    'font': {'size': 24, 'color': 'darkblue'}
+                },
+                height=800,
+                showlegend=True,
+                template="plotly_white"
+            )
+
+            # Update axis labels
+            fig.update_xaxes(title_text="Training Round", row=1, col=1)
+            fig.update_yaxes(title_text="Accuracy (%)", row=1, col=1)
+            fig.update_xaxes(title_text="Weight Value", row=2, col=1)
+            fig.update_yaxes(title_text="Frequency", row=2, col=1)
+
+            # Ensure output directory exists
+            os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+            fig.write_html(output_file)
+            print(f"✅ Advanced interactive dashboard saved: {output_file}")
+            return output_file
+
+        except Exception as e:
+            print(f"❌ Error creating advanced dashboard: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _generate_training_summary(self):
+        """Generate training summary text"""
+        summary_parts = ["<b>Training Summary:</b><br>"]
+
+        if self.accuracy_progression:
+            best_accuracy = max([s['accuracy'] for s in self.accuracy_progression])
+            final_accuracy = self.accuracy_progression[-1]['accuracy']
+            total_rounds = len(self.accuracy_progression)
+
+            summary_parts.extend([
+                f"• Total Rounds: {total_rounds}",
+                f"• Best Accuracy: {best_accuracy:.2f}%",
+                f"• Final Accuracy: {final_accuracy:.2f}%"
+            ])
+        else:
+            summary_parts.append("• No training rounds completed")
+
+        if self.feature_space_snapshots:
+            latest = self.feature_space_snapshots[-1]
+            summary_parts.extend([
+                f"• Features: {latest['features'].shape[1]}",
+                f"• Samples: {len(latest['features'])}"
+            ])
+
+        if self.weight_evolution:
+            latest_weights = self.weight_evolution[-1]
+            summary_parts.extend([
+                f"• Mean Weight: {latest_weights['mean']:.3f}",
+                f"• Weight Std: {latest_weights['std']:.3f}"
+            ])
+
+        return "<br>".join(summary_parts)
+
+    def _populate_enhanced_dashboard(self, fig):
+        """
+        Populate the enhanced dashboard with educational visualizations.
+
+        Args:
+            fig (plotly.graph_objects.Figure): Dashboard figure to populate
+        """
+        try:
+            import plotly.graph_objects as go
+            import plotly.express as px
+            import numpy as np
+            from sklearn.metrics import confusion_matrix
+            import pandas as pd
+
+            # 1. 3D Feature Space with Decision Boundaries (Top-left)
+            if self.feature_space_snapshots:
+                self._add_3d_feature_visualization(fig, 1, 1)
+
+            # 2. Accuracy Progression (Top-middle)
+            if self.accuracy_progression:
+                self._add_accuracy_progression(fig, 1, 2)
+
+            # 3. Weight Distribution (Top-right)
+            if self.weight_evolution:
+                self._add_weight_distribution(fig, 1, 3)
+
+            # 4. Weight Evolution (Middle-right)
+            if self.weight_evolution:
+                self._add_weight_evolution(fig, 2, 3)
+
+            # 5. Feature Correlation Heatmap (Bottom-left)
+            if self.feature_space_snapshots:
+                self._add_feature_correlation(fig, 3, 1)
+
+            # 6. Model Performance Summary (Bottom-middle) - Pie chart
+            self._add_performance_summary(fig, 3, 2)
+
+            # 7. Confusion Matrix (Bottom-right)
+            if self.feature_space_snapshots:
+                self._add_confusion_matrix(fig, 3, 3)
+
+        except Exception as e:
+            print(f"Error in enhanced dashboard: {e}")
+
+    def _add_3d_feature_visualization(self, fig, row, col):
+        """
+        Add 3D feature space visualization with decision boundaries.
+
+        Args:
+            fig (plotly.graph_objects.Figure): Figure to add to
+            row (int): Subplot row
+            col (int): Subplot column
+        """
+        if not self.feature_space_snapshots:
+            return
+
+        latest_snapshot = self.feature_space_snapshots[-1]
+        features = latest_snapshot['features']
+        targets = latest_snapshot['targets']
+        predictions = latest_snapshot['predictions']
+
+        # Use first 3 features for 3D
+        if features.shape[1] >= 3:
+            x, y, z = features[:, 0], features[:, 1], features[:, 2]
+        else:
+            x, y, z = self._project_to_3d(features)
+
+        # Calculate accuracy for this snapshot
+        accuracy = np.mean(predictions == targets) * 100
+
+        # Create interactive 3D plot
+        unique_classes = np.unique(targets)
+        colors = px.colors.qualitative.Bold
+
+        for i, cls in enumerate(unique_classes):
+            class_mask = targets == cls
+            correct_mask = predictions[class_mask] == targets[class_mask]
+
+            # Correct predictions
+            if np.any(correct_mask):
+                fig.add_trace(go.Scatter3d(
+                    x=x[class_mask][correct_mask],
+                    y=y[class_mask][correct_mask],
+                    z=z[class_mask][correct_mask],
+                    mode='markers',
+                    marker=dict(
+                        size=6,
+                        color=colors[i % len(colors)],
+                        opacity=0.8,
+                        line=dict(width=1, color='white')
+                    ),
+                    name=f'Class {int(cls)} ✓',
+                    legendgroup=f'class_{cls}',
+                    hovertemplate=f'Class {int(cls)}<br>Correct<extra></extra>'
+                ), row=row, col=col)
+
+            # Incorrect predictions
+            if np.any(~correct_mask):
+                fig.add_trace(go.Scatter3d(
+                    x=x[class_mask][~correct_mask],
+                    y=y[class_mask][~correct_mask],
+                    z=z[class_mask][~correct_mask],
+                    mode='markers',
+                    marker=dict(
+                        size=6,
+                        color=colors[i % len(colors)],
+                        opacity=0.8,
+                        symbol='x',
+                        line=dict(width=2, color='black')
+                    ),
+                    name=f'Class {int(cls)} ✗',
+                    legendgroup=f'class_{cls}',
+                    hovertemplate=f'Class {int(cls)}<br>Misclassified<extra></extra>'
+                ), row=row, col=col)
+
+        # Add decision boundary visualization (simplified)
+        self._add_decision_boundary_hint(fig, row, col, x, y, z, accuracy)
+
+    def _add_weight_distribution(self, fig, row, col):
+        """
+        Add weight distribution histogram to dashboard.
+
+        Args:
+            fig (plotly.graph_objects.Figure): Figure to add to
+            row (int): Subplot row
+            col (int): Subplot column
+        """
+        if not self.weight_evolution:
+            return
+
+        latest_weights = self.weight_evolution[-1]
+
+        # Create a simulated weight distribution for demonstration
+        weights = np.random.normal(latest_weights['mean'], latest_weights['std'], 1000)
+        weights = weights[(weights > -10) & (weights < 10)]  # Filter extremes
+
+        fig.add_trace(go.Histogram(
+            x=weights,
+            nbinsx=50,
+            name='Weight Distribution',
+            marker_color='lightblue',
+            opacity=0.7,
+            hovertemplate='Weight: %{x:.3f}<br>Count: %{y}<extra></extra>'
+        ), row=row, col=col)
+
+        # Add statistical annotations
+        fig.add_annotation(
+            xref=f"x{3*(row-1)+col}", yref=f"y{3*(row-1)+col}",
+            x=0.8, y=0.9,
+            xanchor='left',
+            text=f"μ: {latest_weights['mean']:.3f}<br>σ: {latest_weights['std']:.3f}",
+            showarrow=False,
+            bgcolor="white",
+            bordercolor="black",
+            borderwidth=1
+        )
+
+    def _add_feature_correlation(self, fig, row, col):
+        """
+        Add feature correlation heatmap to dashboard.
+
+        Args:
+            fig (plotly.graph_objects.Figure): Figure to add to
+            row (int): Subplot row
+            col (int): Subplot column
+        """
+        if not self.feature_space_snapshots:
+            return
+
+        latest_snapshot = self.feature_space_snapshots[-1]
+        features = latest_snapshot['features']
+
+        if features.shape[1] > 1:
+            corr_matrix = np.corrcoef(features.T)
+            feature_names = self.feature_names if self.feature_names else [f'F{i+1}' for i in range(features.shape[1])]
+
+            fig.add_trace(go.Heatmap(
+                z=corr_matrix,
+                x=feature_names,
+                y=feature_names,
+                colorscale='RdBu',
+                zmid=0,
+                colorbar=dict(title="Correlation"),
+                hovertemplate='%{y} vs %{x}<br>Correlation: %{z:.3f}<extra></extra>'
+            ), row=row, col=col)
+
+    def _add_weight_evolution(self, fig, row, col):
+        """
+        Add weight evolution over time to dashboard.
+
+        Args:
+            fig (plotly.graph_objects.Figure): Figure to add to
+            row (int): Subplot row
+            col (int): Subplot column
+        """
+        if not self.weight_evolution:
+            return
+
+        rounds = [w['round'] for w in self.weight_evolution]
+        means = [w['mean'] for w in self.weight_evolution]
+        stds = [w['std'] for w in self.weight_evolution]
+
+        fig.add_trace(go.Scatter(
+            x=rounds, y=means, mode='lines',
+            name='Mean Weight', line=dict(color='green', width=2),
+            hovertemplate='Round: %{x}<br>Mean: %{y:.4f}<extra></extra>'
+        ), row=row, col=col)
+
+        # Add std deviation area
+        fig.add_trace(go.Scatter(
+            x=rounds + rounds[::-1],
+            y=np.array(means) + np.array(stds) + (np.array(means) - np.array(stds))[::-1],
+            fill='toself',
+            fillcolor='rgba(0,255,0,0.2)',
+            line=dict(color='rgba(255,255,255,0)'),
+            name='±1 Std Dev',
+            showlegend=False,
+            hovertemplate='Standard Deviation Range<extra></extra>'
+        ), row=row, col=col)
+
+    def _add_accuracy_progression(self, fig, row, col):
+        """
+        Add accuracy progression with educational annotations.
+
+        Args:
+            fig (plotly.graph_objects.Figure): Figure to add to
+            row (int): Subplot row
+            col (int): Subplot column
+        """
+        if not self.accuracy_progression:
+            return
+
+        rounds = [s['round'] for s in self.accuracy_progression]
+        accuracies = [s['accuracy'] for s in self.accuracy_progression]
+
+        fig.add_trace(go.Scatter(
+            x=rounds, y=accuracies, mode='lines+markers',
+            name='Accuracy', line=dict(color='blue', width=3),
+            hovertemplate='Round: %{x}<br>Accuracy: %{y:.2f}%<extra></extra>'
+        ), row=row, col=col)
+
+        # Add educational markers
+        if len(accuracies) > 10:
+            # Mark convergence point
+            convergence_idx = self._find_convergence_point(accuracies)
+            if convergence_idx is not None:
+                fig.add_trace(go.Scatter(
+                    x=[rounds[convergence_idx]], y=[accuracies[convergence_idx]],
+                    mode='markers+text',
+                    marker=dict(size=12, color='green', symbol='diamond'),
+                    text=['Convergence'],
+                    textposition='top center',
+                    name='Convergence Point',
+                    hovertemplate=f'Convergence at round {rounds[convergence_idx]}<br>Accuracy: {accuracies[convergence_idx]:.2f}%<extra></extra>'
+                ), row=row, col=col)
+
+    def _add_performance_summary(self, fig, row, col):
+        """
+        Add performance summary as donut chart.
+
+        Args:
+            fig (plotly.graph_objects.Figure): Figure to add to
+            row (int): Subplot row
+            col (int): Subplot column
+        """
+        if not self.accuracy_progression:
+            return
+
+        latest_accuracy = self.accuracy_progression[-1]['accuracy']
+        error_rate = 100 - latest_accuracy
+
+        fig.add_trace(go.Bar(
+            x=['Correct', 'Incorrect'],
+            y=[latest_accuracy, error_rate],
+            marker_color=['green', 'red'],
+            name="Performance",
+            hovertemplate='%{x}: %{y:.1f}%<extra></extra>'
+        ), row=row, col=col)
+
+    def _add_confusion_matrix(self, fig, row, col):
+        """
+        Add confusion matrix visualization.
+
+        Args:
+            fig (plotly.graph_objects.Figure): Figure to add to
+            row (int): Subplot row
+            col (int): Subplot column
+        """
+        if not self.feature_space_snapshots:
+            return
+
+        latest_snapshot = self.feature_space_snapshots[-1]
+        targets = latest_snapshot['targets']
+        predictions = latest_snapshot['predictions']
+
+        # Create simplified confusion matrix
+        unique_classes = np.unique(np.concatenate([targets, predictions]))
+        from sklearn.metrics import confusion_matrix
+        cm = confusion_matrix(targets, predictions, labels=unique_classes)
+
+        fig.add_trace(go.Heatmap(
+            z=cm,
+            x=[f'Pred {int(c)}' for c in unique_classes],
+            y=[f'True {int(c)}' for c in unique_classes],
+            colorscale='Blues',
+            hovertemplate='True: %{y}<br>Pred: %{x}<br>Count: %{z}<extra></extra>'
+        ), row=row, col=col)
+
+    # =========================================================================
+    # STANDARD VISUALIZATION METHODS
+    # =========================================================================
+
+    def create_training_dashboard(self, output_file="training_dashboard.html"):
+        """
+        Create a comprehensive training dashboard with multiple visualization types.
+
+        Args:
+            output_file (str): Path for output HTML file
+
+        Returns:
+            str or None: Path to generated file if successful, None otherwise
+        """
+        try:
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
+            import pandas as pd
+
+            if not self.training_history:
+                print("No training history available for dashboard")
+                return None
+
+            # Create subplots
+            fig = make_subplots(
+                rows=2, cols=2,
+                subplot_titles=('Accuracy Progression', 'Feature Space',
+                              'Weight Distribution', 'Training Summary'),
+                specs=[[{"type": "xy"}, {"type": "scatter3d"}],
+                       [{"type": "xy"}, {"type": "xy"}]]  # CHANGED from "domain" to "xy"
+            )
+
+            # 1. Accuracy Progression (top-left)
+            rounds = [s['round'] for s in self.training_history]
+            accuracies = [s['accuracy'] for s in self.training_history]
+
+            fig.add_trace(go.Scatter(
+                x=rounds, y=accuracies, mode='lines+markers',
+                name='Accuracy', line=dict(color='blue', width=2)
+            ), row=1, col=1)
+
+            # 2. Feature Space (top-right) - use latest snapshot
+            latest_snapshot = self.training_history[-1]
+            if (latest_snapshot['features'] is not None and
+                latest_snapshot['features'].shape[1] >= 3):
+
+                features = latest_snapshot['features']
+                targets = latest_snapshot['targets']
+
+                # Use first 3 features for 3D plot
+                x, y, z = features[:, 0], features[:, 1], features[:, 2]
+
+                # Create color mapping
+                unique_classes = np.unique(targets)
+                for i, cls in enumerate(unique_classes):
+                    class_mask = targets == cls
+                    fig.add_trace(go.Scatter3d(
+                        x=x[class_mask], y=y[class_mask], z=z[class_mask],
+                        mode='markers', name=f'Class {int(cls)}',
+                        marker=dict(size=4, opacity=0.7)
+                    ), row=1, col=2)
+
+            # 3. Weight Distribution (bottom-left)
+            if self.weight_evolution:
+                latest_weights = self.weight_evolution[-1]
+                # Create sample weight distribution
+                weights = np.random.normal(latest_weights['mean'],
+                                         latest_weights['std'], 1000)
+                fig.add_trace(go.Histogram(
+                    x=weights, nbinsx=30, name='Weights',
+                    marker_color='lightgreen', opacity=0.7
+                ), row=2, col=1)
+
+            # 4. Training Summary (bottom-right)
+            best_accuracy = max(accuracies) if accuracies else 0
+            final_accuracy = accuracies[-1] if accuracies else 0
+
+            summary_text = f"""
+            Training Summary:
+            • Total Rounds: {len(self.training_history)}
+            • Best Accuracy: {best_accuracy:.2f}%
+            • Final Accuracy: {final_accuracy:.2f}%
+            • Features: {latest_snapshot['features'].shape[1]}
+            • Samples: {len(latest_snapshot['features'])}
+            """
+
+            fig.add_annotation(
+                text=summary_text,
+                xref="paper", yref="paper",
+                x=0.95, y=0.05,
+                xanchor="right", yanchor="bottom",
+                showarrow=False,
+                bgcolor="white",
+                bordercolor="black",
+                borderwidth=1,
+                font=dict(size=10)
+            )
+
+            fig.update_layout(
+                height=800,
+                title_text="DBNN Training Dashboard",
+                showlegend=True
+            )
+
+            # Ensure output directory exists
+            os.makedirs(os.path.dirname(output_file), exist_ok=True)
+            fig.write_html(output_file)
+            print(f"✅ Training dashboard saved: {output_file}")
+            return output_file
+
+        except Exception as e:
+            print(f"Error creating training dashboard: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def generate_feature_space_plot(self, snapshot_idx: int, feature_indices: List[int] = [0, 1, 2]):
+        """
+        Generate 3D feature space plot for a specific training snapshot.
+
+        Args:
+            snapshot_idx (int): Index of training snapshot to visualize
+            feature_indices (list): Indices of features to use for 3D plot
+
+        Returns:
+            plotly.graph_objects.Figure or None: 3D feature space plot
+        """
+        try:
+            import plotly.graph_objects as go
+            import plotly.express as px
+            import pandas as pd
+        except ImportError:
+            print("Plotly not available for visualization")
+            return None
+
+        if snapshot_idx >= len(self.training_history):
+            return None
+
+        snapshot = self.training_history[snapshot_idx]
+        features = snapshot['features']
+        targets = snapshot['targets']
+
+        # Create DataFrame for plotting
+        df = pd.DataFrame({
+            f'Feature_{feature_indices[0]}': features[:, feature_indices[0]],
+            f'Feature_{feature_indices[1]}': features[:, feature_indices[1]],
+            f'Feature_{feature_indices[2]}': features[:, feature_indices[2]],
+            'Class': targets,
+            'Prediction': snapshot['predictions']
+        })
+
+        fig = px.scatter_3d(
+            df,
+            x=f'Feature_{feature_indices[0]}',
+            y=f'Feature_{feature_indices[1]}',
+            z=f'Feature_{feature_indices[2]}',
+            color='Class',
+            title=f'Feature Space - Round {snapshot["round"]}<br>Accuracy: {snapshot["accuracy"]:.2f}%',
+            opacity=0.7
+        )
+
+        return fig
+
+    def generate_accuracy_plot(self):
+        """
+        Generate accuracy progression plot over training rounds.
+
+        Returns:
+            plotly.graph_objects.Figure or None: Accuracy progression plot
+        """
+        try:
+            import plotly.graph_objects as go
+        except ImportError:
+            print("Plotly not available for visualization")
+            return None
+
+        if len(self.training_history) < 2:
+            return None
+
+        rounds = [s['round'] for s in self.training_history]
+        accuracies = [s['accuracy'] for s in self.training_history]
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=rounds, y=accuracies,
+            mode='lines+markers',
+            name='Accuracy'
+        ))
+
+        fig.update_layout(
+            title='Training Accuracy Progression',
+            xaxis_title='Training Round',
+            yaxis_title='Accuracy (%)'
+        )
+
+        return fig
+
+    def generate_weight_distribution_plot(self, snapshot_idx: int):
+        """
+        Generate weight distribution histogram for a specific snapshot.
+
+        Args:
+            snapshot_idx (int): Index of training snapshot
+
+        Returns:
+            plotly.graph_objects.Figure or None: Weight distribution histogram
+        """
+        try:
+            import plotly.graph_objects as go
+        except ImportError:
+            print("Plotly not available for visualization")
+            return None
+
+        if snapshot_idx >= len(self.training_history):
+            return None
+
+        snapshot = self.training_history[snapshot_idx]
+        weights = snapshot['weights']
+
+        # Flatten weights for histogram
+        flat_weights = weights.flatten()
+        # Remove zeros and extreme values for better visualization
+        flat_weights = flat_weights[(flat_weights != 0) & (np.abs(flat_weights) < 100)]
+
+        fig = go.Figure()
+        fig.add_trace(go.Histogram(
+            x=flat_weights,
+            nbinsx=50,
+            name='Weight Distribution'
+        ))
+
+        fig.update_layout(
+            title=f'Weight Distribution - Round {snapshot["round"]}',
+            xaxis_title='Weight Value',
+            yaxis_title='Frequency'
+        )
+
+        return fig
+
+    # =========================================================================
+    # TENSOR MODE SPECIFIC VISUALIZATIONS
+    # =========================================================================
+
+    def generate_tensor_space_plot(self, snapshot_idx: int, feature_indices: List[int] = [0, 1, 2]):
+        """
+        Generate 3D tensor feature space plot for tensor mode training.
+
+        Args:
+            snapshot_idx (int): Index of tensor snapshot
+            feature_indices (list): Feature indices for 3D plot
+
+        Returns:
+            plotly.graph_objects.Figure or None: Tensor feature space plot
+        """
+        try:
+            import plotly.graph_objects as go
+            import plotly.express as px
+            import pandas as pd
+        except ImportError:
+            print("Plotly not available for visualization")
+            return None
+
+        if snapshot_idx >= len(self.training_history):
+            return None
+
+        snapshot = self.training_history[snapshot_idx]
+        features = snapshot['features']
+        targets = snapshot['targets']
+        predictions = snapshot['predictions']
+
+        # Create DataFrame for plotting
+        df = pd.DataFrame({
+            f'Feature_{feature_indices[0]}': features[:, feature_indices[0]],
+            f'Feature_{feature_indices[1]}': features[:, feature_indices[1]],
+            f'Feature_{feature_indices[2]}': features[:, feature_indices[2]],
+            'Actual_Class': targets,
+            'Predicted_Class': predictions,
+            'Correct': targets == predictions
+        })
+
+        fig = px.scatter_3d(
+            df,
+            x=f'Feature_{feature_indices[0]}',
+            y=f'Feature_{feature_indices[1]}',
+            z=f'Feature_{feature_indices[2]}',
+            color='Predicted_Class',
+            symbol='Correct',
+            title=f'Tensor Feature Space - Iteration {snapshot["round"]}<br>Accuracy: {snapshot["accuracy"]:.2f}%',
+            opacity=0.7,
+            color_discrete_sequence=px.colors.qualitative.Set1
+        )
+
+        return fig
+
+    def generate_weight_matrix_heatmap(self, snapshot_idx: int):
+        """
+        Generate heatmap of the weight matrix for tensor mode.
+
+        Args:
+            snapshot_idx (int): Index of tensor snapshot
+
+        Returns:
+            plotly.graph_objects.Figure or None: Weight matrix heatmap
+        """
+        try:
+            import plotly.graph_objects as go
+            import plotly.express as px
+        except ImportError:
+            print("Plotly not available for visualization")
+            return None
+
+        if (snapshot_idx >= len(self.training_history) or
+            not self.training_history[snapshot_idx].get('is_tensor_mode', False) or
+            'tensor_data' not in self.training_history[snapshot_idx]):
+            return None
+
+        snapshot = self.training_history[snapshot_idx]
+        tensor_data = snapshot['tensor_data']
+        weight_matrix = tensor_data.get('weight_matrix')
+
+        if weight_matrix is None:
+            return None
+
+        fig = go.Figure(data=go.Heatmap(
+            z=weight_matrix,
+            colorscale='RdBu',
+            zmid=0,
+            colorbar=dict(title="Weight Value")
+        ))
+
+        fig.update_layout(
+            title=f'Weight Matrix - Iteration {snapshot["round"]}',
+            xaxis_title='Output Classes',
+            yaxis_title='Input Features',
+            width=600,
+            height=500
+        )
+
+        return fig
+
+    def generate_orthogonal_basis_plot(self, snapshot_idx: int):
+        """
+        Generate visualization of orthogonal basis components for tensor mode.
+
+        Args:
+            snapshot_idx (int): Index of tensor snapshot
+
+        Returns:
+            plotly.graph_objects.Figure or None: Orthogonal basis plot
+        """
+        try:
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
+        except ImportError:
+            print("Plotly not available for visualization")
+            return None
+
+        if (snapshot_idx >= len(self.training_history) or
+            not self.training_history[snapshot_idx].get('is_tensor_mode', False) or
+            'tensor_data' not in self.training_history[snapshot_idx]):
+            return None
+
+        snapshot = self.training_history[snapshot_idx]
+        tensor_data = snapshot['tensor_data']
+        orthogonal_basis = tensor_data.get('orthogonal_basis')
+
+        if orthogonal_basis is None:
+            return None
+
+        # Show first few components
+        n_components = min(6, orthogonal_basis.shape[1])
+        fig = make_subplots(
+            rows=2, cols=3,
+            subplot_titles=[f'Component {i+1}' for i in range(n_components)]
+        )
+
+        for i in range(n_components):
+            row = i // 3 + 1
+            col = i % 3 + 1
+            component = orthogonal_basis[:, i]
+
+            fig.add_trace(
+                go.Scatter(
+                    y=component,
+                    mode='lines',
+                    name=f'Component {i+1}'
+                ),
+                row=row, col=col
+            )
+
+        fig.update_layout(
+            title=f'Orthogonal Basis Components - Iteration {snapshot["round"]}',
+            height=600,
+            showlegend=False
+        )
+
+        return fig
+
+    def generate_tensor_convergence_plot(self):
+        """
+        Generate convergence plot for tensor mode training.
+
+        Returns:
+            plotly.graph_objects.Figure or None: Tensor convergence plot
+        """
+        try:
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
+        except ImportError:
+            print("Plotly not available for visualization")
+            return None
+
+        if not self.tensor_snapshots:
+            return None
+
+        # Extract tensor-specific metrics
+        iterations = []
+        accuracies = []
+        weight_norms = []
+        basis_ranks = []
+
+        for snapshot in self.tensor_snapshots:
+            if snapshot.get('is_tensor_mode', False) and 'tensor_data' in snapshot:
+                iterations.append(snapshot['round'])
+                accuracies.append(snapshot['accuracy'])
+                tensor_data = snapshot['tensor_data']
+                weight_norms.append(tensor_data.get('weight_matrix_norm', 0))
+                basis_ranks.append(tensor_data.get('basis_rank', 0))
+
+        if not iterations:
+            return None
+
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=('Accuracy Progression', 'Weight Matrix Norm',
+                          'Basis Rank', 'Training Metrics'),
+            specs=[[{"secondary_y": False}, {"secondary_y": False}],
+                   [{"secondary_y": False}, {"secondary_y": True}]]
+        )
+
+        # Accuracy plot
+        fig.add_trace(
+            go.Scatter(x=iterations, y=accuracies, mode='lines+markers',
+                      name='Accuracy', line=dict(color='blue')),
+            row=1, col=1
+        )
+
+        # Weight norm plot
+        fig.add_trace(
+            go.Scatter(x=iterations, y=weight_norms, mode='lines+markers',
+                      name='Weight Norm', line=dict(color='red')),
+            row=1, col=2
+        )
+
+        # Basis rank plot
+        fig.add_trace(
+            go.Scatter(x=iterations, y=basis_ranks, mode='lines+markers',
+                      name='Basis Rank', line=dict(color='green')),
+            row=2, col=1
+        )
+
+        # Combined metrics
+        fig.add_trace(
+            go.Scatter(x=iterations, y=accuracies, mode='lines',
+                      name='Accuracy', line=dict(color='blue')),
+            row=2, col=2, secondary_y=False
+        )
+
+        fig.add_trace(
+            go.Scatter(x=iterations, y=weight_norms, mode='lines',
+                      name='Weight Norm', line=dict(color='red')),
+            row=2, col=2, secondary_y=True
+        )
+
+        fig.update_layout(
+            height=800,
+            title_text="Tensor Mode Training Convergence",
+            showlegend=True
+        )
+
+        fig.update_xaxes(title_text="Iteration", row=2, col=1)
+        fig.update_xaxes(title_text="Iteration", row=2, col=2)
+        fig.update_yaxes(title_text="Accuracy (%)", row=1, col=1)
+        fig.update_yaxes(title_text="Norm", row=1, col=2)
+        fig.update_yaxes(title_text="Rank", row=2, col=1)
+        fig.update_yaxes(title_text="Accuracy (%)", row=2, col=2, secondary_y=False)
+        fig.update_yaxes(title_text="Weight Norm", row=2, col=2, secondary_y=True)
+
+        return fig
+
+    def create_tensor_dashboard(self, output_file: str = "tensor_training_dashboard.html"):
+        """
+        Create comprehensive tensor training dashboard.
+
+        Args:
+            output_file (str): Path for output HTML file
+
+        Returns:
+            str or None: Path to generated file if successful, None otherwise
+        """
+        try:
+            from plotly.subplots import make_subplots
+            import plotly.graph_objects as go
+        except ImportError:
+            print("Plotly not available for dashboard creation")
+            return None
+
+        if not self.tensor_snapshots:
+            print("No tensor snapshots available for dashboard")
+            return None
+
+        # Create subplots
+        fig = make_subplots(
+            rows=3, cols=2,
+            subplot_titles=('Tensor Feature Space', 'Accuracy Progression',
+                          'Weight Matrix', 'Orthogonal Basis',
+                          'Convergence Metrics', 'Training Summary'),
+            specs=[[{"type": "scatter3d"}, {"type": "xy"}],
+                   [{"type": "heatmap"}, {"type": "xy"}],
+                   [{"type": "xy"}, {"type": "domain"}]],
+            vertical_spacing=0.08,
+            horizontal_spacing=0.08
+        )
+
+        # Feature Space (latest tensor snapshot)
+        feature_fig = self.generate_tensor_space_plot(-1)
+        if feature_fig:
+            for trace in feature_fig.data:
+                fig.add_trace(trace, row=1, col=1)
+
+        # Accuracy Progression
+        iterations = [s['round'] for s in self.tensor_snapshots]
+        accuracies = [s['accuracy'] for s in self.tensor_snapshots]
+        fig.add_trace(go.Scatter(x=iterations, y=accuracies, mode='lines+markers',
+                               name='Accuracy', line=dict(color='blue')), row=1, col=2)
+
+        # Weight Matrix Heatmap (latest)
+        weight_fig = self.generate_weight_matrix_heatmap(-1)
+        if weight_fig:
+            for trace in weight_fig.data:
+                fig.add_trace(trace, row=2, col=1)
+
+        # Orthogonal Basis (latest)
+        basis_fig = self.generate_orthogonal_basis_plot(-1)
+        if basis_fig:
+            for trace in basis_fig.data:
+                fig.add_trace(trace, row=2, col=2)
+
+        # Convergence Metrics
+        convergence_fig = self.generate_tensor_convergence_plot()
+        if convergence_fig:
+            for trace in convergence_fig.data:
+                fig.add_trace(trace, row=3, col=1)
+
+        # Training Summary
+        best_snapshot = max(self.tensor_snapshots, key=lambda x: x['accuracy'])
+        final_accuracy = self.tensor_snapshots[-1]['accuracy'] if self.tensor_snapshots else 0
+
+        summary_text = f"""
+        <b>Tensor Training Summary:</b><br>
+        - Total Iterations: {len(self.tensor_snapshots)}<br>
+        - Best Accuracy: {best_snapshot['accuracy']:.2f}%<br>
+        - Best Iteration: {best_snapshot['round']}<br>
+        - Final Accuracy: {final_accuracy:.2f}%<br>
+        - Features: {best_snapshot['features'].shape[1]}<br>
+        - Classes: {len(np.unique(best_snapshot['targets']))}<br>
+        - Mode: Tensor Transformation
+        """
+
+        fig.add_trace(go.Scatter(
+            x=[0, 1], y=[0, 1],
+            mode='text',
+            text=[summary_text],
+            textposition="middle center",
+            showlegend=False,
+            textfont=dict(size=11)
+        ), row=3, col=2)
+
+        fig.update_layout(
+            height=1200,
+            title_text="DBNN Tensor Training Dashboard",
+            showlegend=True
+        )
+
+        try:
+            # Ensure output directory exists
+            os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+            fig.write_html(output_file)
+            print(f"Tensor training dashboard saved to: {output_file}")
+            return output_file
+        except Exception as e:
+            print(f"Error saving tensor dashboard: {e}")
+            return None
+
+    # =========================================================================
+    # UTILITY AND HELPER METHODS
+    # =========================================================================
+
+    def get_training_history(self):
+        """
+        Get the complete training history.
+
+        Returns:
+            list: List of training snapshots
+        """
+        return self.training_history
+
+    def clear_history(self):
+        """Clear all visualization history and data."""
+        self.training_history = []
+        self.visualization_data = {}
+        self.tensor_snapshots = []
+        self.feature_space_snapshots = []
+        self.feature_names = []
+        self.class_names = []
+        self.accuracy_progression = []
+        self.weight_evolution = []
+        self.confusion_data = []
+        self.decision_boundaries = []
+        self.feature_importance_data = []
+        self.learning_curves = []
+        self.network_topology_data = []
+
+    def _project_to_3d(self, features):
+        """
+        Project features to 3D using PCA for visualization.
+
+        Args:
+            features (numpy.ndarray): Input features
+
+        Returns:
+            tuple: (x, y, z) coordinates for 3D plotting
+        """
+        from sklearn.decomposition import PCA
+        pca = PCA(n_components=3)
+        projected = pca.fit_transform(features)
+        return projected[:, 0], projected[:, 1], projected[:, 2]
+
+    def _find_convergence_point(self, accuracies, window=5, threshold=0.1):
+        """
+        Find where the model converges (accuracy changes become small).
+
+        Args:
+            accuracies (list): List of accuracy values
+            window (int): Window size for convergence detection
+            threshold (float): Threshold for convergence detection
+
+        Returns:
+            int or None: Index of convergence point
+        """
+        if len(accuracies) < window * 2:
+            return None
+
+        for i in range(window, len(accuracies) - window):
+            prev_mean = np.mean(accuracies[i-window:i])
+            next_mean = np.mean(accuracies[i:i+window])
+            if abs(next_mean - prev_mean) < threshold:
+                return i
+        return None
+
+    def _add_decision_boundary_hint(self, fig, row, col, x, y, z, accuracy):
+        """
+        Add visual hints about decision boundaries to 3D plot.
+
+        Args:
+            fig (plotly.graph_objects.Figure): Figure to add to
+            row (int): Subplot row
+            col (int): Subplot column
+            x (numpy.ndarray): X coordinates
+            y (numpy.ndarray): Y coordinates
+            z (numpy.ndarray): Z coordinates
+            accuracy (float): Current accuracy
+        """
+        # Add a transparent surface to suggest decision boundaries
+        x_range = np.linspace(min(x), max(x), 10)
+        y_range = np.linspace(min(y), max(y), 10)
+        X, Y = np.meshgrid(x_range, y_range)
+        Z = np.zeros_like(X)  # Simple plane for demonstration
+
+        fig.add_trace(go.Surface(
+            x=X, y=Y, z=Z,
+            opacity=0.3,
+            colorscale='Blues',
+            showscale=False,
+            name='Decision Boundary Hint'
+        ), row=row, col=col)
+
+        # Add accuracy annotation
+        fig.add_annotation(
+            xref=f"x{3*(row-1)+col}", yref=f"y{3*(row-1)+col}",
+            x=0.5, y=0.5, z=1.1,
+            text=f"Accuracy: {accuracy:.1f}%",
+            showarrow=False,
+            bgcolor="white",
+            bordercolor="black",
+            borderwidth=1
+        )
+
+    def generate_enhanced_interactive_3d(self, output_file="enhanced_3d_visualization.html"):
+        """Generate enhanced 3D visualization with interactive controls - ROBUST VERSION"""
+        try:
+            import plotly.graph_objects as go
+            import plotly.express as px
+
+            if not self.feature_space_snapshots:
+                print("❌ No feature space snapshots available for enhanced 3D visualization")
+                return None
+
+            # Use the latest snapshot for static visualization
+            latest_snapshot = self.feature_space_snapshots[-1]
+            features = latest_snapshot['features']
+            targets = latest_snapshot['targets']
+            predictions = latest_snapshot['predictions']
+
+            # Ensure we have at least 2D data
+            if features.shape[1] < 2:
+                print("❌ Insufficient features for 3D visualization (need at least 2)")
+                return None
+
+            # Create the figure
+            fig = go.Figure()
+
+            # Prepare features for 3D plotting
+            if features.shape[1] >= 3:
+                x, y, z = features[:, 0], features[:, 1], features[:, 2]
+                feature_names = latest_snapshot.get('feature_names', ['Feature 1', 'Feature 2', 'Feature 3'])
+            else:
+                # Pad with zeros if fewer than 3 features
+                x = features[:, 0]
+                y = features[:, 1] if features.shape[1] > 1 else np.zeros_like(x)
+                z = np.zeros_like(x)
+                feature_names = latest_snapshot.get('feature_names', ['Feature 1', 'Feature 2', 'Feature 3'])
+                # Ensure we have enough feature names
+                while len(feature_names) < 3:
+                    feature_names.append(f'Feature {len(feature_names) + 1}')
+
+            unique_classes = np.unique(targets)
+            colors = px.colors.qualitative.Set1
+
+            # Plot each class
+            for i, cls in enumerate(unique_classes):
+                class_mask = targets == cls
+                if np.any(class_mask):
+                    # Get class predictions
+                    class_predictions = predictions[class_mask]
+                    class_targets = targets[class_mask]
+                    correct_mask = class_predictions == class_targets
+
+                    cls_name = f'Class {int(cls)}'
+
+                    # Correct predictions
+                    if np.any(correct_mask):
+                        fig.add_trace(go.Scatter3d(
+                            x=x[class_mask][correct_mask],
+                            y=y[class_mask][correct_mask],
+                            z=z[class_mask][correct_mask],
+                            mode='markers',
+                            marker=dict(
+                                size=6,
+                                color=colors[i % len(colors)],
+                                opacity=0.8,
+                                line=dict(width=1, color='white')
+                            ),
+                            name=f'{cls_name} ✓',
+                            hovertemplate=(
+                                f'{cls_name} - Correct<br>' +
+                                f'{feature_names[0]}: %{{x:.3f}}<br>' +
+                                f'{feature_names[1]}: %{{y:.3f}}<br>' +
+                                f'{feature_names[2]}: %{{z:.3f}}<br>' +
+                                '<extra></extra>'
+                            )
+                        ))
+
+                    # Incorrect predictions
+                    if np.any(~correct_mask):
+                        fig.add_trace(go.Scatter3d(
+                            x=x[class_mask][~correct_mask],
+                            y=y[class_mask][~correct_mask],
+                            z=z[class_mask][~correct_mask],
+                            mode='markers',
+                            marker=dict(
+                                size=6,
+                                color=colors[i % len(colors)],
+                                opacity=0.8,
+                                symbol='x',
+                                line=dict(width=2, color='black')
+                            ),
+                            name=f'{cls_name} ✗',
+                            hovertemplate=(
+                                f'{cls_name} - Incorrect<br>' +
+                                f'{feature_names[0]}: %{{x:.3f}}<br>' +
+                                f'{feature_names[1]}: %{{y:.3f}}<br>' +
+                                f'{feature_names[2]}: %{{z:.3f}}<br>' +
+                                '<extra></extra>'
+                            )
+                        ))
+
+            # Update layout
+            fig.update_layout(
+                title={
+                    'text': f"3D Feature Space Visualization<br>Iteration {latest_snapshot['iteration']}",
+                    'x': 0.5,
+                    'xanchor': 'center'
+                },
+                scene=dict(
+                    xaxis_title=feature_names[0],
+                    yaxis_title=feature_names[1],
+                    zaxis_title=feature_names[2],
+                    camera=dict(eye=dict(x=1.5, y=1.5, z=1.5))
+                ),
+                width=1000,
+                height=700,
+                showlegend=True
+            )
+
+            # Ensure output directory exists
+            os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+            fig.write_html(output_file)
+            print(f"✅ Enhanced 3D visualization saved: {output_file}")
+            return output_file
+
+        except Exception as e:
+            print(f"❌ Error creating enhanced 3D visualization: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def generate_interactive_visualizations(self, output_dir="Visualisations"):
+        """Generate all interactive visualizations with proper folder organization"""
+        if not hasattr(self, 'visualizer') or not self.visualizer:
+            print("❌ No visualizer available. Please enable enhanced visualization before training.")
+            return None
+
+        # Check if we have any visualization data
+        has_data = (hasattr(self.visualizer, 'training_history') and self.visualizer.training_history) or \
+                   (hasattr(self.visualizer, 'feature_space_snapshots') and self.visualizer.feature_space_snapshots) or \
+                   (hasattr(self.visualizer, 'accuracy_progression') and self.visualizer.accuracy_progression)
+
+        if not has_data:
+            print("❌ No visualization data available.")
+            print("   Enable with enable_enhanced_visualization() before training")
+            return None
+
+        try:
+            import os
+
+            # Create organized directory structure based on data file
+            if hasattr(self, 'current_file') and self.current_file:
+                base_name = os.path.splitext(os.path.basename(self.current_file))[0]
+            else:
+                base_name = "dbnn_training"
+
+            if hasattr(self, 'feature_columns') and self.feature_columns:
+                feature_info = f"{len(self.feature_columns)}features"
+                base_name = f"{base_name}_{feature_info}"
+
+            # Create main visualization folder for this dataset
+            main_viz_dir = os.path.join(output_dir, base_name)
+            standard_dir = os.path.join(main_viz_dir, "Standard")
+            enhanced_dir = os.path.join(main_viz_dir, "Enhanced")
+            os.makedirs(standard_dir, exist_ok=True)
+            os.makedirs(enhanced_dir, exist_ok=True)
+
+            # Store the main visualization directory for easy access
+            self.main_viz_directory = main_viz_dir
+
+            print(f"📁 Creating visualizations in: {main_viz_dir}")
+
+            outputs = {}
+
+            # 1. Generate ENHANCED visualizations
+            print("🔄 Generating enhanced visualizations...")
+
+            # Enhanced 3D
+            enhanced_3d_file = os.path.join(enhanced_dir, f"{base_name}_enhanced_3d.html")
+            result = self.visualizer.generate_enhanced_interactive_3d(enhanced_3d_file)
+            if result:
+                outputs['enhanced_3d'] = result
+                print(f"✅ Enhanced 3D: {result}")
+
+            # Advanced Dashboard
+            dashboard_file = os.path.join(enhanced_dir, f"{base_name}_advanced_dashboard.html")
+            result = self.visualizer.create_advanced_interactive_dashboard(dashboard_file)
+            if result:
+                outputs['advanced_dashboard'] = result
+                print(f"✅ Advanced dashboard: {result}")
+
+            # Complex Tensor Evolution
+            complex_file = os.path.join(enhanced_dir, f"{base_name}_complex_tensor.html")
+            result = self.visualizer.generate_complex_tensor_evolution(complex_file)
+            if result:
+                outputs['complex_tensor'] = result
+                print(f"✅ Complex tensor evolution: {result}")
+
+            # Phase Diagram
+            phase_file = os.path.join(enhanced_dir, f"{base_name}_phase_diagram.html")
+            result = self.visualizer.generate_complex_phase_diagram(phase_file)
+            if result:
+                outputs['phase_diagram'] = result
+                print(f"✅ Complex phase diagram: {result}")
+
+            # 2. Generate STANDARD visualizations
+            print("🔄 Generating standard visualizations...")
+
+            # Traditional Dashboard
+            traditional_file = os.path.join(standard_dir, f"{base_name}_traditional_dashboard.html")
+            result = self.visualizer.create_training_dashboard(traditional_file)
+            if result:
+                outputs['traditional_dashboard'] = result
+                print(f"✅ Traditional dashboard: {result}")
+
+            # Performance Metrics
+            performance_file = os.path.join(standard_dir, f"{base_name}_performance.html")
+            result = self.visualizer.generate_performance_metrics(performance_file)
+            if result:
+                outputs['performance'] = result
+                print(f"✅ Performance metrics: {result}")
+
+            # Correlation Matrix
+            correlation_file = os.path.join(standard_dir, f"{base_name}_correlation.html")
+            result = self.visualizer.generate_correlation_matrix(correlation_file)
+            if result:
+                outputs['correlation'] = result
+                print(f"✅ Correlation matrix: {result}")
+
+            # Feature Explorer
+            feature_file = os.path.join(standard_dir, f"{base_name}_feature_explorer.html")
+            result = self.visualizer.generate_basic_3d_visualization(feature_file)
+            if result:
+                outputs['feature_explorer'] = result
+                print(f"✅ Feature explorer: {result}")
+
+            # Animated Training
+            animated_file = os.path.join(standard_dir, f"{base_name}_animated.html")
+            result = self.visualizer.generate_animated_training(animated_file)
+            if result:
+                outputs['animated'] = result
+                print(f"✅ Animated training: {result}")
+
+            # Confusion Matrix Animation
+            confusion_file = os.path.join(standard_dir, f"{base_name}_confusion_animation.html")
+            result = self.visualizer.generate_animated_confusion_matrix(confusion_file)
+            if result:
+                outputs['confusion_animation'] = result
+                print(f"✅ Animated confusion matrix: {result}")
+
+            # Generate summary
+            successful = len(outputs)
+            total_attempted = 11  # Total visualization types we attempt to generate
+            print(f"📊 Visualization Summary: {successful}/{total_attempted} successful")
+
+            if successful == 0:
+                print("💡 Tips to get visualizations working:")
+                print("   - Enable enhanced visualization before training")
+                print("   - Ensure you have plotly installed: pip install plotly")
+                print("   - Train for multiple iterations to capture evolution")
+
+            return outputs
+
+        except Exception as e:
+            print(f"❌ Error generating visualizations: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def generate_basic_3d_visualization(self, output_file="basic_3d.html"):
+        """Generate a basic 3D visualization that's guaranteed to work"""
+        try:
+            import plotly.graph_objects as go
+            import plotly.express as px
+
+            if not self.feature_space_snapshots:
+                return None
+
+            # Use the latest snapshot
+            snapshot = self.feature_space_snapshots[-1]
+            features = snapshot['features']
+            targets = snapshot['targets']
+
+            # Simple 3D scatter plot
+            if features.shape[1] >= 3:
+                fig = px.scatter_3d(
+                    x=features[:, 0], y=features[:, 1], z=features[:, 2],
+                    color=targets.astype(str),
+                    title=f"3D Feature Space - Iteration {snapshot['iteration']}"
+                )
+            else:
+                # If less than 3 features, use what we have
+                x = features[:, 0]
+                y = features[:, 1] if features.shape[1] > 1 else np.zeros_like(x)
+                z = np.zeros_like(x) if features.shape[1] < 3 else features[:, 2]
+
+                fig = px.scatter_3d(
+                    x=x, y=y, z=z,
+                    color=targets.astype(str),
+                    title=f"3D Feature Space - Iteration {snapshot['iteration']}"
+                )
+
+            fig.write_html(output_file)
+            print(f"✅ Basic 3D visualization saved: {output_file}")
+            return output_file
+
+        except Exception as e:
+            print(f"Error creating basic 3D visualization: {e}")
+            return None
+
+    def generate_animated(self, output_file="animated_training.html"):
+        """Generate animated training progression"""
+        try:
+            if not self.feature_space_snapshots:
+                return None
+
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
+
+            # Create simple animation with accuracy progression
+            rounds = [s['round'] for s in self.accuracy_progression]
+            accuracies = [s['accuracy'] for s in self.accuracy_progression]
+
+            fig = go.Figure(
+                data=[go.Scatter(x=rounds, y=accuracies, mode="lines+markers")],
+                layout=go.Layout(
+                    title="Training Progress Animation",
+                    xaxis=dict(title="Iteration"),
+                    yaxis=dict(title="Accuracy (%)"),
+                    updatemenus=[dict(
+                        type="buttons",
+                        buttons=[dict(label="Play",
+                                    method="animate",
+                                    args=[None])])]
+                ),
+                frames=[go.Frame(
+                    data=[go.Scatter(x=rounds[:k+1], y=accuracies[:k+1])],
+                    name=str(k)
+                ) for k in range(len(rounds))]
+            )
+
+            fig.write_html(output_file)
+            print(f"✅ Animated training saved: {output_file}")
+            return output_file
+
+        except Exception as e:
+            print(f"Error generating animation: {e}")
+            return None
+
+    def generate_feature_explorer(self, output_file="feature_explorer.html"):
+        """Generate feature explorer - FIXED NAME"""
+        return self.generate_basic_3d_visualization(output_file)
+
+    def generate_performance(self, output_file="performance.html"):
+        """Generate performance metrics - FIXED NAME"""
+        return self.generate_performance_metrics(output_file)
+
+    def generate_correlation(self, output_file="correlation.html"):
+        """Generate correlation matrix - FIXED NAME"""
+        return self.generate_correlation_matrix(output_file)
+
+    def generate_all_standard(self, output_dir="Visualisations/Standard"):
+        """Generate all standard visualizations - FIXED NAME"""
+        return self.generate_all_standard_visualizations(output_dir)
 
 class ClassEncoder:
     """Handles encoding and decoding of class labels"""
@@ -349,7 +3803,7 @@ class DBNNCore:
         return self.enhanced_visualization_enabled
 
     def _capture_enhanced_snapshot(self, features_batches, encoded_targets_batches, iteration):
-        """Capture enhanced snapshot for visualization - called during training"""
+        """Capture enhanced snapshot for visualization - UPDATED FOR CONFUSION MATRIX"""
         if not self.enhanced_visualization_enabled:
             return
 
@@ -372,7 +3826,7 @@ class DBNNCore:
                 sample_features = all_features
                 sample_targets = all_targets
 
-            # Get predictions
+            # Get predictions - CRITICAL for confusion matrix
             sample_predictions, _ = self.predict_batch(sample_features)
 
             # Get feature names
@@ -389,21 +3843,25 @@ class DBNNCore:
                 unique_targets = np.unique(sample_targets)
                 class_names = [f'Class_{int(t)}' for t in unique_targets]
 
-            # Capture the snapshot
+            # Capture the snapshot - MAKE SURE PREDICTIONS ARE INCLUDED
             if hasattr(self, 'visualizer') and self.visualizer:
                 self.visualizer.capture_feature_space_snapshot(
-                    sample_features, sample_targets, sample_predictions,
-                    iteration, feature_names, class_names
+                    sample_features,
+                    sample_targets,
+                    sample_predictions,  # This is crucial for confusion matrix
+                    iteration,
+                    feature_names,
+                    class_names
                 )
 
                 if iteration % 20 == 0:  # Log every 20 iterations to avoid spam
-                    self.log(f"📊 Captured enhanced visualization snapshot at iteration {iteration}")
+                    accuracy = np.mean(sample_predictions == sample_targets) * 100
+                    self.log(f"📊 Captured visualization snapshot at iteration {iteration} (Accuracy: {accuracy:.1f}%)")
 
         except Exception as e:
             # Don't crash training if visualization fails
             if iteration % 10 == 0:  # Only log occasionally
                 self.log(f"⚠️ Enhanced visualization snapshot failed: {e}")
-
 
     def load_model_auto_config(self, model_path: str):
         """
@@ -1810,13 +5268,15 @@ class DBNNCore:
         return self.predict_batch(features_batch)
 
     def generate_interactive_viz(self):
-        """Generate interactive 3D visualizations"""
-        if not self.core or not hasattr(self.core, 'visualizer'):
-            messagebox.showerror("Error", "No training data available for visualization")
+        """Generate interactive 3D visualizations - FIXED VERSION"""
+        if not self.core or not hasattr(self.core, 'visualizer') or not self.core.visualizer:
+            messagebox.showerror("Error", "No visualizer available. Please enable enhanced visualization and train a model first.")
             return
 
         try:
-            self.show_processing_indicator("Generating interactive 3D visualizations...")
+            self.show_processing_indicator("Generating interactive visualizations...")
+
+            # Use the core's method to generate visualizations
             outputs = self.core.generate_interactive_visualizations()
 
             if outputs:
@@ -1825,21 +5285,23 @@ class DBNNCore:
                     self.log(f"   {viz_type}: {file_path}")
 
                 # Ask if user wants to open the main visualization
-                if 'interactive_3d' in outputs:
+                if 'enhanced_3d' in outputs:
                     result = messagebox.askyesno(
                         "Visualization Ready",
                         f"Interactive 3D visualization generated!\n\n"
-                        f"File: {outputs['interactive_3d']}\n\n"
+                        f"File: {outputs['enhanced_3d']}\n\n"
                         f"Open in web browser?"
                     )
                     if result:
                         import webbrowser
-                        webbrowser.open(f'file://{os.path.abspath(outputs["interactive_3d"])}')
+                        webbrowser.open(f'file://{os.path.abspath(outputs["enhanced_3d"])}')
             else:
                 self.log("❌ No visualizations could be generated")
 
         except Exception as e:
             self.log(f"❌ Error generating visualizations: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             self.hide_processing_indicator()
 
@@ -1851,6 +5313,11 @@ class DBNNCore:
         """Main training method with early stopping and automatic optimizations
         Now with optional interactive 3D visualization support
         """
+        # Ensure visualizer is available
+        if not hasattr(self, 'visualizer') or self.visualizer is None:
+            self.visualizer = DBNNVisualizer()
+            self.log("✅ Visualizer initialized")
+
         if self.tensor_mode and self.tensor_core:
             self.log("🚀 Starting TENSOR TRANSFORMATION training...")
             return self.tensor_core.tensor_train(
@@ -2067,7 +5534,6 @@ class DBNNCore:
         self.log(f"✅ Interactive 3D visualization enabled (will capture every {capture_interval} iterations)")
 
 
-
     def _capture_interactive_snapshot(self, features_batches, encoded_targets_batches, iteration):
         """Internal method to capture feature space snapshot for interactive visualization"""
         try:
@@ -2115,51 +5581,123 @@ class DBNNCore:
             self.log(f"⚠️ Could not capture interactive visualization snapshot: {e}")
 
     def generate_interactive_visualizations(self, output_dir="Visualisations"):
-        """Generate all interactive visualizations after training"""
-        if not hasattr(self, 'visualizer') or not hasattr(self.visualizer, 'feature_space_snapshots'):
-            self.log("❌ No interactive visualization data available.")
-            self.log("   Enable with enable_interactive_visualization() before training")
+        """Generate all interactive visualizations after training - FIXED FOLDER STRUCTURE"""
+        if not hasattr(self, 'visualizer') or not self.visualizer:
+            print("❌ No visualizer available. Please enable enhanced visualization before training.")
+            return None
+
+        if not hasattr(self.visualizer, 'feature_space_snapshots') or not self.visualizer.feature_space_snapshots:
+            print("❌ No visualization data available.")
+            print("   Enable with enable_interactive_visualization() before training")
             return None
 
         try:
             import os
-            # Create output directory
-            if not os.path.exists(output_dir):
-                os.makedirs(output_dir)
 
-            # Create base filename
-            base_name = "dbnn_training"
+            # Create organized directory structure based on data file
+            if hasattr(self, 'current_file') and self.current_file:
+                base_name = os.path.splitext(os.path.basename(self.current_file))[0]
+            else:
+                base_name = "dbnn_training"
+
             if hasattr(self, 'feature_columns') and self.feature_columns:
-                base_name = f"dbnn_{len(self.feature_columns)}features"
+                base_name = f"{base_name}_{len(self.feature_columns)}features"
+
+            # Create main visualization folder for this dataset
+            main_viz_dir = os.path.join(output_dir, base_name)
+            standard_dir = os.path.join(main_viz_dir, "Standard")
+            enhanced_dir = os.path.join(main_viz_dir, "Enhanced")
+            os.makedirs(standard_dir, exist_ok=True)
+            os.makedirs(enhanced_dir, exist_ok=True)
 
             outputs = {}
 
-            # Generate interactive 3D visualization
-            interactive_3d_file = os.path.join(output_dir, f"{base_name}_interactive_3d.html")
-            result = self.visualizer.generate_interactive_3d_visualization(interactive_3d_file)
-            if result:
-                outputs['interactive_3d'] = result
-                self.log(f"✅ Interactive 3D visualization: {result}")
+            # 1. Generate ENHANCED visualizations
+            print("🔄 Generating enhanced visualizations...")
 
-            # Generate advanced dashboard
-            dashboard_file = os.path.join(output_dir, f"{base_name}_advanced_dashboard.html")
+            # Enhanced 3D
+            enhanced_3d_file = os.path.join(enhanced_dir, f"{base_name}_enhanced_3d.html")
+            result = self.visualizer.generate_enhanced_interactive_3d(enhanced_3d_file)
+            if result:
+                outputs['enhanced_3d'] = result
+                print(f"✅ Enhanced 3D: {result}")
+            else:
+                print("❌ Failed to generate enhanced_3d")
+
+            # Advanced Dashboard
+            dashboard_file = os.path.join(enhanced_dir, f"{base_name}_advanced_dashboard.html")
             result = self.visualizer.create_advanced_interactive_dashboard(dashboard_file)
             if result:
                 outputs['advanced_dashboard'] = result
-                self.log(f"✅ Advanced dashboard: {result}")
+                print(f"✅ Advanced dashboard: {result}")
+            else:
+                print("❌ Failed to generate advanced_dashboard")
 
-            # Generate traditional visualizations (existing functionality)
-            traditional_file = os.path.join(output_dir, f"{base_name}_traditional_dashboard.html")
-            if hasattr(self.visualizer, 'create_training_dashboard'):
-                result = self.visualizer.create_training_dashboard(traditional_file)
-                if result:
-                    outputs['traditional_dashboard'] = result
-                    self.log(f"✅ Traditional dashboard: {result}")
+            # 2. Generate STANDARD visualizations
+            print("🔄 Generating standard visualizations...")
 
+            # Traditional Dashboard
+            traditional_file = os.path.join(standard_dir, f"{base_name}_traditional_dashboard.html")
+            result = self.visualizer.create_training_dashboard(traditional_file)
+            if result:
+                outputs['traditional_dashboard'] = result
+                print(f"✅ Traditional dashboard: {result}")
+            else:
+                print("❌ Failed to generate traditional_dashboard")
+
+            # Performance Metrics
+            performance_file = os.path.join(standard_dir, f"{base_name}_performance.html")
+            result = self.visualizer.generate_performance_metrics(performance_file)
+            if result:
+                outputs['performance'] = result
+                print(f"✅ Performance metrics: {result}")
+            else:
+                print("❌ Failed to generate performance")
+
+            # Correlation Matrix
+            correlation_file = os.path.join(standard_dir, f"{base_name}_correlation.html")
+            result = self.visualizer.generate_correlation_matrix(correlation_file)
+            if result:
+                outputs['correlation'] = result
+                print(f"✅ Correlation matrix: {result}")
+            else:
+                print("❌ Failed to generate correlation")
+
+            # Feature Explorer
+            feature_file = os.path.join(standard_dir, f"{base_name}_feature_explorer.html")
+            result = self.visualizer.generate_basic_3d_visualization(feature_file)
+            if result:
+                outputs['feature_explorer'] = result
+                print(f"✅ Feature explorer: {result}")
+            else:
+                print("❌ Failed to generate feature_explorer")
+
+            # Animated Training
+            animated_file = os.path.join(standard_dir, f"{base_name}_animated.html")
+            result = self.visualizer.generate_animated_training(animated_file)
+            if result:
+                outputs['animated'] = result
+                print(f"✅ Animated training: {result}")
+            else:
+                print("❌ Failed to generate animated")
+
+            # ANIMATED CONFUSION MATRIX - NEW
+            confusion_file = os.path.join(standard_dir, f"{base_name}_confusion_animation.html")
+            result = self.visualizer.generate_animated_confusion_matrix(confusion_file)
+            if result:
+                outputs['confusion_animation'] = result
+                print(f"✅ Animated confusion matrix: {result}")
+            else:
+                print("❌ Failed to generate confusion animation")
+
+            print(f"📊 Visualization Summary: {len(outputs)} successful")
+
+            # Store the main visualization directory for easy access
+            self.main_viz_directory = main_viz_dir
             return outputs
 
         except Exception as e:
-            self.log(f"❌ Error generating visualizations: {e}")
+            print(f"❌ Error generating visualizations: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -2194,2094 +5732,6 @@ class DBNNCore:
             self.class_labels = self.class_labels.astype(np.float32)
             self.memory_optimized = True
             self.log("✅ Memory optimized: arrays converted to float32")
-
-class DBNNTensorCore(DBNNCore):
-    """
-    DBNN with tensor space transformation instead of iterative learning
-    """
-
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
-        super().__init__(config)
-        self.orthogonal_basis = None
-        self.weight_matrix = None
-        self.feature_projection = None
-        self.class_projection = None
-
-        # Ensure class encoder exists
-        if not hasattr(self, 'class_encoder'):
-            self.class_encoder = ClassEncoder()
-
-        # Initialize arrays to prevent NoneType errors
-        self.innodes = 0
-        self.outnodes = 0
-        self.class_labels = None  # This will be initialized properly later
-
-    def orthogonal_predict(self, features_batch):
-        """Prediction using orthogonal projections with robust type handling"""
-        if self.weight_matrix is not None and features_batch.size > 0:
-            try:
-                # Direct projection: features @ W = class_scores
-                class_scores = features_batch @ self.weight_matrix
-
-                # Convert to probabilities using softmax
-                exp_scores = np.exp(class_scores - np.max(class_scores, axis=1, keepdims=True))
-                probabilities = exp_scores / np.sum(exp_scores, axis=1, keepdims=True)
-
-                # Get predictions - find which class has highest score
-                predicted_indices = np.argmax(class_scores, axis=1)
-
-                # Convert indices back to original class values using class_labels
-                predictions = []
-                for idx in predicted_indices:
-                    if 0 <= idx < len(self.class_labels) - 1:  # -1 because index 0 is margin
-                        class_val = self.class_labels[idx + 1]  # +1 because index 0 is margin
-                        predictions.append(class_val)
-                    else:
-                        # Fallback: use first class
-                        predictions.append(self.class_labels[1] if len(self.class_labels) > 1 else 1.0)
-
-                # Convert to probability dictionaries
-                prob_dicts = []
-                for prob_row in probabilities:
-                    prob_dict = {}
-                    for k in range(1, min(self.outnodes + 1, len(prob_row) + 1)):
-                        class_val = self.class_labels[k]
-                        if self.class_encoder.is_fitted:
-                            # Use the original class representation from encoder
-                            class_name = self.class_encoder.encoded_to_class.get(class_val, f"Class_{k}")
-                        else:
-                            class_name = f"Class_{k}"
-                        prob_dict[class_name] = float(prob_row[k-1])
-                    prob_dicts.append(prob_dict)
-
-                return predictions, prob_dicts
-            except Exception as e:
-                self.log(f"Orthogonal prediction failed: {e}")
-                # Fallback to standard prediction
-                return self.predict_batch(features_batch)
-        else:
-            # Fallback to standard method
-            return self.predict_batch(features_batch)
-
-    def tensor_evaluate(self, features_batches, encoded_targets_batches):
-        """Evaluate tensor model accuracy with robust type handling"""
-        correct_predictions = 0
-        total_samples = 0
-        all_predictions = []
-
-        for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
-            # Use orthogonal prediction for tensor mode
-            predictions, probabilities = self.orthogonal_predict(features_batch)
-
-            batch_size = len(features_batch)
-            total_samples += batch_size
-
-            # Convert predictions to encoded format for comparison - TYPE SAFE
-            try:
-                # Direct conversion if predictions are already encoded
-                if predictions and all(isinstance(p, (int, float, np.number)) for p in predictions):
-                    encoded_predictions = predictions
-                else:
-                    # Use encoder for conversion
-                    encoded_predictions = self.class_encoder.transform(predictions)
-            except Exception as e:
-                self.log(f"⚠️ Prediction encoding failed, using fallback: {e}")
-                # Fallback: assume predictions are already encoded
-                encoded_predictions = [float(p) if isinstance(p, (int, float, np.number)) else 1.0 for p in predictions]
-
-            for i in range(batch_size):
-                if i < len(encoded_predictions):
-                    predicted = encoded_predictions[i]
-                else:
-                    predicted = 1.0  # Default fallback
-
-                actual = targets_batch[i]
-                all_predictions.append(predicted)
-
-                # Check if prediction is correct (using margin)
-                if abs(actual - predicted) <= self.class_labels[0]:
-                    correct_predictions += 1
-
-        accuracy = (correct_predictions / total_samples) * 100 if total_samples > 0 else 0
-        return accuracy, correct_predictions, all_predictions
-
-
-    def build_tensor_transformation(self, features_batches, encoded_targets_batches):
-        """
-        Build orthogonal tensor transformation instead of iterative learning
-        FIXED: Correct method signature
-        """
-        self.log("Building tensor space transformation...")
-
-        # Combine all batches
-        all_features = np.vstack(features_batches)
-        all_targets = np.concatenate(encoded_targets_batches)
-
-        n_samples, n_features = all_features.shape
-        n_classes = len(np.unique(all_targets))
-
-        # Step 1: Create feature-class correlation tensor
-        feature_class_tensor = self._build_correlation_tensor(all_features, all_targets, n_features, n_classes)
-
-        # Step 2: Perform orthogonal decomposition
-        self.orthogonal_basis = self._tensor_orthogonal_decomposition(feature_class_tensor)
-
-        # Step 3: Build projection matrix - FIXED: Correct call with 2 arguments
-        self.weight_matrix = self._build_projection_matrix(all_features, all_targets)
-
-        # Step 4: Initialize anti_net with orthogonal projections
-        self._initialize_orthogonal_network()
-
-        self.log(f"✅ Tensor transformation built: {n_features} features → {n_classes} classes")
-        return True
-
-    def _build_projection_matrix(self, features, targets):
-        """
-        Build projection matrix that maps features to class probabilities
-        FIXED: Takes 3 arguments (self, features, targets) instead of 4
-        """
-        n_samples, n_features = features.shape
-        n_classes = len(np.unique(targets))
-
-        # Create one-hot encoded targets
-        target_one_hot = np.zeros((n_samples, n_classes))
-        for i, target in enumerate(targets):
-            target_one_hot[i, int(target)-1] = 1.0
-
-        # Solve for projection matrix: features @ W = target_one_hot
-        # Using ridge regression for stability
-        alpha = 0.1  # Regularization
-        W = np.linalg.solve(
-            features.T @ features + alpha * np.eye(n_features),
-            features.T @ target_one_hot
-        )
-
-        return W
-
-    def _build_correlation_tensor(self, features, targets, n_features, n_classes):
-        """
-        Build feature-class correlation tensor instead of iterative counting
-        """
-        resol = self.config.get('resol', 100)
-        correlation_tensor = np.zeros((n_features+2, resol+2, n_features+2, resol+2, n_classes+2))
-
-        # Discretize features into bins
-        feature_bins = {}
-        for i in range(n_features):
-            feature_min = np.min(features[:, i])
-            feature_max = np.max(features[:, i])
-            bins = np.linspace(feature_min, feature_max, resol)
-            feature_bins[i] = bins
-
-        # Build correlation counts in one pass (no iteration!)
-        for sample_idx in range(len(features)):
-            sample_features = features[sample_idx]
-            target_class = int(targets[sample_idx])
-
-            # For each feature pair, update correlation counts
-            for i in range(n_features):
-                # Find bin for feature i
-                bin_i = np.digitize(sample_features[i], feature_bins[i])
-                bin_i = np.clip(bin_i, 1, resol)
-
-                for j in range(i+1, n_features):  # Only upper triangle for efficiency
-                    # Find bin for feature j
-                    bin_j = np.digitize(sample_features[j], feature_bins[j])
-                    bin_j = np.clip(bin_j, 1, resol)
-
-                    # Update correlation tensor - this replaces iterative anti_net updates
-                    correlation_tensor[i+1, bin_i, j+1, bin_j, target_class] += 1
-                    correlation_tensor[j+1, bin_j, i+1, bin_i, target_class] += 1  # Symmetric
-
-        return correlation_tensor
-
-
-    def _tensor_orthogonal_decomposition(self, correlation_tensor):
-        """
-        Perform orthogonal decomposition of the correlation tensor with optimal variance threshold
-        """
-        n_features = correlation_tensor.shape[0] - 2
-        n_classes = correlation_tensor.shape[4] - 2
-
-        # Reshape tensor for decomposition
-        tensor_flat = correlation_tensor[1:n_features+1, 1:-1, 1:n_features+1, 1:-1, 1:n_classes+1]
-        tensor_2d = tensor_flat.reshape(n_features * (self.config['resol']),
-                                      n_features * (self.config['resol']) * n_classes)
-
-        # Perform SVD for orthogonal basis
-        U, s, Vt = np.linalg.svd(tensor_2d, full_matrices=False)
-
-        # Calculate optimal variance threshold based on data characteristics
-        optimal_threshold = self._calculate_optimal_variance_threshold(s, n_features, n_classes)
-
-        # Keep principal components that explain optimal variance
-        explained_variance = np.cumsum(s) / np.sum(s)
-        n_components = np.argmax(explained_variance >= optimal_threshold) + 1
-
-        # Ensure we don't take too many components (avoid overfitting)
-        max_reasonable_components = min(n_features * 10, len(s))  # Limit to avoid explosion
-        n_components = min(n_components, max_reasonable_components)
-
-        orthogonal_basis = U[:, :n_components]
-
-        self.log(f"🧠 Optimal orthogonal decomposition:")
-        self.log(f"   Components: {n_components} (max reasonable: {max_reasonable_components})")
-        self.log(f"   Variance explained: {explained_variance[n_components-1]:.3%}")
-        self.log(f"   Optimal threshold: {optimal_threshold:.3%}")
-        self.log(f"   Singular values range: {s[0]:.3f} to {s[-1]:.3f}")
-
-        return orthogonal_basis
-
-    def _calculate_optimal_variance_threshold(self, singular_values, n_features, n_classes):
-        """
-        Calculate optimal variance threshold based on data characteristics
-        Higher thresholds for simpler problems, adaptive for complex ones
-        """
-        total_variance = np.sum(singular_values)
-
-        # Calculate data complexity metrics
-        variance_ratio = singular_values[0] / total_variance if len(singular_values) > 0 else 0
-        effective_rank = np.sum(singular_values > 1e-10)  # Numerical rank
-
-        # Base threshold: higher for simpler problems (first component explains a lot)
-        if variance_ratio > 0.5:
-            # Simple problem - first component dominates
-            base_threshold = 0.98  # Very high threshold
-        elif variance_ratio > 0.3:
-            # Moderately complex
-            base_threshold = 0.95
-        else:
-            # Complex problem - need more components
-            base_threshold = 0.90
-
-        # Adjust based on feature-to-class ratio
-        feature_class_ratio = n_features / max(n_classes, 1)
-        if feature_class_ratio > 10:
-            # High dimensionality - be more conservative
-            base_threshold = min(base_threshold, 0.92)
-        elif feature_class_ratio < 2:
-            # Low dimensionality - can be more aggressive
-            base_threshold = max(base_threshold, 0.85)
-
-        # Adjust based on effective rank
-        max_possible_components = len(singular_values)
-        if effective_rank < max_possible_components * 0.3:
-            # Low effective rank - problem is simpler than it appears
-            base_threshold = min(base_threshold + 0.03, 0.99)
-
-        self.log(f"🔧 Variance threshold calculation:")
-        self.log(f"   First component ratio: {variance_ratio:.3f}")
-        self.log(f"   Feature/class ratio: {feature_class_ratio:.2f}")
-        self.log(f"   Effective rank: {effective_rank}/{max_possible_components}")
-        self.log(f"   Final threshold: {base_threshold:.3%}")
-
-        return base_threshold
-
-    def _build_projection_matrix(self, features, targets):
-        """
-        Build projection matrix with enhanced regularization for better generalization
-        """
-        n_samples, n_features = features.shape
-        n_classes = len(np.unique(targets))
-
-        # Create one-hot encoded targets
-        target_one_hot = np.zeros((n_samples, n_classes))
-        for i, target in enumerate(targets):
-            class_index = int(target) - 1
-            if 0 <= class_index < n_classes:
-                target_one_hot[i, class_index] = 1.0
-
-        # Enhanced regularization based on data characteristics
-        condition_number = np.linalg.cond(features.T @ features)
-
-        # Adaptive regularization strength
-        if condition_number > 1e10:
-            alpha = 1.0  # Strong regularization for ill-conditioned problems
-        elif condition_number > 1e6:
-            alpha = 0.5  # Moderate regularization
-        elif condition_number > 1e3:
-            alpha = 0.1  # Light regularization
-        else:
-            alpha = 0.01  # Minimal regularization for well-conditioned problems
-
-        # Add class balancing for imbalanced datasets
-        class_counts = np.sum(target_one_hot, axis=0)
-        class_weights = 1.0 / (class_counts + 1e-8)
-        class_weights = class_weights / np.sum(class_weights)
-
-        # Apply class weights
-        weighted_targets = target_one_hot * class_weights
-
-        # Solve for projection matrix with enhanced regularization
-        XTX = features.T @ features
-        XTY = features.T @ weighted_targets
-
-        # Add regularization to improve generalization
-        W = np.linalg.solve(
-            XTX + alpha * np.eye(n_features),
-            XTY
-        )
-
-        self.log(f"🔧 Enhanced projection matrix:")
-        self.log(f"   Condition number: {condition_number:.3e}")
-        self.log(f"   Regularization alpha: {alpha}")
-        self.log(f"   Matrix shape: {W.shape}")
-        self.log(f"   Class distribution: {class_counts}")
-
-        return W
-
-    def _initialize_orthogonal_network(self):
-        """
-        Initialize anti_net and anti_wts using orthogonal projections
-        """
-        n_features = self.innodes
-        resol = self.config.get('resol', 100)
-        n_classes = self.outnodes
-
-        # Initialize with orthogonal structure
-        self.anti_net = np.ones((n_features+2, resol+2, n_features+2, resol+2, n_classes+2), dtype=np.int32)
-        self.anti_wts = np.ones((n_features+2, resol+2, n_features+2, resol+2, n_classes+2), dtype=np.float32)
-
-        # Project orthogonal basis into the network structure
-        if self.orthogonal_basis is not None:
-            basis_3d = self.orthogonal_basis.reshape(n_features, resol, -1)
-
-            for k in range(1, n_classes+1):
-                for comp_idx in range(basis_3d.shape[2]):
-                    component = basis_3d[:, :, comp_idx]
-
-                    # Distribute component weights across the network
-                    for i in range(1, n_features+1):
-                        for j in range(1, resol+1):
-                            weight_val = abs(component[i-1, j-1])
-                            if weight_val > 0:
-                                # Spread influence to related features
-                                for l in range(1, n_features+1):
-                                    if l != i:
-                                        influence = weight_val * 0.1  # Reduced influence
-                                        self.anti_wts[i, j, l, 1, k] += influence
-                                        self.anti_wts[l, 1, i, j, k] += influence
-
-
-    def tensor_train(self, train_file: str, test_file: Optional[str] = None,
-                    use_csv: bool = True, target_column: Optional[str] = None,
-                    feature_columns: Optional[List[str]] = None):
-        """
-        Single-pass tensor transformation training with robust type handling
-        """
-        self.log("🧠 Starting tensor space transformation training...")
-
-        # Load data
-        features_batches, targets_batches, feature_columns_used, original_targets_batches = self.load_data(
-            train_file, target_column, feature_columns
-        )
-
-        if not features_batches:
-            self.log("No training data loaded")
-            return False
-
-        # Store feature configuration
-        self.feature_columns = feature_columns_used
-        self.target_column = target_column if target_column else ""
-
-        # Fit encoder and determine architecture
-        all_original_targets = np.concatenate(original_targets_batches) if original_targets_batches else np.array([])
-        self.class_encoder.fit(all_original_targets)
-
-        # Log encoder information for debugging
-        self.log(f"🔧 Encoder configuration:")
-        self.log(f"   Original dtype: {getattr(self.class_encoder, 'original_dtype', 'unknown')}")
-        self.log(f"   Class mappings: {len(self.class_encoder.class_to_encoded)}")
-
-        encoded_targets_batches = []
-        for batch in original_targets_batches:
-            encoded_batch = self.class_encoder.transform(batch)
-            encoded_targets_batches.append(encoded_batch)
-
-        self.innodes = len(feature_columns_used)
-        self.outnodes = len(self.class_encoder.get_encoded_classes())
-
-        # Initialize arrays
-        resol = self.config.get('resol', 100)
-        self.initialize_arrays(self.innodes, resol, self.outnodes)
-
-        # Set up class_labels with encoded values
-        encoded_classes = self.class_encoder.get_encoded_classes()
-        self.class_labels[0] = self.config.get('margin', 0.2)
-        for i, encoded_val in enumerate(encoded_classes, 1):
-            self.class_labels[i] = float(encoded_val)
-
-        # SINGLE PASS: Build tensor transformation
-        start_time = time.time()
-        success = self.build_tensor_transformation(features_batches, encoded_targets_batches)
-        training_time = time.time() - start_time
-
-        if not success:
-            self.log("❌ Tensor transformation failed")
-            return False
-
-        # Enhanced evaluation with robust type handling
-        accuracy, correct_predictions, predictions = self.tensor_evaluate(features_batches, encoded_targets_batches)
-        total_samples = sum(len(batch) for batch in features_batches)
-
-        self.is_trained = True
-        self.best_accuracy = accuracy
-
-        self.log(f"✅ Tensor training completed in {training_time:.2f}s")
-        self.log(f"✅ Final Accuracy = {accuracy:.2f}% ({correct_predictions}/{total_samples})")
-        self.log(f"✅ Feature configuration: {len(self.feature_columns)} features")
-
-        return True
-
-class DBNNVisualizer:
-    """
-    Enhanced visualization class for DBNN with interactive 3D capabilities,
-    educational visualizations, and comprehensive training monitoring.
-
-    This class provides multiple visualization types:
-    - Standard 2D/3D plots for training monitoring
-    - Enhanced interactive 3D visualizations with animation
-    - Tensor mode specific visualizations
-    - Educational dashboards with multiple subplots
-    - Real-time training progression tracking
-    """
-
-    def __init__(self):
-        """
-        Initialize DBNNVisualizer with empty data structures for storing
-        training history and visualization data.
-        """
-        # Core training history storage
-        self.training_history = []  # List of training snapshots
-        self.visualization_data = {}  # Additional visualization metadata
-        self.tensor_snapshots = []  # Tensor-specific training data
-
-        # Enhanced data storage for advanced visualizations
-        self.feature_space_snapshots = []  # 3D feature space evolution
-        self.feature_names = []  # Names of features for labeling
-        self.class_names = []  # Names of classes for labeling
-        self.accuracy_progression = []  # Accuracy over training rounds
-        self.weight_evolution = []  # Weight statistics over time
-        self.confusion_data = []  # Confusion matrix data
-
-        # Educational visualization data
-        self.decision_boundaries = []  # Decision boundary evolution
-        self.feature_importance_data = []  # Feature importance metrics
-        self.learning_curves = []  # Learning curve data
-        self.network_topology_data = []  # Network structure information
-
-    # =========================================================================
-    # CORE TRAINING DATA CAPTURE METHODS
-    # =========================================================================
-
-    def capture_training_snapshot(self, features, targets, weights, predictions, accuracy, round_num):
-        """
-        Capture comprehensive training snapshot for visualization and analysis.
-
-        Args:
-            features (numpy.ndarray): Feature matrix (samples x features)
-            targets (numpy.ndarray): True target values
-            weights (numpy.ndarray): Current network weights
-            predictions (numpy.ndarray): Model predictions
-            accuracy (float): Current accuracy percentage
-            round_num (int): Training iteration/round number
-
-        Returns:
-            dict: Snapshot containing all training data
-        """
-        snapshot = {
-            'round': round_num,
-            'features': features.copy() if features is not None else None,
-            'targets': targets.copy() if targets is not None else None,
-            'weights': weights.copy() if weights is not None else None,
-            'predictions': predictions.copy() if predictions is not None else None,
-            'accuracy': accuracy,
-            'timestamp': time.time()
-        }
-
-        self.training_history.append(snapshot)
-
-        # Store accuracy progression
-        self.accuracy_progression.append({
-            'round': round_num,
-            'accuracy': accuracy,
-            'timestamp': time.time()
-        })
-
-        # Store weight statistics for educational purposes
-        if weights is not None:
-            flat_weights = weights.flatten()
-            flat_weights = flat_weights[(flat_weights != 0) & (np.abs(flat_weights) < 100)]
-
-            self.weight_evolution.append({
-                'round': round_num,
-                'mean': np.mean(flat_weights) if len(flat_weights) > 0 else 0,
-                'std': np.std(flat_weights) if len(flat_weights) > 0 else 0,
-                'min': np.min(flat_weights) if len(flat_weights) > 0 else 0,
-                'max': np.max(flat_weights) if len(flat_weights) > 0 else 0
-            })
-
-        # Capture enhanced visualization data if features are available
-        if hasattr(self, 'feature_space_snapshots') and features is not None:
-            try:
-                feature_names = getattr(self, 'feature_names',
-                                      [f'Feature_{i+1}' for i in range(features.shape[1])])
-                class_names = getattr(self, 'class_names',
-                                    [f'Class_{int(c)}' for c in np.unique(targets)])
-
-                enhanced_snapshot = {
-                    'iteration': round_num,
-                    'features': features.copy(),
-                    'targets': targets.copy(),
-                    'predictions': predictions.copy(),
-                    'feature_names': feature_names,
-                    'class_names': class_names,
-                    'timestamp': time.time(),
-                    'accuracy': accuracy
-                }
-                self.feature_space_snapshots.append(enhanced_snapshot)
-            except Exception as e:
-                print(f"Enhanced visualization capture warning: {e}")
-
-        return snapshot
-
-    def capture_tensor_snapshot(self, features, targets, weight_matrix, orthogonal_basis,
-                               predictions, accuracy, iteration=0):
-        """
-        Capture specialized snapshot for tensor mode training.
-
-        Args:
-            features (numpy.ndarray): Input features
-            targets (numpy.ndarray): True targets
-            weight_matrix (numpy.ndarray): Tensor weight matrix
-            orthogonal_basis (numpy.ndarray): Orthogonal basis vectors
-            predictions (numpy.ndarray): Model predictions
-            accuracy (float): Current accuracy
-            iteration (int): Training iteration
-
-        Returns:
-            dict: Tensor-specific snapshot
-        """
-        tensor_data = {
-            'weight_matrix': weight_matrix.copy() if hasattr(weight_matrix, 'copy') else weight_matrix,
-            'orthogonal_basis': orthogonal_basis.copy() if hasattr(orthogonal_basis, 'copy') else orthogonal_basis,
-            'iteration': iteration,
-            'weight_matrix_norm': np.linalg.norm(weight_matrix) if weight_matrix is not None else 0,
-            'basis_rank': np.linalg.matrix_rank(orthogonal_basis) if orthogonal_basis is not None else 0
-        }
-
-        # Use the main snapshot method but add tensor data
-        snapshot = self.capture_training_snapshot(
-            features, targets, weight_matrix, predictions, accuracy, iteration
-        )
-        snapshot['is_tensor_mode'] = True
-        snapshot['tensor_data'] = tensor_data
-
-        self.tensor_snapshots.append(snapshot)
-        return snapshot
-
-    def capture_feature_space_snapshot(self, features, targets, predictions, iteration,
-                                     feature_names=None, class_names=None):
-        """
-        Capture feature space state for interactive 3D visualization.
-
-        Args:
-            features (numpy.ndarray): Feature matrix
-            targets (numpy.ndarray): True targets
-            predictions (numpy.ndarray): Model predictions
-            iteration (int): Training iteration
-            feature_names (list): Names of features for labeling
-            class_names (list): Names of classes for labeling
-
-        Returns:
-            dict: Feature space snapshot
-        """
-        if feature_names is None:
-            feature_names = [f'Feature_{i+1}' for i in range(features.shape[1])]
-        if class_names is None:
-            unique_targets = np.unique(targets)
-            class_names = [f'Class_{int(t)}' for t in unique_targets]
-
-        snapshot = {
-            'iteration': iteration,
-            'features': features.copy(),
-            'targets': targets.copy(),
-            'predictions': predictions.copy(),
-            'feature_names': feature_names,
-            'class_names': class_names,
-            'timestamp': time.time()
-        }
-
-        self.feature_space_snapshots.append(snapshot)
-        self.feature_names = feature_names
-        self.class_names = class_names
-
-        return snapshot
-
-    # =========================================================================
-    # ENHANCED INTERACTIVE 3D VISUALIZATION METHODS
-    # =========================================================================
-
-    def generate_interactive_3d_visualization(self, output_file="interactive_3d_visualization.html"):
-        """
-        Generate complete interactive 3D visualization with animation controls.
-
-        Args:
-            output_file (str): Path for output HTML file
-
-        Returns:
-            str or None: Path to generated file if successful, None otherwise
-        """
-        try:
-            import plotly.graph_objects as go
-            import plotly.express as px
-
-            if not self.feature_space_snapshots:
-                print("No feature space snapshots available for 3D visualization")
-                return None
-
-            # Create the main visualization with frames for each iteration
-            fig = go.Figure()
-
-            # Create frames for animation
-            frames = []
-            for i, snapshot in enumerate(self.feature_space_snapshots):
-                frame_fig = go.Figure()
-                self._add_3d_snapshot_to_plot(frame_fig, snapshot)
-
-                frame = go.Frame(
-                    data=frame_fig.data,
-                    name=f'frame_{i}',
-                    layout=go.Layout(
-                        title=f"Iteration {snapshot['iteration']}"
-                    )
-                )
-                frames.append(frame)
-
-            # Add first frame data
-            if frames:
-                for trace in frames[0].data:
-                    fig.add_trace(trace)
-
-            # Create feature selection dropdowns
-            feature_dropdowns = self._create_feature_dropdowns()
-
-            # Create iteration slider
-            iteration_slider = self._create_iteration_slider()
-
-            # Update layout with all controls
-            fig.update_layout(
-                title={
-                    'text': "DBNN Interactive 3D Feature Space Visualization",
-                    'x': 0.5,
-                    'xanchor': 'center',
-                    'font': {'size': 20}
-                },
-                scene=dict(
-                    xaxis_title=self.feature_names[0] if self.feature_names else "Feature 1",
-                    yaxis_title=self.feature_names[1] if len(self.feature_names) > 1 else "Feature 2",
-                    zaxis_title=self.feature_names[2] if len(self.feature_names) > 2 else "Feature 3",
-                    camera=dict(eye=dict(x=1.5, y=1.5, z=1.5)),
-                    aspectmode='cube'
-                ),
-                width=1200,
-                height=800,
-                updatemenus=feature_dropdowns,
-                sliders=[iteration_slider]
-            )
-
-            # Add frames for animation
-            fig.frames = frames
-
-            # Add play/pause buttons
-            fig.update_layout(
-                updatemenus=[{
-                    'type': 'buttons',
-                    'showactive': False,
-                    'buttons': [
-                        {
-                            'label': 'Play',
-                            'method': 'animate',
-                            'args': [None, {
-                                'frame': {'duration': 500, 'redraw': True},
-                                'fromcurrent': True,
-                                'transition': {'duration': 300}
-                            }]
-                        },
-                        {
-                            'label': 'Pause',
-                            'method': 'animate',
-                            'args': [[None], {
-                                'frame': {'duration': 0, 'redraw': False},
-                                'mode': 'immediate'
-                            }]
-                        }
-                    ],
-                    'x': 0.1,
-                    'y': 0.02
-                }]
-            )
-
-            # Ensure output directory exists
-            os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
-            fig.write_html(output_file)
-            print(f"✅ Interactive 3D visualization saved: {output_file}")
-            return output_file
-
-        except Exception as e:
-            print(f"Error creating interactive 3D visualization: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-
-    def _add_3d_snapshot_to_plot(self, fig, snapshot):
-        """
-        Add a single snapshot to the 3D plot.
-
-        Args:
-            fig (plotly.graph_objects.Figure): Plotly figure to add to
-            snapshot (dict): Feature space snapshot data
-        """
-        features = snapshot['features']
-        targets = snapshot['targets']
-        predictions = snapshot['predictions']
-        feature_names = snapshot['feature_names']
-        class_names = snapshot['class_names']
-
-        # Use first 3 features for 3D visualization
-        if features.shape[1] >= 3:
-            x, y, z = features[:, 0], features[:, 1], features[:, 2]
-        else:
-            # Pad with zeros if fewer than 3 features
-            x = features[:, 0]
-            y = features[:, 1] if features.shape[1] > 1 else np.zeros(len(features))
-            z = np.zeros(len(features))
-
-        # Create color mapping for classes
-        unique_classes = np.unique(targets)
-        colors = px.colors.qualitative.Set1
-        color_map = {}
-        for i, cls in enumerate(unique_classes):
-            color_map[cls] = colors[i % len(colors)]
-
-        # Plot each class
-        for cls in unique_classes:
-            class_mask = targets == cls
-            correct_mask = predictions[class_mask] == cls
-
-            # Get class name
-            cls_name = class_names[int(cls)] if int(cls) < len(class_names) else f'Class_{int(cls)}'
-
-            # Correct predictions
-            if np.any(correct_mask):
-                fig.add_trace(go.Scatter3d(
-                    x=x[class_mask][correct_mask],
-                    y=y[class_mask][correct_mask],
-                    z=z[class_mask][correct_mask],
-                    mode='markers',
-                    marker=dict(
-                        size=6,
-                        color=color_map[cls],
-                        opacity=0.8,
-                        line=dict(width=1, color='white')
-                    ),
-                    name=f'{cls_name} (Correct)',
-                    legendgroup=f'class_{cls}',
-                    hovertemplate=(
-                        f'<b>{cls_name}</b><br>' +
-                        f'{feature_names[0]}: %{{x:.3f}}<br>' +
-                        f'{feature_names[1]}: %{{y:.3f}}<br>' +
-                        f'{feature_names[2]}: %{{z:.3f}}<br>' +
-                        '<extra></extra>'
-                    )
-                ))
-
-            # Incorrect predictions
-            if np.any(~correct_mask):
-                fig.add_trace(go.Scatter3d(
-                    x=x[class_mask][~correct_mask],
-                    y=y[class_mask][~correct_mask],
-                    z=z[class_mask][~correct_mask],
-                    mode='markers',
-                    marker=dict(
-                        size=6,
-                        color=color_map[cls],
-                        opacity=0.8,
-                        symbol='x',
-                        line=dict(width=1, color='black')
-                    ),
-                    name=f'{cls_name} (Incorrect)',
-                    legendgroup=f'class_{cls}',
-                    hovertemplate=(
-                        f'<b>{cls_name} - MISCLASSIFIED</b><br>' +
-                        f'{feature_names[0]}: %{{x:.3f}}<br>' +
-                        f'{feature_names[1]}: %{{y:.3f}}<br>' +
-                        f'{feature_names[2]}: %{{z:.3f}}<br>' +
-                        '<extra></extra>'
-                    )
-                ))
-
-    def _create_feature_dropdowns(self):
-        """
-        Create dropdown menus for feature selection in 3D visualization.
-
-        Returns:
-            list: List of dropdown menu configurations
-        """
-        if not self.feature_names:
-            return []
-
-        dropdowns = []
-
-        # X-axis feature dropdown
-        dropdowns.append({
-            'buttons': [
-                {
-                    'label': self.feature_names[i],
-                    'method': 'restyle',
-                    'args': [{'x': [self.feature_space_snapshots[0]['features'][:, i]]}]
-                } for i in range(len(self.feature_names))
-            ],
-            'direction': 'down',
-            'showactive': True,
-            'x': 0.1,
-            'xanchor': 'left',
-            'y': 0.95,
-            'yanchor': 'top',
-            'bgcolor': 'lightblue',
-            'bordercolor': 'black',
-            'borderwidth': 1,
-            'font': {'size': 12}
-        })
-
-        # Y-axis feature dropdown
-        dropdowns.append({
-            'buttons': [
-                {
-                    'label': self.feature_names[i],
-                    'method': 'restyle',
-                    'args': [{'y': [self.feature_space_snapshots[0]['features'][:, i]]}]
-                } for i in range(len(self.feature_names))
-            ],
-            'direction': 'down',
-            'showactive': True,
-            'x': 0.3,
-            'xanchor': 'left',
-            'y': 0.95,
-            'yanchor': 'top',
-            'bgcolor': 'lightgreen',
-            'bordercolor': 'black',
-            'borderwidth': 1,
-            'font': {'size': 12}
-        })
-
-        # Z-axis feature dropdown
-        dropdowns.append({
-            'buttons': [
-                {
-                    'label': self.feature_names[i],
-                    'method': 'restyle',
-                    'args': [{'z': [self.feature_space_snapshots[0]['features'][:, i]]}]
-                } for i in range(len(self.feature_names))
-            ],
-            'direction': 'down',
-            'showactive': True,
-            'x': 0.5,
-            'xanchor': 'left',
-            'y': 0.95,
-            'yanchor': 'top',
-            'bgcolor': 'lightcoral',
-            'bordercolor': 'black',
-            'borderwidth': 1,
-            'font': {'size': 12}
-        })
-
-        return dropdowns
-
-    def _create_iteration_slider(self):
-        """
-        Create iteration slider for animation control.
-
-        Returns:
-            dict: Slider configuration
-        """
-        steps = []
-
-        for i, snapshot in enumerate(self.feature_space_snapshots):
-            step = {
-                'args': [
-                    [f'frame_{i}'],
-                    {
-                        'frame': {'duration': 300, 'redraw': True},
-                        'mode': 'immediate',
-                        'transition': {'duration': 300}
-                    }
-                ],
-                'label': f'Iter {snapshot["iteration"]}',
-                'method': 'animate'
-            }
-            steps.append(step)
-
-        slider = {
-            'active': 0,
-            'currentvalue': {
-                'prefix': 'Iteration: ',
-                'xanchor': 'right',
-                'font': {'size': 16, 'color': 'black'}
-            },
-            'transition': {'duration': 300, 'easing': 'cubic-in-out'},
-            'x': 0.1,
-            'len': 0.8,
-            'xanchor': 'left',
-            'y': 0.02,
-            'yanchor': 'bottom',
-            'bgcolor': 'lightgray',
-            'bordercolor': 'black',
-            'borderwidth': 1,
-            'tickwidth': 1,
-            'steps': steps
-        }
-
-        return slider
-
-    # =========================================================================
-    # ADVANCED DASHBOARD AND EDUCATIONAL VISUALIZATIONS
-    # =========================================================================
-
-    def create_advanced_interactive_dashboard(self, output_file="advanced_dbnn_dashboard.html"):
-        """
-        Create a comprehensive dashboard with multiple interactive visualizations.
-
-        Args:
-            output_file (str): Path for output HTML file
-
-        Returns:
-            str or None: Path to generated file if successful, None otherwise
-        """
-        try:
-            from plotly.subplots import make_subplots
-            import plotly.graph_objects as go
-            import plotly.express as px
-
-            # Create a more comprehensive dashboard layout
-            fig = make_subplots(
-                rows=3, cols=3,
-                specs=[
-                    [{"type": "scatter3d", "rowspan": 2}, {"type": "xy", "rowspan": 2}, {"type": "xy"}],
-                    [None, None, {"type": "xy"}],
-                    [{"type": "heatmap"}, {"type": "domain"}, {"type": "xy"}]
-                ],
-                subplot_titles=(
-                    "3D Feature Space & Decision Boundaries",
-                    "Training Accuracy Progression",
-                    "Weight Distribution",
-                    "Weight Evolution Over Time",
-                    "Feature Correlation Matrix",
-                    "Model Performance Summary",
-                    "Confusion Matrix"
-                ),
-                vertical_spacing=0.08,
-                horizontal_spacing=0.08
-            )
-
-            # Populate ALL subplots with actual data
-            self._populate_enhanced_dashboard(fig)
-
-            # Update layout for better appearance
-            fig.update_layout(
-                title={
-                    'text': "DBNN Advanced Interactive Dashboard - Educational Visualization",
-                    'x': 0.5,
-                    'xanchor': 'center',
-                    'font': {'size': 24, 'color': 'darkblue'}
-                },
-                width=1400,
-                height=1200,
-                showlegend=True,
-                template="plotly_white"
-            )
-
-            # Add educational annotations
-            fig.add_annotation(
-                text="💡 <b>Educational Insights:</b><br>• Watch how the network learns decision boundaries<br>• Observe weight distribution evolution<br>• Analyze feature correlations",
-                xref="paper", yref="paper",
-                x=0.02, y=0.98,
-                showarrow=False,
-                bgcolor="lightyellow",
-                bordercolor="black",
-                borderwidth=1
-            )
-
-            # Ensure output directory exists
-            os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
-            fig.write_html(output_file)
-            print(f"✅ Enhanced interactive dashboard saved: {output_file}")
-            return output_file
-
-        except Exception as e:
-            print(f"Error creating advanced dashboard: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-
-    def _populate_enhanced_dashboard(self, fig):
-        """
-        Populate the enhanced dashboard with educational visualizations.
-
-        Args:
-            fig (plotly.graph_objects.Figure): Dashboard figure to populate
-        """
-        try:
-            import plotly.graph_objects as go
-            import plotly.express as px
-            import numpy as np
-            from sklearn.metrics import confusion_matrix
-            import pandas as pd
-
-            # 1. 3D Feature Space with Decision Boundaries (Top-left)
-            if self.feature_space_snapshots:
-                self._add_3d_feature_visualization(fig, 1, 1)
-
-            # 2. Accuracy Progression (Top-middle)
-            if self.accuracy_progression:
-                self._add_accuracy_progression(fig, 1, 2)
-
-            # 3. Weight Distribution (Top-right)
-            if self.weight_evolution:
-                self._add_weight_distribution(fig, 1, 3)
-
-            # 4. Weight Evolution (Middle-right)
-            if self.weight_evolution:
-                self._add_weight_evolution(fig, 2, 3)
-
-            # 5. Feature Correlation Heatmap (Bottom-left)
-            if self.feature_space_snapshots:
-                self._add_feature_correlation(fig, 3, 1)
-
-            # 6. Model Performance Summary (Bottom-middle) - Pie chart
-            self._add_performance_summary(fig, 3, 2)
-
-            # 7. Confusion Matrix (Bottom-right)
-            if self.feature_space_snapshots:
-                self._add_confusion_matrix(fig, 3, 3)
-
-        except Exception as e:
-            print(f"Error in enhanced dashboard: {e}")
-
-    def _add_3d_feature_visualization(self, fig, row, col):
-        """
-        Add 3D feature space visualization with decision boundaries.
-
-        Args:
-            fig (plotly.graph_objects.Figure): Figure to add to
-            row (int): Subplot row
-            col (int): Subplot column
-        """
-        if not self.feature_space_snapshots:
-            return
-
-        latest_snapshot = self.feature_space_snapshots[-1]
-        features = latest_snapshot['features']
-        targets = latest_snapshot['targets']
-        predictions = latest_snapshot['predictions']
-
-        # Use first 3 features for 3D
-        if features.shape[1] >= 3:
-            x, y, z = features[:, 0], features[:, 1], features[:, 2]
-        else:
-            x, y, z = self._project_to_3d(features)
-
-        # Calculate accuracy for this snapshot
-        accuracy = np.mean(predictions == targets) * 100
-
-        # Create interactive 3D plot
-        unique_classes = np.unique(targets)
-        colors = px.colors.qualitative.Bold
-
-        for i, cls in enumerate(unique_classes):
-            class_mask = targets == cls
-            correct_mask = predictions[class_mask] == targets[class_mask]
-
-            # Correct predictions
-            if np.any(correct_mask):
-                fig.add_trace(go.Scatter3d(
-                    x=x[class_mask][correct_mask],
-                    y=y[class_mask][correct_mask],
-                    z=z[class_mask][correct_mask],
-                    mode='markers',
-                    marker=dict(
-                        size=6,
-                        color=colors[i % len(colors)],
-                        opacity=0.8,
-                        line=dict(width=1, color='white')
-                    ),
-                    name=f'Class {int(cls)} ✓',
-                    legendgroup=f'class_{cls}',
-                    hovertemplate=f'Class {int(cls)}<br>Correct<extra></extra>'
-                ), row=row, col=col)
-
-            # Incorrect predictions
-            if np.any(~correct_mask):
-                fig.add_trace(go.Scatter3d(
-                    x=x[class_mask][~correct_mask],
-                    y=y[class_mask][~correct_mask],
-                    z=z[class_mask][~correct_mask],
-                    mode='markers',
-                    marker=dict(
-                        size=6,
-                        color=colors[i % len(colors)],
-                        opacity=0.8,
-                        symbol='x',
-                        line=dict(width=2, color='black')
-                    ),
-                    name=f'Class {int(cls)} ✗',
-                    legendgroup=f'class_{cls}',
-                    hovertemplate=f'Class {int(cls)}<br>Misclassified<extra></extra>'
-                ), row=row, col=col)
-
-        # Add decision boundary visualization (simplified)
-        self._add_decision_boundary_hint(fig, row, col, x, y, z, accuracy)
-
-    def _add_weight_distribution(self, fig, row, col):
-        """
-        Add weight distribution histogram to dashboard.
-
-        Args:
-            fig (plotly.graph_objects.Figure): Figure to add to
-            row (int): Subplot row
-            col (int): Subplot column
-        """
-        if not self.weight_evolution:
-            return
-
-        latest_weights = self.weight_evolution[-1]
-
-        # Create a simulated weight distribution for demonstration
-        weights = np.random.normal(latest_weights['mean'], latest_weights['std'], 1000)
-        weights = weights[(weights > -10) & (weights < 10)]  # Filter extremes
-
-        fig.add_trace(go.Histogram(
-            x=weights,
-            nbinsx=50,
-            name='Weight Distribution',
-            marker_color='lightblue',
-            opacity=0.7,
-            hovertemplate='Weight: %{x:.3f}<br>Count: %{y}<extra></extra>'
-        ), row=row, col=col)
-
-        # Add statistical annotations
-        fig.add_annotation(
-            xref=f"x{3*(row-1)+col}", yref=f"y{3*(row-1)+col}",
-            x=0.8, y=0.9,
-            xanchor='left',
-            text=f"μ: {latest_weights['mean']:.3f}<br>σ: {latest_weights['std']:.3f}",
-            showarrow=False,
-            bgcolor="white",
-            bordercolor="black",
-            borderwidth=1
-        )
-
-    def _add_feature_correlation(self, fig, row, col):
-        """
-        Add feature correlation heatmap to dashboard.
-
-        Args:
-            fig (plotly.graph_objects.Figure): Figure to add to
-            row (int): Subplot row
-            col (int): Subplot column
-        """
-        if not self.feature_space_snapshots:
-            return
-
-        latest_snapshot = self.feature_space_snapshots[-1]
-        features = latest_snapshot['features']
-
-        if features.shape[1] > 1:
-            corr_matrix = np.corrcoef(features.T)
-            feature_names = self.feature_names if self.feature_names else [f'F{i+1}' for i in range(features.shape[1])]
-
-            fig.add_trace(go.Heatmap(
-                z=corr_matrix,
-                x=feature_names,
-                y=feature_names,
-                colorscale='RdBu',
-                zmid=0,
-                colorbar=dict(title="Correlation"),
-                hovertemplate='%{y} vs %{x}<br>Correlation: %{z:.3f}<extra></extra>'
-            ), row=row, col=col)
-
-    def _add_weight_evolution(self, fig, row, col):
-        """
-        Add weight evolution over time to dashboard.
-
-        Args:
-            fig (plotly.graph_objects.Figure): Figure to add to
-            row (int): Subplot row
-            col (int): Subplot column
-        """
-        if not self.weight_evolution:
-            return
-
-        rounds = [w['round'] for w in self.weight_evolution]
-        means = [w['mean'] for w in self.weight_evolution]
-        stds = [w['std'] for w in self.weight_evolution]
-
-        fig.add_trace(go.Scatter(
-            x=rounds, y=means, mode='lines',
-            name='Mean Weight', line=dict(color='green', width=2),
-            hovertemplate='Round: %{x}<br>Mean: %{y:.4f}<extra></extra>'
-        ), row=row, col=col)
-
-        # Add std deviation area
-        fig.add_trace(go.Scatter(
-            x=rounds + rounds[::-1],
-            y=np.array(means) + np.array(stds) + (np.array(means) - np.array(stds))[::-1],
-            fill='toself',
-            fillcolor='rgba(0,255,0,0.2)',
-            line=dict(color='rgba(255,255,255,0)'),
-            name='±1 Std Dev',
-            showlegend=False,
-            hovertemplate='Standard Deviation Range<extra></extra>'
-        ), row=row, col=col)
-
-    def _add_accuracy_progression(self, fig, row, col):
-        """
-        Add accuracy progression with educational annotations.
-
-        Args:
-            fig (plotly.graph_objects.Figure): Figure to add to
-            row (int): Subplot row
-            col (int): Subplot column
-        """
-        if not self.accuracy_progression:
-            return
-
-        rounds = [s['round'] for s in self.accuracy_progression]
-        accuracies = [s['accuracy'] for s in self.accuracy_progression]
-
-        fig.add_trace(go.Scatter(
-            x=rounds, y=accuracies, mode='lines+markers',
-            name='Accuracy', line=dict(color='blue', width=3),
-            hovertemplate='Round: %{x}<br>Accuracy: %{y:.2f}%<extra></extra>'
-        ), row=row, col=col)
-
-        # Add educational markers
-        if len(accuracies) > 10:
-            # Mark convergence point
-            convergence_idx = self._find_convergence_point(accuracies)
-            if convergence_idx is not None:
-                fig.add_trace(go.Scatter(
-                    x=[rounds[convergence_idx]], y=[accuracies[convergence_idx]],
-                    mode='markers+text',
-                    marker=dict(size=12, color='green', symbol='diamond'),
-                    text=['Convergence'],
-                    textposition='top center',
-                    name='Convergence Point',
-                    hovertemplate=f'Convergence at round {rounds[convergence_idx]}<br>Accuracy: {accuracies[convergence_idx]:.2f}%<extra></extra>'
-                ), row=row, col=col)
-
-    def _add_performance_summary(self, fig, row, col):
-        """
-        Add performance summary as donut chart.
-
-        Args:
-            fig (plotly.graph_objects.Figure): Figure to add to
-            row (int): Subplot row
-            col (int): Subplot column
-        """
-        if not self.accuracy_progression:
-            return
-
-        latest_accuracy = self.accuracy_progression[-1]['accuracy']
-        error_rate = 100 - latest_accuracy
-
-        fig.add_trace(go.Pie(
-            values=[latest_accuracy, error_rate],
-            labels=['Correct', 'Incorrect'],
-            hole=0.6,
-            marker=dict(colors=['green', 'red']),
-            hovertemplate='%{label}: %{value:.1f}%<extra></extra>',
-            name="Performance"
-        ), row=row, col=col)
-
-    def _add_confusion_matrix(self, fig, row, col):
-        """
-        Add confusion matrix visualization.
-
-        Args:
-            fig (plotly.graph_objects.Figure): Figure to add to
-            row (int): Subplot row
-            col (int): Subplot column
-        """
-        if not self.feature_space_snapshots:
-            return
-
-        latest_snapshot = self.feature_space_snapshots[-1]
-        targets = latest_snapshot['targets']
-        predictions = latest_snapshot['predictions']
-
-        # Create simplified confusion matrix
-        unique_classes = np.unique(np.concatenate([targets, predictions]))
-        from sklearn.metrics import confusion_matrix
-        cm = confusion_matrix(targets, predictions, labels=unique_classes)
-
-        fig.add_trace(go.Heatmap(
-            z=cm,
-            x=[f'Pred {int(c)}' for c in unique_classes],
-            y=[f'True {int(c)}' for c in unique_classes],
-            colorscale='Blues',
-            hovertemplate='True: %{y}<br>Pred: %{x}<br>Count: %{z}<extra></extra>'
-        ), row=row, col=col)
-
-    # =========================================================================
-    # STANDARD VISUALIZATION METHODS
-    # =========================================================================
-
-    def create_training_dashboard(self, output_file="training_dashboard.html"):
-        """
-        Create a comprehensive training dashboard with multiple visualization types.
-
-        Args:
-            output_file (str): Path for output HTML file
-
-        Returns:
-            str or None: Path to generated file if successful, None otherwise
-        """
-        try:
-            import plotly.graph_objects as go
-            from plotly.subplots import make_subplots
-            import pandas as pd
-
-            if not self.training_history:
-                print("No training history available for dashboard")
-                return None
-
-            # Create subplots
-            fig = make_subplots(
-                rows=2, cols=2,
-                subplot_titles=('Accuracy Progression', 'Feature Space',
-                              'Weight Distribution', 'Training Summary'),
-                specs=[[{"type": "xy"}, {"type": "scatter3d"}],
-                       [{"type": "xy"}, {"type": "domain"}]]
-            )
-
-            # 1. Accuracy Progression (top-left)
-            rounds = [s['round'] for s in self.training_history]
-            accuracies = [s['accuracy'] for s in self.training_history]
-
-            fig.add_trace(go.Scatter(
-                x=rounds, y=accuracies, mode='lines+markers',
-                name='Accuracy', line=dict(color='blue', width=2)
-            ), row=1, col=1)
-
-            # 2. Feature Space (top-right) - use latest snapshot
-            latest_snapshot = self.training_history[-1]
-            if (latest_snapshot['features'] is not None and
-                latest_snapshot['features'].shape[1] >= 3):
-
-                features = latest_snapshot['features']
-                targets = latest_snapshot['targets']
-
-                # Use first 3 features for 3D plot
-                x, y, z = features[:, 0], features[:, 1], features[:, 2]
-
-                # Create color mapping
-                unique_classes = np.unique(targets)
-                for i, cls in enumerate(unique_classes):
-                    class_mask = targets == cls
-                    fig.add_trace(go.Scatter3d(
-                        x=x[class_mask], y=y[class_mask], z=z[class_mask],
-                        mode='markers', name=f'Class {int(cls)}',
-                        marker=dict(size=4, opacity=0.7)
-                    ), row=1, col=2)
-
-            # 3. Weight Distribution (bottom-left)
-            if self.weight_evolution:
-                latest_weights = self.weight_evolution[-1]
-                # Create sample weight distribution
-                weights = np.random.normal(latest_weights['mean'],
-                                         latest_weights['std'], 1000)
-                fig.add_trace(go.Histogram(
-                    x=weights, nbinsx=30, name='Weights',
-                    marker_color='lightgreen', opacity=0.7
-                ), row=2, col=1)
-
-            # 4. Training Summary (bottom-right)
-            best_accuracy = max(accuracies) if accuracies else 0
-            final_accuracy = accuracies[-1] if accuracies else 0
-
-            summary_text = f"""
-            Training Summary:
-            • Total Rounds: {len(self.training_history)}
-            • Best Accuracy: {best_accuracy:.2f}%
-            • Final Accuracy: {final_accuracy:.2f}%
-            • Features: {latest_snapshot['features'].shape[1]}
-            • Samples: {len(latest_snapshot['features'])}
-            """
-
-            fig.add_trace(go.Scatter(
-                x=[0, 1], y=[0, 1], mode='text',
-                text=[summary_text], textposition="middle center",
-                showlegend=False
-            ), row=2, col=2)
-
-            fig.update_layout(
-                height=800,
-                title_text="DBNN Training Dashboard",
-                showlegend=True
-            )
-
-            # Ensure output directory exists
-            os.makedirs(os.path.dirname(output_file), exist_ok=True)
-            fig.write_html(output_file)
-            print(f"✅ Training dashboard saved: {output_file}")
-            return output_file
-
-        except Exception as e:
-            print(f"Error creating training dashboard: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-
-    def generate_feature_space_plot(self, snapshot_idx: int, feature_indices: List[int] = [0, 1, 2]):
-        """
-        Generate 3D feature space plot for a specific training snapshot.
-
-        Args:
-            snapshot_idx (int): Index of training snapshot to visualize
-            feature_indices (list): Indices of features to use for 3D plot
-
-        Returns:
-            plotly.graph_objects.Figure or None: 3D feature space plot
-        """
-        try:
-            import plotly.graph_objects as go
-            import plotly.express as px
-            import pandas as pd
-        except ImportError:
-            print("Plotly not available for visualization")
-            return None
-
-        if snapshot_idx >= len(self.training_history):
-            return None
-
-        snapshot = self.training_history[snapshot_idx]
-        features = snapshot['features']
-        targets = snapshot['targets']
-
-        # Create DataFrame for plotting
-        df = pd.DataFrame({
-            f'Feature_{feature_indices[0]}': features[:, feature_indices[0]],
-            f'Feature_{feature_indices[1]}': features[:, feature_indices[1]],
-            f'Feature_{feature_indices[2]}': features[:, feature_indices[2]],
-            'Class': targets,
-            'Prediction': snapshot['predictions']
-        })
-
-        fig = px.scatter_3d(
-            df,
-            x=f'Feature_{feature_indices[0]}',
-            y=f'Feature_{feature_indices[1]}',
-            z=f'Feature_{feature_indices[2]}',
-            color='Class',
-            title=f'Feature Space - Round {snapshot["round"]}<br>Accuracy: {snapshot["accuracy"]:.2f}%',
-            opacity=0.7
-        )
-
-        return fig
-
-    def generate_accuracy_plot(self):
-        """
-        Generate accuracy progression plot over training rounds.
-
-        Returns:
-            plotly.graph_objects.Figure or None: Accuracy progression plot
-        """
-        try:
-            import plotly.graph_objects as go
-        except ImportError:
-            print("Plotly not available for visualization")
-            return None
-
-        if len(self.training_history) < 2:
-            return None
-
-        rounds = [s['round'] for s in self.training_history]
-        accuracies = [s['accuracy'] for s in self.training_history]
-
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=rounds, y=accuracies,
-            mode='lines+markers',
-            name='Accuracy'
-        ))
-
-        fig.update_layout(
-            title='Training Accuracy Progression',
-            xaxis_title='Training Round',
-            yaxis_title='Accuracy (%)'
-        )
-
-        return fig
-
-    def generate_weight_distribution_plot(self, snapshot_idx: int):
-        """
-        Generate weight distribution histogram for a specific snapshot.
-
-        Args:
-            snapshot_idx (int): Index of training snapshot
-
-        Returns:
-            plotly.graph_objects.Figure or None: Weight distribution histogram
-        """
-        try:
-            import plotly.graph_objects as go
-        except ImportError:
-            print("Plotly not available for visualization")
-            return None
-
-        if snapshot_idx >= len(self.training_history):
-            return None
-
-        snapshot = self.training_history[snapshot_idx]
-        weights = snapshot['weights']
-
-        # Flatten weights for histogram
-        flat_weights = weights.flatten()
-        # Remove zeros and extreme values for better visualization
-        flat_weights = flat_weights[(flat_weights != 0) & (np.abs(flat_weights) < 100)]
-
-        fig = go.Figure()
-        fig.add_trace(go.Histogram(
-            x=flat_weights,
-            nbinsx=50,
-            name='Weight Distribution'
-        ))
-
-        fig.update_layout(
-            title=f'Weight Distribution - Round {snapshot["round"]}',
-            xaxis_title='Weight Value',
-            yaxis_title='Frequency'
-        )
-
-        return fig
-
-    # =========================================================================
-    # TENSOR MODE SPECIFIC VISUALIZATIONS
-    # =========================================================================
-
-    def generate_tensor_space_plot(self, snapshot_idx: int, feature_indices: List[int] = [0, 1, 2]):
-        """
-        Generate 3D tensor feature space plot for tensor mode training.
-
-        Args:
-            snapshot_idx (int): Index of tensor snapshot
-            feature_indices (list): Feature indices for 3D plot
-
-        Returns:
-            plotly.graph_objects.Figure or None: Tensor feature space plot
-        """
-        try:
-            import plotly.graph_objects as go
-            import plotly.express as px
-            import pandas as pd
-        except ImportError:
-            print("Plotly not available for visualization")
-            return None
-
-        if snapshot_idx >= len(self.training_history):
-            return None
-
-        snapshot = self.training_history[snapshot_idx]
-        features = snapshot['features']
-        targets = snapshot['targets']
-        predictions = snapshot['predictions']
-
-        # Create DataFrame for plotting
-        df = pd.DataFrame({
-            f'Feature_{feature_indices[0]}': features[:, feature_indices[0]],
-            f'Feature_{feature_indices[1]}': features[:, feature_indices[1]],
-            f'Feature_{feature_indices[2]}': features[:, feature_indices[2]],
-            'Actual_Class': targets,
-            'Predicted_Class': predictions,
-            'Correct': targets == predictions
-        })
-
-        fig = px.scatter_3d(
-            df,
-            x=f'Feature_{feature_indices[0]}',
-            y=f'Feature_{feature_indices[1]}',
-            z=f'Feature_{feature_indices[2]}',
-            color='Predicted_Class',
-            symbol='Correct',
-            title=f'Tensor Feature Space - Iteration {snapshot["round"]}<br>Accuracy: {snapshot["accuracy"]:.2f}%',
-            opacity=0.7,
-            color_discrete_sequence=px.colors.qualitative.Set1
-        )
-
-        return fig
-
-    def generate_weight_matrix_heatmap(self, snapshot_idx: int):
-        """
-        Generate heatmap of the weight matrix for tensor mode.
-
-        Args:
-            snapshot_idx (int): Index of tensor snapshot
-
-        Returns:
-            plotly.graph_objects.Figure or None: Weight matrix heatmap
-        """
-        try:
-            import plotly.graph_objects as go
-            import plotly.express as px
-        except ImportError:
-            print("Plotly not available for visualization")
-            return None
-
-        if (snapshot_idx >= len(self.training_history) or
-            not self.training_history[snapshot_idx].get('is_tensor_mode', False) or
-            'tensor_data' not in self.training_history[snapshot_idx]):
-            return None
-
-        snapshot = self.training_history[snapshot_idx]
-        tensor_data = snapshot['tensor_data']
-        weight_matrix = tensor_data.get('weight_matrix')
-
-        if weight_matrix is None:
-            return None
-
-        fig = go.Figure(data=go.Heatmap(
-            z=weight_matrix,
-            colorscale='RdBu',
-            zmid=0,
-            colorbar=dict(title="Weight Value")
-        ))
-
-        fig.update_layout(
-            title=f'Weight Matrix - Iteration {snapshot["round"]}',
-            xaxis_title='Output Classes',
-            yaxis_title='Input Features',
-            width=600,
-            height=500
-        )
-
-        return fig
-
-    def generate_orthogonal_basis_plot(self, snapshot_idx: int):
-        """
-        Generate visualization of orthogonal basis components for tensor mode.
-
-        Args:
-            snapshot_idx (int): Index of tensor snapshot
-
-        Returns:
-            plotly.graph_objects.Figure or None: Orthogonal basis plot
-        """
-        try:
-            import plotly.graph_objects as go
-            from plotly.subplots import make_subplots
-        except ImportError:
-            print("Plotly not available for visualization")
-            return None
-
-        if (snapshot_idx >= len(self.training_history) or
-            not self.training_history[snapshot_idx].get('is_tensor_mode', False) or
-            'tensor_data' not in self.training_history[snapshot_idx]):
-            return None
-
-        snapshot = self.training_history[snapshot_idx]
-        tensor_data = snapshot['tensor_data']
-        orthogonal_basis = tensor_data.get('orthogonal_basis')
-
-        if orthogonal_basis is None:
-            return None
-
-        # Show first few components
-        n_components = min(6, orthogonal_basis.shape[1])
-        fig = make_subplots(
-            rows=2, cols=3,
-            subplot_titles=[f'Component {i+1}' for i in range(n_components)]
-        )
-
-        for i in range(n_components):
-            row = i // 3 + 1
-            col = i % 3 + 1
-            component = orthogonal_basis[:, i]
-
-            fig.add_trace(
-                go.Scatter(
-                    y=component,
-                    mode='lines',
-                    name=f'Component {i+1}'
-                ),
-                row=row, col=col
-            )
-
-        fig.update_layout(
-            title=f'Orthogonal Basis Components - Iteration {snapshot["round"]}',
-            height=600,
-            showlegend=False
-        )
-
-        return fig
-
-    def generate_tensor_convergence_plot(self):
-        """
-        Generate convergence plot for tensor mode training.
-
-        Returns:
-            plotly.graph_objects.Figure or None: Tensor convergence plot
-        """
-        try:
-            import plotly.graph_objects as go
-            from plotly.subplots import make_subplots
-        except ImportError:
-            print("Plotly not available for visualization")
-            return None
-
-        if not self.tensor_snapshots:
-            return None
-
-        # Extract tensor-specific metrics
-        iterations = []
-        accuracies = []
-        weight_norms = []
-        basis_ranks = []
-
-        for snapshot in self.tensor_snapshots:
-            if snapshot.get('is_tensor_mode', False) and 'tensor_data' in snapshot:
-                iterations.append(snapshot['round'])
-                accuracies.append(snapshot['accuracy'])
-                tensor_data = snapshot['tensor_data']
-                weight_norms.append(tensor_data.get('weight_matrix_norm', 0))
-                basis_ranks.append(tensor_data.get('basis_rank', 0))
-
-        if not iterations:
-            return None
-
-        fig = make_subplots(
-            rows=2, cols=2,
-            subplot_titles=('Accuracy Progression', 'Weight Matrix Norm',
-                          'Basis Rank', 'Training Metrics'),
-            specs=[[{"secondary_y": False}, {"secondary_y": False}],
-                   [{"secondary_y": False}, {"secondary_y": True}]]
-        )
-
-        # Accuracy plot
-        fig.add_trace(
-            go.Scatter(x=iterations, y=accuracies, mode='lines+markers',
-                      name='Accuracy', line=dict(color='blue')),
-            row=1, col=1
-        )
-
-        # Weight norm plot
-        fig.add_trace(
-            go.Scatter(x=iterations, y=weight_norms, mode='lines+markers',
-                      name='Weight Norm', line=dict(color='red')),
-            row=1, col=2
-        )
-
-        # Basis rank plot
-        fig.add_trace(
-            go.Scatter(x=iterations, y=basis_ranks, mode='lines+markers',
-                      name='Basis Rank', line=dict(color='green')),
-            row=2, col=1
-        )
-
-        # Combined metrics
-        fig.add_trace(
-            go.Scatter(x=iterations, y=accuracies, mode='lines',
-                      name='Accuracy', line=dict(color='blue')),
-            row=2, col=2, secondary_y=False
-        )
-
-        fig.add_trace(
-            go.Scatter(x=iterations, y=weight_norms, mode='lines',
-                      name='Weight Norm', line=dict(color='red')),
-            row=2, col=2, secondary_y=True
-        )
-
-        fig.update_layout(
-            height=800,
-            title_text="Tensor Mode Training Convergence",
-            showlegend=True
-        )
-
-        fig.update_xaxes(title_text="Iteration", row=2, col=1)
-        fig.update_xaxes(title_text="Iteration", row=2, col=2)
-        fig.update_yaxes(title_text="Accuracy (%)", row=1, col=1)
-        fig.update_yaxes(title_text="Norm", row=1, col=2)
-        fig.update_yaxes(title_text="Rank", row=2, col=1)
-        fig.update_yaxes(title_text="Accuracy (%)", row=2, col=2, secondary_y=False)
-        fig.update_yaxes(title_text="Weight Norm", row=2, col=2, secondary_y=True)
-
-        return fig
-
-    def create_tensor_dashboard(self, output_file: str = "tensor_training_dashboard.html"):
-        """
-        Create comprehensive tensor training dashboard.
-
-        Args:
-            output_file (str): Path for output HTML file
-
-        Returns:
-            str or None: Path to generated file if successful, None otherwise
-        """
-        try:
-            from plotly.subplots import make_subplots
-            import plotly.graph_objects as go
-        except ImportError:
-            print("Plotly not available for dashboard creation")
-            return None
-
-        if not self.tensor_snapshots:
-            print("No tensor snapshots available for dashboard")
-            return None
-
-        # Create subplots
-        fig = make_subplots(
-            rows=3, cols=2,
-            subplot_titles=('Tensor Feature Space', 'Accuracy Progression',
-                          'Weight Matrix', 'Orthogonal Basis',
-                          'Convergence Metrics', 'Training Summary'),
-            specs=[[{"type": "scatter3d"}, {"type": "xy"}],
-                   [{"type": "heatmap"}, {"type": "xy"}],
-                   [{"type": "xy"}, {"type": "domain"}]],
-            vertical_spacing=0.08,
-            horizontal_spacing=0.08
-        )
-
-        # Feature Space (latest tensor snapshot)
-        feature_fig = self.generate_tensor_space_plot(-1)
-        if feature_fig:
-            for trace in feature_fig.data:
-                fig.add_trace(trace, row=1, col=1)
-
-        # Accuracy Progression
-        iterations = [s['round'] for s in self.tensor_snapshots]
-        accuracies = [s['accuracy'] for s in self.tensor_snapshots]
-        fig.add_trace(go.Scatter(x=iterations, y=accuracies, mode='lines+markers',
-                               name='Accuracy', line=dict(color='blue')), row=1, col=2)
-
-        # Weight Matrix Heatmap (latest)
-        weight_fig = self.generate_weight_matrix_heatmap(-1)
-        if weight_fig:
-            for trace in weight_fig.data:
-                fig.add_trace(trace, row=2, col=1)
-
-        # Orthogonal Basis (latest)
-        basis_fig = self.generate_orthogonal_basis_plot(-1)
-        if basis_fig:
-            for trace in basis_fig.data:
-                fig.add_trace(trace, row=2, col=2)
-
-        # Convergence Metrics
-        convergence_fig = self.generate_tensor_convergence_plot()
-        if convergence_fig:
-            for trace in convergence_fig.data:
-                fig.add_trace(trace, row=3, col=1)
-
-        # Training Summary
-        best_snapshot = max(self.tensor_snapshots, key=lambda x: x['accuracy'])
-        final_accuracy = self.tensor_snapshots[-1]['accuracy'] if self.tensor_snapshots else 0
-
-        summary_text = f"""
-        <b>Tensor Training Summary:</b><br>
-        - Total Iterations: {len(self.tensor_snapshots)}<br>
-        - Best Accuracy: {best_snapshot['accuracy']:.2f}%<br>
-        - Best Iteration: {best_snapshot['round']}<br>
-        - Final Accuracy: {final_accuracy:.2f}%<br>
-        - Features: {best_snapshot['features'].shape[1]}<br>
-        - Classes: {len(np.unique(best_snapshot['targets']))}<br>
-        - Mode: Tensor Transformation
-        """
-
-        fig.add_trace(go.Scatter(
-            x=[0, 1], y=[0, 1],
-            mode='text',
-            text=[summary_text],
-            textposition="middle center",
-            showlegend=False,
-            textfont=dict(size=11)
-        ), row=3, col=2)
-
-        fig.update_layout(
-            height=1200,
-            title_text="DBNN Tensor Training Dashboard",
-            showlegend=True
-        )
-
-        try:
-            # Ensure output directory exists
-            os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
-            fig.write_html(output_file)
-            print(f"Tensor training dashboard saved to: {output_file}")
-            return output_file
-        except Exception as e:
-            print(f"Error saving tensor dashboard: {e}")
-            return None
-
-    # =========================================================================
-    # UTILITY AND HELPER METHODS
-    # =========================================================================
-
-    def get_training_history(self):
-        """
-        Get the complete training history.
-
-        Returns:
-            list: List of training snapshots
-        """
-        return self.training_history
-
-    def clear_history(self):
-        """Clear all visualization history and data."""
-        self.training_history = []
-        self.visualization_data = {}
-        self.tensor_snapshots = []
-        self.feature_space_snapshots = []
-        self.feature_names = []
-        self.class_names = []
-        self.accuracy_progression = []
-        self.weight_evolution = []
-        self.confusion_data = []
-        self.decision_boundaries = []
-        self.feature_importance_data = []
-        self.learning_curves = []
-        self.network_topology_data = []
-
-    def _project_to_3d(self, features):
-        """
-        Project features to 3D using PCA for visualization.
-
-        Args:
-            features (numpy.ndarray): Input features
-
-        Returns:
-            tuple: (x, y, z) coordinates for 3D plotting
-        """
-        from sklearn.decomposition import PCA
-        pca = PCA(n_components=3)
-        projected = pca.fit_transform(features)
-        return projected[:, 0], projected[:, 1], projected[:, 2]
-
-    def _find_convergence_point(self, accuracies, window=5, threshold=0.1):
-        """
-        Find where the model converges (accuracy changes become small).
-
-        Args:
-            accuracies (list): List of accuracy values
-            window (int): Window size for convergence detection
-            threshold (float): Threshold for convergence detection
-
-        Returns:
-            int or None: Index of convergence point
-        """
-        if len(accuracies) < window * 2:
-            return None
-
-        for i in range(window, len(accuracies) - window):
-            prev_mean = np.mean(accuracies[i-window:i])
-            next_mean = np.mean(accuracies[i:i+window])
-            if abs(next_mean - prev_mean) < threshold:
-                return i
-        return None
-
-    def _add_decision_boundary_hint(self, fig, row, col, x, y, z, accuracy):
-        """
-        Add visual hints about decision boundaries to 3D plot.
-
-        Args:
-            fig (plotly.graph_objects.Figure): Figure to add to
-            row (int): Subplot row
-            col (int): Subplot column
-            x (numpy.ndarray): X coordinates
-            y (numpy.ndarray): Y coordinates
-            z (numpy.ndarray): Z coordinates
-            accuracy (float): Current accuracy
-        """
-        # Add a transparent surface to suggest decision boundaries
-        x_range = np.linspace(min(x), max(x), 10)
-        y_range = np.linspace(min(y), max(y), 10)
-        X, Y = np.meshgrid(x_range, y_range)
-        Z = np.zeros_like(X)  # Simple plane for demonstration
-
-        fig.add_trace(go.Surface(
-            x=X, y=Y, z=Z,
-            opacity=0.3,
-            colorscale='Blues',
-            showscale=False,
-            name='Decision Boundary Hint'
-        ), row=row, col=col)
-
-        # Add accuracy annotation
-        fig.add_annotation(
-            xref=f"x{3*(row-1)+col}", yref=f"y{3*(row-1)+col}",
-            x=0.5, y=0.5, z=1.1,
-            text=f"Accuracy: {accuracy:.1f}%",
-            showarrow=False,
-            bgcolor="white",
-            bordercolor="black",
-            borderwidth=1
-        )
-
-    def generate_interactive_visualizations(self, output_dir="Visualisations"):
-        """
-        Generate all interactive visualizations after training.
-
-        Args:
-            output_dir (str): Output directory for visualizations
-
-        Returns:
-            dict or None: Dictionary of generated visualization files
-        """
-        if not hasattr(self, 'feature_space_snapshots') or not self.feature_space_snapshots:
-            print("❌ No interactive visualization data available.")
-            print("   Enable with enable_interactive_visualization() before training")
-            return None
-
-        try:
-            import os
-            # Create output directory
-            if not os.path.exists(output_dir):
-                os.makedirs(output_dir)
-
-            # Create base filename
-            base_name = "dbnn_training"
-            if hasattr(self, 'feature_names') and self.feature_names:
-                base_name = f"dbnn_{len(self.feature_names)}features"
-
-            outputs = {}
-
-            # Generate interactive 3D visualization
-            interactive_3d_file = os.path.join(output_dir, f"{base_name}_interactive_3d.html")
-            result = self.generate_interactive_3d_visualization(interactive_3d_file)
-            if result:
-                outputs['interactive_3d'] = result
-                print(f"✅ Interactive 3D visualization: {result}")
-
-            # Generate advanced dashboard
-            dashboard_file = os.path.join(output_dir, f"{base_name}_advanced_dashboard.html")
-            result = self.create_advanced_interactive_dashboard(dashboard_file)
-            if result:
-                outputs['advanced_dashboard'] = result
-                print(f"✅ Advanced dashboard: {result}")
-
-            # Generate traditional visualizations
-            traditional_file = os.path.join(output_dir, f"{base_name}_traditional_dashboard.html")
-            if hasattr(self, 'create_training_dashboard'):
-                result = self.create_training_dashboard(traditional_file)
-                if result:
-                    outputs['traditional_dashboard'] = result
-                    print(f"✅ Traditional dashboard: {result}")
-
-            return outputs
-
-        except Exception as e:
-            print(f"❌ Error generating visualizations: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
 
 class DBNNWorkflow:
     """
@@ -4426,6 +5876,42 @@ class EnhancedDBNNInterface:
         # Setup configuration tab
         self.setup_configuration_tab()
 
+        # Add visualization menu
+        self.setup_visualization_menu()
+
+    def _handle_visualization_command(self, operation, window=None):
+        """Handle visualization commands from the interface"""
+        try:
+            if operation == "open_3d":
+                viz_file = "Visualisations/Enhanced/dbnn_training_enhanced_3d.html"
+                if os.path.exists(viz_file):
+                    import webbrowser
+                    webbrowser.open('file://' + os.path.abspath(viz_file))
+                else:
+                    messagebox.showwarning("File Not Found",
+                        "Enhanced 3D visualization not found.\n\n"
+                        "Please generate visualizations first by:\n"
+                        "1. Enabling 'Enhanced Visualization' before training\n"
+                        "2. Or use the 'Visualize' button after training")
+
+            elif operation == "open_dashboard":
+                dashboard_file = "Visualisations/Standard/dbnn_training_traditional_dashboard.html"
+                if os.path.exists(dashboard_file):
+                    import webbrowser
+                    webbrowser.open('file://' + os.path.abspath(dashboard_file))
+                else:
+                    messagebox.showwarning("File Not Found",
+                        "Dashboard not found.\n\n"
+                        "Please generate visualizations first using the 'Visualize' button.")
+
+            elif operation == "refresh":
+                self.visualize()  # Call the main visualize method
+
+            if window:
+                window.destroy()
+
+        except Exception as e:
+            self.log(f"Visualization command error: {e}")
 
     def toggle_tensor_mode(self):
         """Toggle between tensor and standard mode"""
@@ -4625,6 +6111,156 @@ class EnhancedDBNNInterface:
         self.console = scrolledtext.ScrolledText(console_frame, height=30, width=80)
         self.console.pack(fill='both', expand=True)
 
+    def setup_visualization_menu(self):
+        """Setup visualization menu with file manager"""
+        # Create menu bar
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+
+        # Visualization menu
+        viz_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Visualization", menu=viz_menu)
+
+        # File Manager submenu
+        file_manager_menu = tk.Menu(viz_menu, tearoff=0)
+        viz_menu.add_cascade(label="File Manager", menu=file_manager_menu)
+
+        file_manager_menu.add_command(
+            label="Open Visualization Folder",
+            command=self.open_visualization_folder
+        )
+        file_manager_menu.add_command(
+            label="Refresh Visualizations",
+            command=self.refresh_visualizations
+        )
+        file_manager_menu.add_separator()
+        file_manager_menu.add_command(
+            label="Open Enhanced 3D",
+            command=lambda: self.open_specific_visualization("enhanced_3d")
+        )
+        file_manager_menu.add_command(
+            label="Open Dashboard",
+            command=lambda: self.open_specific_visualization("traditional_dashboard")
+        )
+        file_manager_menu.add_command(
+            label="Open Confusion Matrix",
+            command=lambda: self.open_specific_visualization("confusion_animation")
+        )
+        self.viz_type_mapping = {
+            "complex_tensor": os.path.join("*", "Enhanced", "*_complex_tensor.html"),
+            "phase_diagram": os.path.join("*", "Enhanced", "*_phase_diagram.html"),
+            "enhanced_3d": os.path.join("*", "Enhanced", "*_enhanced_3d.html"),
+            "traditional_dashboard": os.path.join("*", "Standard", "*_traditional_dashboard.html"),
+            "confusion_animation": os.path.join("*", "Standard", "*_confusion_animation.html"),
+        }
+
+    def open_visualization_folder(self):
+        """Open the visualization folder for current data file"""
+        try:
+            import subprocess
+            import os
+            import platform
+
+            # Determine the visualization folder
+            if hasattr(self, 'core') and hasattr(self.core, 'main_viz_directory'):
+                viz_folder = self.core.main_viz_directory
+            else:
+                # Fallback: use current file to determine folder
+                if hasattr(self, 'current_file') and self.current_file:
+                    base_name = os.path.splitext(os.path.basename(self.current_file))[0]
+                    viz_folder = os.path.join("Visualisations", base_name)
+                else:
+                    viz_folder = "Visualisations"
+
+            # Create folder if it doesn't exist
+            if not os.path.exists(viz_folder):
+                os.makedirs(viz_folder, exist_ok=True)
+                self.log(f"Created visualization folder: {viz_folder}")
+
+            # Open folder based on operating system
+            system = platform.system()
+            if system == "Windows":
+                os.startfile(viz_folder)
+            elif system == "Darwin":  # macOS
+                subprocess.run(["open", viz_folder])
+            else:  # Linux
+                subprocess.run(["xdg-open", viz_folder])
+
+            self.log(f"📁 Opened visualization folder: {viz_folder}")
+
+        except Exception as e:
+            self.log(f"❌ Error opening visualization folder: {e}")
+            messagebox.showerror("Error", f"Could not open visualization folder:\n{e}")
+
+    def open_specific_visualization(self, viz_type):
+        """Open a specific visualization file"""
+        try:
+            import webbrowser
+            import os
+
+            # Determine the visualization folder and file
+            if hasattr(self, 'core') and hasattr(self.core, 'main_viz_directory'):
+                base_folder = self.core.main_viz_directory
+            else:
+                if hasattr(self, 'current_file') and self.current_file:
+                    base_name = os.path.splitext(os.path.basename(self.current_file))[0]
+                    base_folder = os.path.join("Visualisations", base_name)
+                else:
+                    base_folder = "Visualisations"
+
+            # Map visualization types to file paths
+            viz_files = {
+                "enhanced_3d": os.path.join(base_folder, "Enhanced", "*_enhanced_3d.html"),
+                "traditional_dashboard": os.path.join(base_folder, "Standard", "*_traditional_dashboard.html"),
+                "confusion_animation": os.path.join(base_folder, "Standard", "*_confusion_animation.html"),
+                "performance": os.path.join(base_folder, "Standard", "*_performance.html"),
+                "correlation": os.path.join(base_folder, "Standard", "*_correlation.html")
+            }
+
+            if viz_type in viz_files:
+                import glob
+                file_pattern = viz_files[viz_type]
+                matching_files = glob.glob(file_pattern)
+
+                if matching_files:
+                    # Get the most recent file
+                    most_recent = max(matching_files, key=os.path.getmtime)
+                    webbrowser.open(f'file://{os.path.abspath(most_recent)}')
+                    self.log(f"📊 Opened {viz_type}: {most_recent}")
+                else:
+                    self.log(f"❌ No {viz_type} file found. Please generate visualizations first.")
+                    messagebox.showwarning(
+                        "File Not Found",
+                        f"No {viz_type} visualization found.\n\nPlease generate visualizations first using the 'Visualize' button."
+                    )
+            else:
+                self.log(f"❌ Unknown visualization type: {viz_type}")
+
+        except Exception as e:
+            self.log(f"❌ Error opening visualization: {e}")
+
+    def refresh_visualizations(self):
+        """Refresh/regenerate all visualizations"""
+        if not self.core:
+            messagebox.showerror("Error", "Please initialize core first")
+            return
+
+        try:
+            self.show_processing_indicator("Refreshing visualizations...")
+            outputs = self.core.generate_interactive_visualizations()
+
+            if outputs:
+                self.log("✅ Visualizations refreshed:")
+                for viz_type, file_path in outputs.items():
+                    self.log(f"   {viz_type}: {file_path}")
+            else:
+                self.log("❌ No visualizations could be generated")
+
+        except Exception as e:
+            self.log(f"❌ Error refreshing visualizations: {e}")
+        finally:
+            self.hide_processing_indicator()
+
     def setup_configuration_tab(self):
         """Setup configuration tab with all default parameters"""
         # Create configuration tab
@@ -4769,6 +6405,32 @@ class EnhancedDBNNInterface:
         widget.bind("<Enter>", on_enter)
         widget.bind("<Leave>", on_leave)
 
+    def _file_operation(self, operation, window=None):
+        """Handle file operations for visualization window"""
+        try:
+            if operation == "open_3d":
+                # Open 3D visualization
+                import webbrowser
+                webbrowser.open('file://' + os.path.abspath("Visualisations/dbnn_training_advanced_dashboard.html"))
+
+            elif operation == "open_dashboard":
+                # Open traditional dashboard
+                import webbrowser
+                webbrowser.open('file://' + os.path.abspath("Visualisations/dbnn_training_traditional_dashboard.html"))
+
+            elif operation == "refresh":
+                # Refresh visualizations
+                self.log("Refreshing visualizations...")
+                if hasattr(self, 'core') and self.core:
+                    outputs = self.core.generate_interactive_visualizations()
+                    if outputs:
+                        self.log("Visualizations refreshed")
+
+            if window:
+                window.destroy()
+
+        except Exception as e:
+            self.log(f"File operation error: {e}")
 
     def load_default_config(self):
         """Load default configuration values"""
@@ -5233,6 +6895,9 @@ class EnhancedDBNNInterface:
             # PROPERLY ENABLE ENHANCED VISUALIZATION
             viz_enabled = self.enhanced_viz_var.get()
             if viz_enabled:
+                # Initialize visualizer if not already done
+                if not hasattr(self.core, 'visualizer') or self.core.visualizer is None:
+                    self.core.visualizer = DBNNVisualizer()
                 # Enable BOTH enhanced and interactive visualization
                 self.core.enable_enhanced_visualization(True, capture_interval=5)
                 self.core.enable_interactive_visualization(capture_interval=5)
@@ -6924,48 +8589,144 @@ class EnhancedDBNNInterface:
 
 
     def visualize(self):
-        """Generate visualizations - FIXED to handle both standard and enhanced"""
-        if not self.core or not hasattr(self.core, 'is_trained') or not self.core.is_trained:
-            messagebox.showerror("Error", "No trained model available for visualization")
+        """Enhanced visualization interface with organized options"""
+        if not hasattr(self, 'core') or not self.core:
+            messagebox.showerror("Error", "Please initialize core first")
             return
 
         try:
-            # Check if enhanced visualization is enabled and has data
-            enhanced_enabled = self.enhanced_viz_var.get()
-            has_enhanced_data = (hasattr(self.core, 'visualizer') and
-                               hasattr(self.core.visualizer, 'feature_space_snapshots') and
-                               self.core.visualizer.feature_space_snapshots)
+            # Create enhanced visualization dialog
+            viz_window = tk.Toplevel(self.root)
+            viz_window.title("🎯 DBNN Advanced Visualization Manager")
+            viz_window.geometry("600x500")
+            viz_window.transient(self.root)
+            viz_window.grab_set()
 
-            if enhanced_enabled and has_enhanced_data:
-                self.log("=== GENERATING ENHANCED 3D VISUALIZATIONS ===")
-                self.show_processing_indicator("Generating enhanced 3D visualizations...")
+            # Center the window
+            viz_window.update_idletasks()
+            x = self.root.winfo_x() + (self.root.winfo_width() - 600) // 2
+            y = self.root.winfo_y() + (self.root.winfo_height() - 500) // 2
+            viz_window.geometry(f"+{x}+{y}")
 
-                outputs = self.core.generate_interactive_visualizations()
-                if outputs:
-                    self.log("✅ ENHANCED VISUALIZATIONS GENERATED:")
-                    for viz_type, file_path in outputs.items():
-                        self.log(f"   {viz_type}: {file_path}")
+            # Header
+            header_frame = ttk.Frame(viz_window)
+            header_frame.pack(fill='x', padx=20, pady=15)
 
-                    # Open the main visualization
-                    if 'interactive_3d' in outputs:
-                        import webbrowser
-                        webbrowser.open(f'file://{os.path.abspath(outputs["interactive_3d"])}')
-                else:
-                    self.log("❌ No enhanced visualizations could be generated")
-                    self.log("Falling back to standard visualizations...")
-                    self._generate_standard_visualizations()
+            ttk.Label(header_frame, text="🎯 DBNN Advanced Visualization Manager",
+                     font=('Arial', 16, 'bold'), foreground='darkblue').pack(pady=5)
 
-            else:
-                self.log("=== GENERATING STANDARD VISUALIZATIONS ===")
-                self._generate_standard_visualizations()
+            # Get dataset name for organization
+            dataset_name = "unknown"
+            if hasattr(self.core, 'current_file') and self.core.current_file:
+                dataset_name = os.path.splitext(os.path.basename(self.core.current_file))[0]
+
+            ttk.Label(header_frame, text=f"Dataset: {dataset_name}",
+                     font=('Arial', 10), foreground='gray').pack()
+
+            # Main notebook for different visualization types
+            notebook = ttk.Notebook(viz_window)
+            notebook.pack(fill='both', expand=True, padx=20, pady=10)
+
+            # Tab 1: Enhanced Visualizations
+            enhanced_frame = ttk.Frame(notebook)
+            notebook.add(enhanced_frame, text="🚀 Enhanced 3D")
+
+            ttk.Label(enhanced_frame, text="Interactive 3D Visualizations",
+                     font=('Arial', 12, 'bold')).pack(pady=10)
+
+            enhanced_buttons = [
+                ("🎮 Generate Enhanced 3D", "generate_enhanced_3d"),
+                ("🔄 Animated Training", "generate_animated"),
+                ("📊 Feature Explorer", "generate_feature_explorer")
+            ]
+
+            for text, command in enhanced_buttons:
+                btn = ttk.Button(enhanced_frame, text=text,
+                               command=lambda cmd=command: self._generate_visualization(cmd, viz_window))
+                btn.pack(fill='x', padx=50, pady=5)
+
+            # Tab 2: Standard Visualizations
+            standard_frame = ttk.Frame(notebook)
+            notebook.add(standard_frame, text="📈 Standard Charts")
+
+            ttk.Label(standard_frame, text="Standard Charts and Metrics",
+                     font=('Arial', 12, 'bold')).pack(pady=10)
+
+            standard_buttons = [
+                ("📊 Training Dashboard", "generate_standard_dashboard"),
+                ("📈 Performance Metrics", "generate_performance"),
+                ("🔥 Correlation Matrix", "generate_correlation"),
+                ("📋 All Standard Charts", "generate_all_standard")
+            ]
+
+            for text, command in standard_buttons:
+                btn = ttk.Button(standard_frame, text=text,
+                               command=lambda cmd=command: self._generate_visualization(cmd, viz_window))
+                btn.pack(fill='x', padx=50, pady=5)
+
+            # Tab 3: File Management
+            file_frame = ttk.Frame(notebook)
+            notebook.add(file_frame, text="📁 File Manager")
+
+            ttk.Label(file_frame, text="File Management",
+                     font=('Arial', 12, 'bold')).pack(pady=10)
+
+            file_buttons = [
+                ("📂 Open Visualizations Folder", "open_viz_folder"),
+                ("🕐 Open Recent", "open_recent"),
+                ("🌐 Load Specific File", "load_specific")
+            ]
+
+            for text, command in file_buttons:
+                btn = ttk.Button(file_frame, text=text,
+                        command=lambda cmd=command: self._handle_visualization_command(cmd, viz_window))
+                btn.pack(fill='x', padx=50, pady=5)
+
+            # Close button
+            close_frame = ttk.Frame(viz_window)
+            close_frame.pack(fill='x', padx=20, pady=10)
+
+            ttk.Button(close_frame, text="Close",
+                      command=viz_window.destroy).pack(side='right')
 
         except Exception as e:
             self.log(f"❌ Visualization error: {e}")
-            import traceback
-            self.log(traceback.format_exc())
+
+    def _generate_visualization(self, viz_type, parent_window):
+        """Generate specific visualization type."""
+        self.show_processing_indicator(f"Generating {viz_type}...")
+        try:
+            # Get organized output paths
+            dataset_name = "unknown"
+            if hasattr(self.core, 'current_file') and self.core.current_file:
+                dataset_name = os.path.splitext(os.path.basename(self.core.current_file))[0]
+
+            enhanced_dir = f"Visualisations/{dataset_name}/Enhanced"
+            standard_dir = f"Visualisations/{dataset_name}/Standard"
+            os.makedirs(enhanced_dir, exist_ok=True)
+            os.makedirs(standard_dir, exist_ok=True)
+
+            output_file = None
+            if viz_type == "generate_enhanced_3d":
+                output_file = f"{enhanced_dir}/{dataset_name}_enhanced_3d.html"
+                result = self.core.visualizer.generate_enhanced_interactive_3d(output_file)
+            elif viz_type == "generate_standard_dashboard":
+                output_file = f"{standard_dir}/{dataset_name}_standard_dashboard.html"
+                result = self.core.visualizer.create_training_dashboard(output_file)
+
+            if output_file and os.path.exists(output_file):
+                self.log(f"✅ Generated: {output_file}")
+                # Auto-open in browser
+                import webbrowser
+                webbrowser.open(f'file://{os.path.abspath(output_file)}')
+            else:
+                self.log(f"❌ Failed to generate {viz_type}")
+
+        except Exception as e:
+            self.log(f"❌ Error: {e}")
         finally:
             self.hide_processing_indicator()
-
+            parent_window.destroy()
 
     def _generate_enhanced_visualizations(self):
         """Generate enhanced educational visualizations with interactive dashboards"""
@@ -8409,6 +10170,444 @@ Start interactive mode with: python runDBNN_cmd.py --interactive
             model_dir = getattr(args, 'model_dir', 'Model')
             model_path = os.path.join(model_dir, default_model_name)
             self.save_model(model_path, use_json=use_json)
+
+class DBNNTensorCore(DBNNCore):
+    """
+    DBNN with tensor space transformation instead of iterative learning
+    """
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        super().__init__(config)
+        self.orthogonal_basis = None
+        self.weight_matrix = None
+        self.feature_projection = None
+        self.class_projection = None
+
+        # Ensure class encoder exists
+        if not hasattr(self, 'class_encoder'):
+            self.class_encoder = ClassEncoder()
+
+        # Initialize arrays to prevent NoneType errors
+        self.innodes = 0
+        self.outnodes = 0
+        self.class_labels = None  # This will be initialized properly later
+
+    def orthogonal_predict(self, features_batch):
+        """Prediction using orthogonal projections with robust type handling"""
+        if self.weight_matrix is not None and features_batch.size > 0:
+            try:
+                # Direct projection: features @ W = class_scores
+                class_scores = features_batch @ self.weight_matrix
+
+                # Convert to probabilities using softmax
+                exp_scores = np.exp(class_scores - np.max(class_scores, axis=1, keepdims=True))
+                probabilities = exp_scores / np.sum(exp_scores, axis=1, keepdims=True)
+
+                # Get predictions - find which class has highest score
+                predicted_indices = np.argmax(class_scores, axis=1)
+
+                # Convert indices back to original class values using class_labels
+                predictions = []
+                for idx in predicted_indices:
+                    if 0 <= idx < len(self.class_labels) - 1:  # -1 because index 0 is margin
+                        class_val = self.class_labels[idx + 1]  # +1 because index 0 is margin
+                        predictions.append(class_val)
+                    else:
+                        # Fallback: use first class
+                        predictions.append(self.class_labels[1] if len(self.class_labels) > 1 else 1.0)
+
+                # Convert to probability dictionaries
+                prob_dicts = []
+                for prob_row in probabilities:
+                    prob_dict = {}
+                    for k in range(1, min(self.outnodes + 1, len(prob_row) + 1)):
+                        class_val = self.class_labels[k]
+                        if self.class_encoder.is_fitted:
+                            # Use the original class representation from encoder
+                            class_name = self.class_encoder.encoded_to_class.get(class_val, f"Class_{k}")
+                        else:
+                            class_name = f"Class_{k}"
+                        prob_dict[class_name] = float(prob_row[k-1])
+                    prob_dicts.append(prob_dict)
+
+                return predictions, prob_dicts
+            except Exception as e:
+                self.log(f"Orthogonal prediction failed: {e}")
+                # Fallback to standard prediction
+                return self.predict_batch(features_batch)
+        else:
+            # Fallback to standard method
+            return self.predict_batch(features_batch)
+
+    def tensor_evaluate(self, features_batches, encoded_targets_batches):
+        """Evaluate tensor model accuracy with robust type handling"""
+        correct_predictions = 0
+        total_samples = 0
+        all_predictions = []
+
+        for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
+            # Use orthogonal prediction for tensor mode
+            predictions, probabilities = self.orthogonal_predict(features_batch)
+
+            batch_size = len(features_batch)
+            total_samples += batch_size
+
+            # Convert predictions to encoded format for comparison - TYPE SAFE
+            try:
+                # Direct conversion if predictions are already encoded
+                if predictions and all(isinstance(p, (int, float, np.number)) for p in predictions):
+                    encoded_predictions = predictions
+                else:
+                    # Use encoder for conversion
+                    encoded_predictions = self.class_encoder.transform(predictions)
+            except Exception as e:
+                self.log(f"⚠️ Prediction encoding failed, using fallback: {e}")
+                # Fallback: assume predictions are already encoded
+                encoded_predictions = [float(p) if isinstance(p, (int, float, np.number)) else 1.0 for p in predictions]
+
+            for i in range(batch_size):
+                if i < len(encoded_predictions):
+                    predicted = encoded_predictions[i]
+                else:
+                    predicted = 1.0  # Default fallback
+
+                actual = targets_batch[i]
+                all_predictions.append(predicted)
+
+                # Check if prediction is correct (using margin)
+                if abs(actual - predicted) <= self.class_labels[0]:
+                    correct_predictions += 1
+
+        accuracy = (correct_predictions / total_samples) * 100 if total_samples > 0 else 0
+        return accuracy, correct_predictions, all_predictions
+
+
+    def build_tensor_transformation(self, features_batches, encoded_targets_batches):
+        """
+        Build orthogonal tensor transformation instead of iterative learning
+        FIXED: Correct method signature
+        """
+        self.log("Building tensor space transformation...")
+
+        # Combine all batches
+        all_features = np.vstack(features_batches)
+        all_targets = np.concatenate(encoded_targets_batches)
+
+        n_samples, n_features = all_features.shape
+        n_classes = len(np.unique(all_targets))
+
+        # Step 1: Create feature-class correlation tensor
+        feature_class_tensor = self._build_correlation_tensor(all_features, all_targets, n_features, n_classes)
+
+        # Step 2: Perform orthogonal decomposition
+        self.orthogonal_basis = self._tensor_orthogonal_decomposition(feature_class_tensor)
+
+        # Step 3: Build projection matrix - FIXED: Correct call with 2 arguments
+        self.weight_matrix = self._build_projection_matrix(all_features, all_targets)
+
+        # Step 4: Initialize anti_net with orthogonal projections
+        self._initialize_orthogonal_network()
+
+        self.log(f"✅ Tensor transformation built: {n_features} features → {n_classes} classes")
+        return True
+
+    def _build_projection_matrix(self, features, targets):
+        """
+        Build projection matrix that maps features to class probabilities
+        FIXED: Takes 3 arguments (self, features, targets) instead of 4
+        """
+        n_samples, n_features = features.shape
+        n_classes = len(np.unique(targets))
+
+        # Create one-hot encoded targets
+        target_one_hot = np.zeros((n_samples, n_classes))
+        for i, target in enumerate(targets):
+            target_one_hot[i, int(target)-1] = 1.0
+
+        # Solve for projection matrix: features @ W = target_one_hot
+        # Using ridge regression for stability
+        alpha = 0.1  # Regularization
+        W = np.linalg.solve(
+            features.T @ features + alpha * np.eye(n_features),
+            features.T @ target_one_hot
+        )
+
+        return W
+
+    def _build_correlation_tensor(self, features, targets, n_features, n_classes):
+        """
+        Build feature-class correlation tensor instead of iterative counting
+        """
+        resol = self.config.get('resol', 100)
+        correlation_tensor = np.zeros((n_features+2, resol+2, n_features+2, resol+2, n_classes+2))
+
+        # Discretize features into bins
+        feature_bins = {}
+        for i in range(n_features):
+            feature_min = np.min(features[:, i])
+            feature_max = np.max(features[:, i])
+            bins = np.linspace(feature_min, feature_max, resol)
+            feature_bins[i] = bins
+
+        # Build correlation counts in one pass (no iteration!)
+        for sample_idx in range(len(features)):
+            sample_features = features[sample_idx]
+            target_class = int(targets[sample_idx])
+
+            # For each feature pair, update correlation counts
+            for i in range(n_features):
+                # Find bin for feature i
+                bin_i = np.digitize(sample_features[i], feature_bins[i])
+                bin_i = np.clip(bin_i, 1, resol)
+
+                for j in range(i+1, n_features):  # Only upper triangle for efficiency
+                    # Find bin for feature j
+                    bin_j = np.digitize(sample_features[j], feature_bins[j])
+                    bin_j = np.clip(bin_j, 1, resol)
+
+                    # Update correlation tensor - this replaces iterative anti_net updates
+                    correlation_tensor[i+1, bin_i, j+1, bin_j, target_class] += 1
+                    correlation_tensor[j+1, bin_j, i+1, bin_i, target_class] += 1  # Symmetric
+
+        return correlation_tensor
+
+
+    def _tensor_orthogonal_decomposition(self, correlation_tensor):
+        """
+        Perform orthogonal decomposition of the correlation tensor with optimal variance threshold
+        """
+        n_features = correlation_tensor.shape[0] - 2
+        n_classes = correlation_tensor.shape[4] - 2
+
+        # Reshape tensor for decomposition
+        tensor_flat = correlation_tensor[1:n_features+1, 1:-1, 1:n_features+1, 1:-1, 1:n_classes+1]
+        tensor_2d = tensor_flat.reshape(n_features * (self.config['resol']),
+                                      n_features * (self.config['resol']) * n_classes)
+
+        # Perform SVD for orthogonal basis
+        U, s, Vt = np.linalg.svd(tensor_2d, full_matrices=False)
+
+        # Calculate optimal variance threshold based on data characteristics
+        optimal_threshold = self._calculate_optimal_variance_threshold(s, n_features, n_classes)
+
+        # Keep principal components that explain optimal variance
+        explained_variance = np.cumsum(s) / np.sum(s)
+        n_components = np.argmax(explained_variance >= optimal_threshold) + 1
+
+        # Ensure we don't take too many components (avoid overfitting)
+        max_reasonable_components = min(n_features * 10, len(s))  # Limit to avoid explosion
+        n_components = min(n_components, max_reasonable_components)
+
+        orthogonal_basis = U[:, :n_components]
+
+        self.log(f"🧠 Optimal orthogonal decomposition:")
+        self.log(f"   Components: {n_components} (max reasonable: {max_reasonable_components})")
+        self.log(f"   Variance explained: {explained_variance[n_components-1]:.3%}")
+        self.log(f"   Optimal threshold: {optimal_threshold:.3%}")
+        self.log(f"   Singular values range: {s[0]:.3f} to {s[-1]:.3f}")
+
+        return orthogonal_basis
+
+    def _calculate_optimal_variance_threshold(self, singular_values, n_features, n_classes):
+        """
+        Calculate optimal variance threshold based on data characteristics
+        Higher thresholds for simpler problems, adaptive for complex ones
+        """
+        total_variance = np.sum(singular_values)
+
+        # Calculate data complexity metrics
+        variance_ratio = singular_values[0] / total_variance if len(singular_values) > 0 else 0
+        effective_rank = np.sum(singular_values > 1e-10)  # Numerical rank
+
+        # Base threshold: higher for simpler problems (first component explains a lot)
+        if variance_ratio > 0.5:
+            # Simple problem - first component dominates
+            base_threshold = 0.98  # Very high threshold
+        elif variance_ratio > 0.3:
+            # Moderately complex
+            base_threshold = 0.95
+        else:
+            # Complex problem - need more components
+            base_threshold = 0.90
+
+        # Adjust based on feature-to-class ratio
+        feature_class_ratio = n_features / max(n_classes, 1)
+        if feature_class_ratio > 10:
+            # High dimensionality - be more conservative
+            base_threshold = min(base_threshold, 0.92)
+        elif feature_class_ratio < 2:
+            # Low dimensionality - can be more aggressive
+            base_threshold = max(base_threshold, 0.85)
+
+        # Adjust based on effective rank
+        max_possible_components = len(singular_values)
+        if effective_rank < max_possible_components * 0.3:
+            # Low effective rank - problem is simpler than it appears
+            base_threshold = min(base_threshold + 0.03, 0.99)
+
+        self.log(f"🔧 Variance threshold calculation:")
+        self.log(f"   First component ratio: {variance_ratio:.3f}")
+        self.log(f"   Feature/class ratio: {feature_class_ratio:.2f}")
+        self.log(f"   Effective rank: {effective_rank}/{max_possible_components}")
+        self.log(f"   Final threshold: {base_threshold:.3%}")
+
+        return base_threshold
+
+    def _build_projection_matrix(self, features, targets):
+        """
+        Build projection matrix with enhanced regularization for better generalization
+        """
+        n_samples, n_features = features.shape
+        n_classes = len(np.unique(targets))
+
+        # Create one-hot encoded targets
+        target_one_hot = np.zeros((n_samples, n_classes))
+        for i, target in enumerate(targets):
+            class_index = int(target) - 1
+            if 0 <= class_index < n_classes:
+                target_one_hot[i, class_index] = 1.0
+
+        # Enhanced regularization based on data characteristics
+        condition_number = np.linalg.cond(features.T @ features)
+
+        # Adaptive regularization strength
+        if condition_number > 1e10:
+            alpha = 1.0  # Strong regularization for ill-conditioned problems
+        elif condition_number > 1e6:
+            alpha = 0.5  # Moderate regularization
+        elif condition_number > 1e3:
+            alpha = 0.1  # Light regularization
+        else:
+            alpha = 0.01  # Minimal regularization for well-conditioned problems
+
+        # Add class balancing for imbalanced datasets
+        class_counts = np.sum(target_one_hot, axis=0)
+        class_weights = 1.0 / (class_counts + 1e-8)
+        class_weights = class_weights / np.sum(class_weights)
+
+        # Apply class weights
+        weighted_targets = target_one_hot * class_weights
+
+        # Solve for projection matrix with enhanced regularization
+        XTX = features.T @ features
+        XTY = features.T @ weighted_targets
+
+        # Add regularization to improve generalization
+        W = np.linalg.solve(
+            XTX + alpha * np.eye(n_features),
+            XTY
+        )
+
+        self.log(f"🔧 Enhanced projection matrix:")
+        self.log(f"   Condition number: {condition_number:.3e}")
+        self.log(f"   Regularization alpha: {alpha}")
+        self.log(f"   Matrix shape: {W.shape}")
+        self.log(f"   Class distribution: {class_counts}")
+
+        return W
+
+    def _initialize_orthogonal_network(self):
+        """
+        Initialize anti_net and anti_wts using orthogonal projections
+        """
+        n_features = self.innodes
+        resol = self.config.get('resol', 100)
+        n_classes = self.outnodes
+
+        # Initialize with orthogonal structure
+        self.anti_net = np.ones((n_features+2, resol+2, n_features+2, resol+2, n_classes+2), dtype=np.int32)
+        self.anti_wts = np.ones((n_features+2, resol+2, n_features+2, resol+2, n_classes+2), dtype=np.float32)
+
+        # Project orthogonal basis into the network structure
+        if self.orthogonal_basis is not None:
+            basis_3d = self.orthogonal_basis.reshape(n_features, resol, -1)
+
+            for k in range(1, n_classes+1):
+                for comp_idx in range(basis_3d.shape[2]):
+                    component = basis_3d[:, :, comp_idx]
+
+                    # Distribute component weights across the network
+                    for i in range(1, n_features+1):
+                        for j in range(1, resol+1):
+                            weight_val = abs(component[i-1, j-1])
+                            if weight_val > 0:
+                                # Spread influence to related features
+                                for l in range(1, n_features+1):
+                                    if l != i:
+                                        influence = weight_val * 0.1  # Reduced influence
+                                        self.anti_wts[i, j, l, 1, k] += influence
+                                        self.anti_wts[l, 1, i, j, k] += influence
+
+
+    def tensor_train(self, train_file: str, test_file: Optional[str] = None,
+                    use_csv: bool = True, target_column: Optional[str] = None,
+                    feature_columns: Optional[List[str]] = None):
+        """
+        Single-pass tensor transformation training with robust type handling
+        """
+        self.log("🧠 Starting tensor space transformation training...")
+
+        # Load data
+        features_batches, targets_batches, feature_columns_used, original_targets_batches = self.load_data(
+            train_file, target_column, feature_columns
+        )
+
+        if not features_batches:
+            self.log("No training data loaded")
+            return False
+
+        # Store feature configuration
+        self.feature_columns = feature_columns_used
+        self.target_column = target_column if target_column else ""
+
+        # Fit encoder and determine architecture
+        all_original_targets = np.concatenate(original_targets_batches) if original_targets_batches else np.array([])
+        self.class_encoder.fit(all_original_targets)
+
+        # Log encoder information for debugging
+        self.log(f"🔧 Encoder configuration:")
+        self.log(f"   Original dtype: {getattr(self.class_encoder, 'original_dtype', 'unknown')}")
+        self.log(f"   Class mappings: {len(self.class_encoder.class_to_encoded)}")
+
+        encoded_targets_batches = []
+        for batch in original_targets_batches:
+            encoded_batch = self.class_encoder.transform(batch)
+            encoded_targets_batches.append(encoded_batch)
+
+        self.innodes = len(feature_columns_used)
+        self.outnodes = len(self.class_encoder.get_encoded_classes())
+
+        # Initialize arrays
+        resol = self.config.get('resol', 100)
+        self.initialize_arrays(self.innodes, resol, self.outnodes)
+
+        # Set up class_labels with encoded values
+        encoded_classes = self.class_encoder.get_encoded_classes()
+        self.class_labels[0] = self.config.get('margin', 0.2)
+        for i, encoded_val in enumerate(encoded_classes, 1):
+            self.class_labels[i] = float(encoded_val)
+
+        # SINGLE PASS: Build tensor transformation
+        start_time = time.time()
+        success = self.build_tensor_transformation(features_batches, encoded_targets_batches)
+        training_time = time.time() - start_time
+
+        if not success:
+            self.log("❌ Tensor transformation failed")
+            return False
+
+        # Enhanced evaluation with robust type handling
+        accuracy, correct_predictions, predictions = self.tensor_evaluate(features_batches, encoded_targets_batches)
+        total_samples = sum(len(batch) for batch in features_batches)
+
+        self.is_trained = True
+        self.best_accuracy = accuracy
+
+        self.log(f"✅ Tensor training completed in {training_time:.2f}s")
+        self.log(f"✅ Final Accuracy = {accuracy:.2f}% ({correct_predictions}/{total_samples})")
+        self.log(f"✅ Feature configuration: {len(self.feature_columns)} features")
+
+        return True
 
 # Example usage
 if __name__ == "__main__":
