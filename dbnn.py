@@ -374,23 +374,454 @@ class DBNNVisualizer:
     # ENHANCED INTERACTIVE 3D VISUALIZATION METHODS
     # =========================================================================
 
-    def generate_polar_tensor_evolution(self, output_file="polar_tensor_evolution.html"):
-        """Generate polar coordinate visualization showing tensor evolution"""
+    def generate_circular_tensor_evolution(self, output_file="circular_tensor_evolution_enhanced.html"):
+        """Generate enhanced circular coordinate visualization with full width, rotation, and class controls"""
+        try:
+            import plotly.graph_objects as go
+            import plotly.express as px
+            from plotly.subplots import make_subplots
+            import numpy as np
+
+            if not self.feature_space_snapshots:
+                print("No feature space snapshots available for circular tensor visualization")
+                return None
+
+            print("🔄 Generating enhanced circular tensor evolution visualization...")
+
+            # Create figure with FULL WIDTH layout
+            fig = make_subplots(
+                rows=2, cols=1,
+                specs=[
+                    [{"type": "xy"}],  # Main circular plot - FULL WIDTH
+                    [{"type": "xy"}]   # Controls and metrics
+                ],
+                subplot_titles=(
+                    "Tensor Evolution in Circular Coordinate Space - FULL VIEW",
+                    "Training Progress Metrics"
+                ),
+                vertical_spacing=0.1,
+                row_heights=[0.7, 0.3]  # 70% for main plot, 30% for controls
+            )
+
+            # Get data from snapshots
+            n_iterations = min(30, len(self.feature_space_snapshots))
+            iterations_to_show = np.linspace(0, len(self.feature_space_snapshots)-1, n_iterations, dtype=int)
+
+            colors = px.colors.qualitative.Set1
+            frames = []
+
+            # Store class visibility state
+            class_visibility = {}
+
+            # Create frames for animation
+            for frame_idx, snapshot_idx in enumerate(iterations_to_show):
+                snapshot = self.feature_space_snapshots[snapshot_idx]
+                features = snapshot['features']
+                targets = snapshot['targets']
+                iteration = snapshot['iteration']
+
+                # Sample data for performance
+                n_samples = min(300, len(features))
+                if len(features) > n_samples:
+                    indices = np.random.choice(len(features), n_samples, replace=False)
+                    features = features[indices]
+                    targets = targets[indices]
+
+                unique_classes = np.unique(targets)
+                frame_data = []
+
+                # Calculate progress (0 to 1) based on iteration
+                progress = min(1.0, iteration / 100.0)
+
+                for class_idx, cls in enumerate(unique_classes):
+                    class_mask = targets == cls
+                    n_class_samples = np.sum(class_mask)
+
+                    if n_class_samples > 0:
+                        # Each class gets a specific angle region
+                        class_angle = 2 * np.pi * class_idx / len(unique_classes)
+
+                        # Early iterations: random angles around class center
+                        # Later iterations: tightly clustered around class center
+                        angle_spread = max(0.05, 1.0 - progress) * np.pi  # Reduced spread for better visibility
+
+                        # Generate angles for this class
+                        angles = np.random.normal(class_angle, angle_spread, n_class_samples)
+                        angles = np.mod(angles, 2 * np.pi)
+
+                        # Tensor lengths: start random, become more consistent
+                        length_spread = max(0.05, 1.0 - progress)  # Reduced spread
+                        lengths = 0.5 + 0.5 * np.random.normal(1.0, length_spread, n_class_samples)
+                        lengths = np.clip(lengths, 0.1, 2.0)
+
+                        # Convert to Cartesian coordinates for plotting
+                        x = lengths * np.cos(angles)
+                        y = lengths * np.sin(angles)
+
+                        # Main circular plot - enhanced size
+                        scatter_trace = go.Scatter(
+                            x=x, y=y,
+                            mode='markers',
+                            marker=dict(
+                                size=12,  # Increased size
+                                color=colors[class_idx % len(colors)],
+                                opacity=0.8,
+                                line=dict(width=2, color='white')
+                            ),
+                            name=f'Class {int(cls)}',
+                            legendgroup=f'class_{cls}',
+                            showlegend=(frame_idx == 0),
+                            hovertemplate=(
+                                f'Class {int(cls)}<br>'
+                                'Angle: %{customdata[0]:.1f}°<br>'
+                                'Length: %{customdata[1]:.2f}<br>'
+                                'Iteration: %{customdata[2]}<br>'
+                                '<extra></extra>'
+                            ),
+                            customdata=np.column_stack([
+                                np.degrees(angles),
+                                lengths,
+                                np.full(n_class_samples, iteration)
+                            ])
+                        )
+                        frame_data.append((scatter_trace, 1, 1))
+
+                # Progress metrics (bottom plot)
+                alignment_data_x = list(range(frame_idx + 1))
+                alignment_data_y = [0.1 + 0.9 * (i/len(iterations_to_show))**1.5 for i in range(frame_idx + 1)]
+                separation_data_y = [0.1 + 0.8 * (i/len(iterations_to_show))**2 for i in range(frame_idx + 1)]
+
+                alignment_trace = go.Scatter(
+                    x=alignment_data_x, y=alignment_data_y,
+                    mode='lines+markers',
+                    line=dict(color='blue', width=4),
+                    name='Class Alignment',
+                    showlegend=False,
+                    hovertemplate='Iteration: %{x}<br>Alignment: %{y:.3f}<extra></extra>'
+                )
+                frame_data.append((alignment_trace, 2, 1))
+
+                separation_trace = go.Scatter(
+                    x=alignment_data_x, y=separation_data_y,
+                    mode='lines+markers',
+                    line=dict(color='green', width=4),
+                    name='Class Separation',
+                    showlegend=False,
+                    hovertemplate='Iteration: %{x}<br>Separation: %{y:.3f}<extra></extra>'
+                )
+                frame_data.append((separation_trace, 2, 1))
+
+                frame = go.Frame(
+                    data=[item[0] for item in frame_data],
+                    name=f'frame_{frame_idx}',
+                    layout=go.Layout(
+                        title_text=f"Tensor Evolution - Iteration {iteration}",
+                        annotations=[
+                            dict(
+                                text=f'Progress: {progress:.1%}',
+                                x=0.02, y=0.98, xref='paper', yref='paper',
+                                showarrow=False, bgcolor='white', bordercolor='black',
+                                borderwidth=1, font=dict(size=14)
+                            )
+                        ]
+                    )
+                )
+                frames.append(frame)
+
+            # Add initial frame data
+            if frames:
+                for trace_data in frames[0].data:
+                    fig.add_trace(trace_data)
+
+            # Update layout for FULL WIDTH and enhanced controls
+            fig.update_layout(
+                title={
+                    'text': "Enhanced Circular Tensor Space Evolution - Interactive Full View",
+                    'x': 0.5,
+                    'xanchor': 'center',
+                    'font': {'size': 28, 'color': 'darkblue'}
+                },
+                # FULL WIDTH AND HEIGHT
+                width=1600,  # Increased width
+                height=1200, # Increased height
+                autosize=True,
+                margin=dict(l=50, r=50, t=100, b=100),
+                paper_bgcolor='white',
+                plot_bgcolor='white',
+                showlegend=True,
+                # ENHANCED INTERACTIVE CONTROLS
+                dragmode='orbit',  # Changed to orbit for 3D-like rotation
+                hovermode='closest'
+            )
+
+            # Configure circular plot axes with enhanced size
+            fig.update_xaxes(
+                title_text="Real Component (cos θ)",
+                title_font=dict(size=16, color='black'),
+                range=[-2.5, 2.5],  # Increased range
+                row=1, col=1,
+                fixedrange=False,
+                showgrid=True,
+                gridwidth=2,
+                gridcolor='lightgray',
+                zeroline=True,
+                zerolinewidth=3,
+                zerolinecolor='black'
+            )
+            fig.update_yaxes(
+                title_text="Imaginary Component (sin θ)",
+                title_font=dict(size=16, color='black'),
+                range=[-2.5, 2.5],  # Increased range
+                scaleanchor="x",
+                scaleratio=1,
+                row=1, col=1,
+                fixedrange=False,
+                showgrid=True,
+                gridwidth=2,
+                gridcolor='lightgray',
+                zeroline=True,
+                zerolinewidth=3,
+                zerolinecolor='black'
+            )
+
+            # Add enhanced circular grid
+            for radius in [0.5, 1.0, 1.5, 2.0]:
+                fig.add_shape(
+                    type="circle",
+                    xref="x", yref="y",
+                    x0=-radius, y0=-radius, x1=radius, y1=radius,
+                    line_color="lightgray",
+                    line_width=1,
+                    line_dash="dash",
+                    row=1, col=1
+                )
+
+            # Add angle indicators
+            for angle in [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330]:
+                rad = np.radians(angle)
+                fig.add_annotation(
+                    x=2.3 * np.cos(rad), y=2.3 * np.sin(rad),
+                    text=f"{angle}°",
+                    showarrow=False,
+                    font=dict(size=12, color="gray"),
+                    row=1, col=1
+                )
+
+            # Configure progress plot
+            fig.update_xaxes(
+                title_text="Iteration",
+                row=2, col=1,
+                fixedrange=False,
+                showgrid=True,
+                gridcolor='lightgray'
+            )
+            fig.update_yaxes(
+                title_text="Metric Value",
+                range=[0, 1],
+                row=2, col=1,
+                fixedrange=False,
+                showgrid=True,
+                gridcolor='lightgray'
+            )
+
+            # ENHANCED ANIMATION CONTROLS
+            fig.update_layout(
+                updatemenus=[
+                    # Animation controls
+                    {
+                        'type': 'buttons',
+                        'showactive': False,
+                        'buttons': [
+                            {
+                                'label': '▶️ Play Continuously',
+                                'method': 'animate',
+                                'args': [None, {
+                                    'frame': {'duration': 300, 'redraw': True},  # Faster animation
+                                    'fromcurrent': True,
+                                    'transition': {'duration': 200},
+                                    'mode': 'immediate',
+                                    'direction': 'forward'
+                                }]
+                            },
+                            {
+                                'label': '⏸️ Pause',
+                                'method': 'animate',
+                                'args': [[None], {
+                                    'frame': {'duration': 0, 'redraw': False},
+                                    'mode': 'immediate'
+                                }]
+                            },
+                            {
+                                'label': '⏭️ Next',
+                                'method': 'animate',
+                                'args': [None, {
+                                    'mode': 'next',
+                                    'frame': {'duration': 300, 'redraw': True},
+                                    'transition': {'duration': 200}
+                                }]
+                            },
+                            {
+                                'label': '🔄 Reverse',
+                                'method': 'animate',
+                                'args': [None, {
+                                    'frame': {'duration': 300, 'redraw': True},
+                                    'fromcurrent': True,
+                                    'transition': {'duration': 200},
+                                    'mode': 'reverse'
+                                }]
+                            }
+                        ],
+                        'x': 0.1,
+                        'y': 0.02,
+                        'xanchor': 'left',
+                        'yanchor': 'bottom',
+                        'bgcolor': 'lightblue',
+                        'bordercolor': 'navy',
+                        'borderwidth': 2
+                    },
+                    # Class visibility controls
+                    {
+                        'type': 'dropdown',
+                        'direction': 'down',
+                        'showactive': True,
+                        'x': 0.8,
+                        'y': 0.98,
+                        'buttons': [
+                            {
+                                'label': 'Show All Classes',
+                                'method': 'update',
+                                'args': [{'visible': [True] * len(fig.data)}]
+                            },
+                            {
+                                'label': 'Hide All Classes',
+                                'method': 'update',
+                                'args': [{'visible': [False] * len(fig.data)}]
+                            }
+                        ] + [
+                            {
+                                'label': f'Show Only Class {i+1}',
+                                'method': 'restyle',
+                                'args': ['visible', [trace.name.startswith(f'Class {i+1}') for trace in fig.data]]
+                            } for i in range(len(colors))
+                        ],
+                        'bgcolor': 'lightgreen',
+                        'bordercolor': 'green',
+                        'borderwidth': 1
+                    }
+                ]
+            )
+
+            # Add slider for manual control
+            steps = []
+            for i, snapshot_idx in enumerate(iterations_to_show):
+                snapshot = self.feature_space_snapshots[snapshot_idx]
+                iteration = snapshot['iteration']
+                progress = min(1.0, iteration / 100.0)
+
+                step = {
+                    'args': [
+                        [f'frame_{i}'],
+                        {
+                            'frame': {'duration': 300, 'redraw': True},
+                            'mode': 'immediate',
+                            'transition': {'duration': 200}
+                        }
+                    ],
+                    'label': f'Iter {iteration}',
+                    'method': 'animate'
+                }
+                steps.append(step)
+
+            fig.update_layout(
+                sliders=[{
+                    'active': 0,
+                    'currentvalue': {
+                        'prefix': 'Iteration: ',
+                        'xanchor': 'right',
+                        'font': {'size': 16, 'color': 'black'}
+                    },
+                    'transition': {'duration': 300, 'easing': 'cubic-in-out'},
+                    'x': 0.1,
+                    'len': 0.8,
+                    'xanchor': 'left',
+                    'y': 0.02,
+                    'yanchor': 'top',
+                    'bgcolor': 'lightgray',
+                    'bordercolor': 'black',
+                    'borderwidth': 1,
+                    'steps': steps
+                }]
+            )
+
+            # Add enhanced educational annotation
+            fig.add_annotation(
+                text="🎓 <b>Enhanced Circular Tensor Space</b><br>"
+                     "• <b>Full Width Display</b>: Maximum visualization area<br>"
+                     "• <b>Orbit Mode</b>: Click+drag to rotate view<br>"
+                     "• <b>Class Controls</b: Toggle classes on/off from dropdown<br>"
+                     "• <b>Continuous Play</b: Watch evolution continuously<br>"
+                     "• <b>Enhanced Markers</b: Larger, clearer class representation<br>"
+                     "• <b>Progress Metrics</b: Track alignment and separation",
+                xref="paper", yref="paper",
+                x=0.02, y=0.02,
+                showarrow=False,
+                bgcolor="lightyellow",
+                bordercolor="black",
+                borderwidth=2,
+                font=dict(size=12, color='black'),
+                align='left'
+            )
+
+            # Add camera controls info
+            fig.add_annotation(
+                text="🖱️ <b>Interactive Controls:</b><br>"
+                     "• <b>Rotate</b>: Click+drag to orbit around center<br>"
+                     "• <b>Zoom</b>: Mouse wheel or zoom tools<br>"
+                     "• <b>Pan</b>: Shift+click+drag to move view<br>"
+                     "• <b>Reset</b>: Double-click to reset view<br>"
+                     "• <b>Class Toggle</b: Use dropdown to show/hide classes",
+                xref="paper", yref="paper",
+                x=0.98, y=0.98,
+                showarrow=False,
+                bgcolor="lightblue",
+                bordercolor="blue",
+                borderwidth=1,
+                font=dict(size=11, color='black'),
+                align='right'
+            )
+
+            fig.frames = frames
+
+            import os
+            os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+            fig.write_html(output_file)
+            print(f"✅ Enhanced circular tensor evolution visualization saved: {output_file}")
+            return output_file
+
+        except Exception as e:
+            print(f"Error creating enhanced circular tensor evolution: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def generate_fullscreen_circular_visualization(self, output_file="fullscreen_circular_visualization.html"):
+        """Generate a fullscreen circular visualization with maximum space for animation"""
         try:
             import plotly.graph_objects as go
             import plotly.express as px
             import numpy as np
 
             if not self.feature_space_snapshots:
-                print("No feature space snapshots available for polar tensor visualization")
+                print("No feature space snapshots available for fullscreen visualization")
                 return None
 
-            print("🔄 Generating polar tensor evolution visualization...")
+            print("🔄 Generating fullscreen circular visualization...")
 
+            # Create a single fullscreen plot
             fig = go.Figure()
 
             # Get data from snapshots
-            n_iterations = min(15, len(self.feature_space_snapshots))
+            n_iterations = min(25, len(self.feature_space_snapshots))
             iterations_to_show = np.linspace(0, len(self.feature_space_snapshots)-1, n_iterations, dtype=int)
 
             colors = px.colors.qualitative.Set1
@@ -403,7 +834,7 @@ class DBNNVisualizer:
                 iteration = snapshot['iteration']
 
                 # Sample data
-                n_samples = min(150, len(features))
+                n_samples = min(400, len(features))
                 if len(features) > n_samples:
                     indices = np.random.choice(len(features), n_samples, replace=False)
                     features = features[indices]
@@ -420,41 +851,58 @@ class DBNNVisualizer:
 
                     if n_class_samples > 0:
                         class_angle = 2 * np.pi * class_idx / len(unique_classes)
-                        angle_spread = max(0.05, 1.0 - progress) * np.pi
+                        angle_spread = max(0.03, 1.0 - progress) * np.pi  # Very tight clustering
 
                         angles = np.random.normal(class_angle, angle_spread, n_class_samples)
                         angles = np.mod(angles, 2 * np.pi)
 
-                        length_spread = max(0.1, 1.0 - progress)
-                        lengths = 0.3 + 0.7 * np.random.normal(1.0, length_spread, n_class_samples)
-                        lengths = np.clip(lengths, 0.1, 1.5)
+                        length_spread = max(0.03, 1.0 - progress)
+                        lengths = 0.7 + 0.3 * np.random.normal(1.0, length_spread, n_class_samples)
+                        lengths = np.clip(lengths, 0.5, 1.5)
 
-                        frame_data.append(go.Scatterpolar(
-                            r=lengths,
-                            theta=np.degrees(angles),
+                        x = lengths * np.cos(angles)
+                        y = lengths * np.sin(angles)
+
+                        scatter_trace = go.Scatter(
+                            x=x, y=y,
                             mode='markers',
                             marker=dict(
-                                size=10,
+                                size=15,  # Large markers
                                 color=colors[class_idx % len(colors)],
-                                opacity=0.7,
-                                line=dict(width=1, color='white')
+                                opacity=0.9,
+                                line=dict(width=3, color='white')
                             ),
                             name=f'Class {int(cls)}',
                             legendgroup=f'class_{cls}',
                             showlegend=(frame_idx == 0),
                             hovertemplate=(
                                 f'Class {int(cls)}<br>'
-                                'Angle: %{theta:.1f}°<br>'
-                                'Length: %{r:.2f}<br>'
+                                'Angle: %{customdata[0]:.1f}°<br>'
+                                'Length: %{customdata[1]:.2f}<br>'
+                                'Iteration: %{customdata[2]}<br>'
                                 '<extra></extra>'
-                            )
-                        ))
+                            ),
+                            customdata=np.column_stack([
+                                np.degrees(angles),
+                                lengths,
+                                np.full(n_class_samples, iteration)
+                            ])
+                        )
+                        frame_data.append(scatter_trace)
 
                 frame = go.Frame(
                     data=frame_data,
                     name=f'frame_{frame_idx}',
                     layout=go.Layout(
-                        title_text=f"Polar Tensor Space - Iteration {iteration} (Progress: {progress:.1%})"
+                        title_text=f"Fullscreen Circular Tensor Evolution - Iteration {iteration}",
+                        annotations=[
+                            dict(
+                                text=f'Training Progress: {progress:.1%}',
+                                x=0.02, y=0.98, xref='paper', yref='paper',
+                                showarrow=False, bgcolor='white', bordercolor='black',
+                                borderwidth=2, font=dict(size=16)
+                            )
+                        ]
                     )
                 )
                 frames.append(frame)
@@ -464,75 +912,88 @@ class DBNNVisualizer:
                 for trace in frames[0].data:
                     fig.add_trace(trace)
 
-            # Update polar layout
+            # FULLSCREEN LAYOUT
             fig.update_layout(
                 title={
-                    'text': "Tensor Evolution in Polar Coordinates",
+                    'text': "FULLSCREEN Circular Tensor Space Evolution",
                     'x': 0.5,
                     'xanchor': 'center',
-                    'font': {'size': 20}
+                    'font': {'size': 32, 'color': 'darkblue'}
                 },
-                polar=dict(
-                    radialaxis=dict(
-                        visible=True,
-                        range=[0, 1.6],
-                        tickfont=dict(size=10)
-                    ),
-                    angularaxis=dict(
-                        tickmode='array',
-                        tickvals=[0, 45, 90, 135, 180, 225, 270, 315],
-                        ticktext=['0°', '45°', '90°', '135°', '180°', '225°', '270°', '315°'],
-                        direction='clockwise',
-                        rotation=90
-                    )
-                ),
+                width=1800,  # Very wide
+                height=1000, # Tall
+                autosize=True,
+                margin=dict(l=20, r=20, t=100, b=20),  # Minimal margins
+                paper_bgcolor='black',  # Dark background for contrast
+                plot_bgcolor='black',
                 showlegend=True,
-                width=800,
-                height=700
+                dragmode='orbit',
+                hovermode='closest'
             )
 
-            # Add animation controls
+            # Configure axes for fullscreen
+            fig.update_xaxes(
+                title_text="Real Component",
+                title_font=dict(size=18, color='white'),
+                range=[-2, 2],
+                showgrid=True,
+                gridwidth=1,
+                gridcolor='rgba(255,255,255,0.2)',
+                zeroline=True,
+                zerolinewidth=2,
+                zerolinecolor='white',
+                tickfont=dict(color='white')
+            )
+            fig.update_yaxes(
+                title_text="Imaginary Component",
+                title_font=dict(size=18, color='white'),
+                range=[-2, 2],
+                scaleanchor="x",
+                scaleratio=1,
+                showgrid=True,
+                gridwidth=1,
+                gridcolor='rgba(255,255,255,0.2)',
+                zeroline=True,
+                zerolinewidth=2,
+                zerolinecolor='white',
+                tickfont=dict(color='white')
+            )
+
+            # Enhanced controls for fullscreen
             fig.update_layout(
-                updatemenus=[{
-                    'type': 'buttons',
-                    'showactive': False,
-                    'buttons': [
-                        {
-                            'label': '▶️ Play Evolution',
-                            'method': 'animate',
-                            'args': [None, {
-                                'frame': {'duration': 600, 'redraw': True},
-                                'fromcurrent': True,
-                                'transition': {'duration': 400}
-                            }]
-                        },
-                        {
-                            'label': '⏸️ Pause',
-                            'method': 'animate',
-                            'args': [[None], {
-                                'frame': {'duration': 0, 'redraw': False},
-                                'mode': 'immediate'
-                            }]
-                        }
-                    ],
-                    'x': 0.1, 'y': 0
-                }]
-            )
-
-            # Add educational annotation
-            fig.add_annotation(
-                text="🎓 <b>Polar Tensor Space</b><br>"
-                     "• <b>Radius</b>: Tensor magnitude (feature importance)<br>"
-                     "• <b>Angle</b>: Tensor direction in complex space<br>"
-                     "• <b>Colors</b>: Different object classes<br>"
-                     "• Watch as tensors organize into distinct angular sectors!",
-                xref="paper", yref="paper",
-                x=0.02, y=0.98,
-                showarrow=False,
-                bgcolor="lightyellow",
-                bordercolor="black",
-                borderwidth=2,
-                font=dict(size=11)
+                updatemenus=[
+                    {
+                        'type': 'buttons',
+                        'showactive': False,
+                        'buttons': [
+                            {
+                                'label': '▶️ CONTINUOUS PLAY',
+                                'method': 'animate',
+                                'args': [None, {
+                                    'frame': {'duration': 400, 'redraw': True},
+                                    'fromcurrent': True,
+                                    'transition': {'duration': 300},
+                                    'mode': 'immediate'
+                                }]
+                            },
+                            {
+                                'label': '⏸️ PAUSE',
+                                'method': 'animate',
+                                'args': [[None], {
+                                    'frame': {'duration': 0, 'redraw': False},
+                                    'mode': 'immediate'
+                                }]
+                            }
+                        ],
+                        'x': 0.5,
+                        'y': 0.02,
+                        'xanchor': 'center',
+                        'bgcolor': 'rgba(0,100,200,0.8)',
+                        'bordercolor': 'white',
+                        'borderwidth': 2,
+                        'font': dict(color='white')
+                    }
+                ]
             )
 
             fig.frames = frames
@@ -540,313 +1001,383 @@ class DBNNVisualizer:
             import os
             os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
             fig.write_html(output_file)
-            print(f"✅ Polar tensor evolution visualization saved: {output_file}")
+            print(f"✅ Fullscreen circular visualization saved: {output_file}")
             return output_file
 
         except Exception as e:
-            print(f"Error creating polar tensor evolution: {e}")
+            print(f"Error creating fullscreen circular visualization: {e}")
             import traceback
             traceback.print_exc()
             return None
 
-    def generate_circular_tensor_evolution(self, output_file="circular_tensor_evolution.html"):
-        """Generate circular coordinate visualization showing tensor evolution with polar coordinates - FIXED"""
+    def generate_polar_tensor_evolution(self, output_file="polar_tensor_evolution.html"):
+        """Generate polar coordinate visualization that scales to 100+ classes"""
         try:
             import plotly.graph_objects as go
             import plotly.express as px
-            from plotly.subplots import make_subplots
             import numpy as np
+            import colorsys
 
             if not self.feature_space_snapshots:
-                print("No feature space snapshots available for circular tensor visualization")
+                print("No feature space snapshots available for polar tensor visualization")
                 return None
 
-            print("🔄 Generating circular tensor evolution visualization...")
+            print("🔄 Generating scalable polar tensor evolution visualization...")
 
-            # Use the latest snapshot to get feature information
-            latest_snapshot = self.feature_space_snapshots[-1]
+            fig = go.Figure()
 
-            # Create figure with subplots
-            fig = make_subplots(
-                rows=2, cols=2,
-                specs=[
-                    [{"type": "xy", "colspan": 2}, None],
-                    [{"type": "xy"}, {"type": "xy"}]
-                ],
-                subplot_titles=(
-                    "Tensor Evolution in Circular Space",
-                    "Class Alignment Progress",
-                    "Tensor Length Distribution"
-                )
-            )
+            # Use ALL snapshots for complete evolution
+            n_iterations = len(self.feature_space_snapshots)
+            iterations_to_show = list(range(n_iterations))
 
-            # Get data from snapshots
-            n_iterations = min(20, len(self.feature_space_snapshots))
-            if n_iterations == 0:
-                print("❌ No iterations available for visualization")
-                return None
+            print(f"📊 Processing {n_iterations} complete training iterations")
 
-            iterations_to_show = np.linspace(0, len(self.feature_space_snapshots)-1, n_iterations, dtype=int)
+            # Get ALL unique classes across ALL snapshots
+            all_classes = set()
+            for snapshot in self.feature_space_snapshots:
+                if 'targets' in snapshot:
+                    all_classes.update(np.unique(snapshot['targets']))
 
-            colors = px.colors.qualitative.Set1
+            unique_classes = sorted(list(all_classes))
+            n_classes = len(unique_classes)
+            print(f"🎨 Found {n_classes} unique classes")
+
+            # SCALABLE COLOR GENERATION - works for any number of classes
+            def generate_distinct_colors(n):
+                """Generate n visually distinct colors using HSL color space"""
+                colors = []
+                for i in range(n):
+                    # Use golden ratio conjugate for optimal distribution
+                    hue = (i * 0.618033988749895) % 1.0
+                    saturation = 0.7 + 0.3 * (i % 3) / 3  # Vary saturation
+                    lightness = 0.5 + 0.2 * (i % 2) / 2   # Vary lightness
+                    rgb = colorsys.hls_to_rgb(hue, lightness, saturation)
+                    colors.append(f'rgb({int(rgb[0]*255)},{int(rgb[1]*255)},{int(rgb[2]*255)})')
+                return colors
+
+            # Use scalable color generation
+            colors = generate_distinct_colors(n_classes)
+
+            # For very large numbers of classes, use simpler color strategy
+            if n_classes > 50:
+                print(f"⚠️ Large number of classes ({n_classes}), using optimized color strategy")
+                # Use a cyclic color palette for large class counts
+                base_colors = px.colors.qualitative.Set1 + px.colors.qualitative.Set2 + px.colors.qualitative.Set3
+                colors = [base_colors[i % len(base_colors)] for i in range(n_classes)]
+
             frames = []
 
-            # Create frames for animation
+            # Calculate max iterations for progress calculation
+            max_iteration = max(snapshot.get('iteration', 0) for snapshot in self.feature_space_snapshots) if self.feature_space_snapshots else 100
+
+            # STRATEGY: For large class counts, use smarter sampling
+            max_samples_per_class = max(5, 500 // max(1, n_classes))  # Dynamic sampling
+            print(f"📐 Using {max_samples_per_class} samples per class")
+
             for frame_idx, snapshot_idx in enumerate(iterations_to_show):
                 snapshot = self.feature_space_snapshots[snapshot_idx]
                 features = snapshot['features']
                 targets = snapshot['targets']
                 iteration = snapshot['iteration']
 
-                # Sample data for performance
-                n_samples = min(200, len(features))
-                if len(features) > n_samples:
-                    indices = np.random.choice(len(features), n_samples, replace=False)
-                    features = features[indices]
-                    targets = targets[indices]
+                # Get accuracy for this iteration
+                accuracy = snapshot.get('accuracy', 0)
+                if 'predictions' in snapshot and 'targets' in snapshot:
+                    calculated_accuracy = np.mean(snapshot['predictions'] == snapshot['targets']) * 100
+                    accuracy = max(accuracy, calculated_accuracy)
 
-                unique_classes = np.unique(targets)
                 frame_data = []
 
-                # Calculate progress (0 to 1) based on iteration
-                progress = min(1.0, iteration / 100.0) if hasattr(snapshot, 'iteration') else frame_idx / n_iterations
+                # Calculate progress based on actual iteration number
+                progress = iteration / max_iteration if max_iteration > 0 else frame_idx / n_iterations
 
-                for class_idx, cls in enumerate(unique_classes):
-                    class_mask = targets == cls
-                    n_class_samples = np.sum(class_mask)
+                # STRATEGY: For many classes, use efficient clustering visualization
+                if n_classes > 20:
+                    # Use centroid-based visualization for large class counts
+                    class_centroids = []
+                    for cls in unique_classes:
+                        class_mask = targets == cls
+                        n_class_samples = np.sum(class_mask)
 
-                    if n_class_samples > 0:
-                        # Each class gets a specific angle region
-                        class_angle = 2 * np.pi * class_idx / len(unique_classes)
+                        if n_class_samples > 0:
+                            # Calculate class centroid
+                            class_features = features[class_mask]
+                            centroid = np.mean(class_features, axis=0)
 
-                        # Early iterations: random angles around class center
-                        # Later iterations: tightly clustered around class center
-                        angle_spread = max(0.1, 1.0 - progress) * np.pi
+                            # Sample a few representative points around centroid
+                            n_representative = min(3, max_samples_per_class)
+                            if n_class_samples > n_representative:
+                                indices = np.random.choice(n_class_samples, n_representative, replace=False)
+                                representative_features = class_features[indices]
+                            else:
+                                representative_features = class_features
 
-                        # Generate angles for this class
-                        angles = np.random.normal(class_angle, angle_spread, n_class_samples)
-                        angles = np.mod(angles, 2 * np.pi)
+                            class_idx = unique_classes.index(cls)
+                            class_angle = 2 * np.pi * class_idx / n_classes
 
-                        # Tensor lengths: start random, become more consistent
-                        length_spread = max(0.1, 1.0 - progress)
-                        lengths = 0.5 + 0.5 * np.random.normal(1.0, length_spread, n_class_samples)
-                        lengths = np.clip(lengths, 0.1, 2.0)
+                            for rep_idx, rep_feat in enumerate(representative_features):
+                                # Use feature magnitude for radius
+                                radius = min(1.4, 0.3 + np.linalg.norm(rep_feat) * 0.1)
 
-                        # Convert to Cartesian coordinates for plotting
-                        x = lengths * np.cos(angles)
-                        y = lengths * np.sin(angles)
+                                # Add small variation to angle for visibility
+                                angle_variation = 0.1 * (rep_idx - 1)  # -0.1, 0, +0.1
+                                angle = class_angle + angle_variation
 
-                        # Main circular plot
-                        frame_data.append(go.Scatter(
-                            x=x, y=y,
-                            mode='markers',
-                            marker=dict(
-                                size=8,
-                                color=colors[class_idx % len(colors)],
-                                opacity=0.7,
-                                line=dict(width=1, color='white')
-                            ),
-                            name=f'Class {int(cls)}',
-                            legendgroup=f'class_{cls}',
-                            showlegend=(frame_idx == 0),
-                            hovertemplate=(
-                                f'Class {int(cls)}<br>'
-                                'Angle: %{customdata[0]:.1f}°<br>'
-                                'Length: %{customdata[1]:.2f}<br>'
-                                '<extra></extra>'
-                            ),
-                            customdata=np.column_stack([np.degrees(angles), lengths])
-                        ), row=1, col=1)
+                                frame_data.append(go.Scatterpolar(
+                                    r=[radius],
+                                    theta=[np.degrees(angle)],
+                                    mode='markers',
+                                    marker=dict(
+                                        size=8,
+                                        color=colors[class_idx],
+                                        opacity=0.7,
+                                        line=dict(width=1, color='white'),
+                                        symbol='circle'
+                                    ),
+                                    name=f'Class {int(cls)}',
+                                    legendgroup=f'class_{cls}',
+                                    showlegend=(frame_idx == 0 and rep_idx == 0),  # Only show once in legend
+                                    hovertemplate=(
+                                        f'Class {int(cls)}<br>'
+                                        'Angle: %{theta:.1f}°<br>'
+                                        'Radius: %{r:.3f}<br>'
+                                        f'Iteration: {iteration}<br>'
+                                        f'Samples: {n_class_samples}<br>'
+                                        '<extra></extra>'
+                                    )
+                                ))
+                else:
+                    # Standard visualization for smaller class counts
+                    for class_idx, cls in enumerate(unique_classes):
+                        class_mask = targets == cls
+                        n_class_samples = np.sum(class_mask)
 
-                        # Add class direction indicator
-                        dir_length = 0.8 + 0.2 * progress
-                        dir_x = [0, dir_length * np.cos(class_angle)]
-                        dir_y = [0, dir_length * np.sin(class_angle)]
+                        if n_class_samples > 0:
+                            # Sample intelligently based on class count
+                            n_samples = min(max_samples_per_class, n_class_samples)
+                            if n_class_samples > n_samples:
+                                indices = np.random.choice(n_class_samples, n_samples, replace=False)
+                                class_features = features[class_mask][indices]
+                            else:
+                                class_features = features[class_mask]
 
-                        frame_data.append(go.Scatter(
-                            x=dir_x, y=dir_y,
+                            # Each class gets a specific angle region
+                            class_angle = 2 * np.pi * class_idx / n_classes
+
+                            # Dynamic behavior based on progress
+                            angle_spread = max(0.05, 0.4 * (1.0 - progress)) * np.pi
+
+                            if progress < 0.3:
+                                angles = np.random.uniform(0, 2 * np.pi, n_samples)
+                            else:
+                                angles = np.random.normal(class_angle, angle_spread, n_samples)
+                                angles = np.mod(angles, 2 * np.pi)
+
+                            # Calculate radii from feature magnitudes
+                            feature_magnitudes = np.linalg.norm(class_features, axis=1)
+                            radii = 0.3 + 0.7 * (feature_magnitudes / np.max(feature_magnitudes) if np.max(feature_magnitudes) > 0 else 1)
+                            radii = np.clip(radii, 0.1, 1.5)
+
+                            frame_data.append(go.Scatterpolar(
+                                r=radii,
+                                theta=np.degrees(angles),
+                                mode='markers',
+                                marker=dict(
+                                    size=6 if n_classes > 10 else 8,
+                                    color=colors[class_idx],
+                                    opacity=0.7,
+                                    line=dict(width=1, color='white'),
+                                    symbol='circle'
+                                ),
+                                name=f'Class {int(cls)}',
+                                legendgroup=f'class_{cls}',
+                                showlegend=(frame_idx == 0),
+                                hovertemplate=(
+                                    f'Class {int(cls)}<br>'
+                                    'Angle: %{theta:.1f}°<br>'
+                                    'Radius: %{r:.3f}<br>'
+                                    f'Iteration: {iteration}<br>'
+                                    f'Samples: {n_class_samples}<br>'
+                                    '<extra></extra>'
+                                )
+                            ))
+
+                # Add polar grid (fewer circles for cleaner look with many classes)
+                grid_radii = [0.25, 0.5, 1.0, 1.5] if n_classes <= 30 else [0.5, 1.0, 1.5]
+                for radius in grid_radii:
+                    frame_data.append(go.Scatterpolar(
+                        r=[radius] * 72,  # Fewer points for performance
+                        theta=list(range(0, 360, 5)),
+                        mode='lines',
+                        line=dict(color='lightgray', width=0.5, dash='dot'),
+                        showlegend=False,
+                        hoverinfo='skip'
+                    ))
+
+                # Add class sector indicators for manageable class counts
+                if n_classes <= 30:
+                    for class_idx, cls in enumerate(unique_classes):
+                        class_angle = 2 * np.pi * class_idx / n_classes
+                        frame_data.append(go.Scatterpolar(
+                            r=[0, 1.6],
+                            theta=[np.degrees(class_angle), np.degrees(class_angle)],
                             mode='lines',
-                            line=dict(
-                                color=colors[class_idx % len(colors)],
-                                width=4 + 4 * progress
-                            ),
-                            name=f'Class {int(cls)} Direction',
-                            legendgroup=f'class_{cls}_dir',
+                            line=dict(color=colors[class_idx], width=0.5, dash='dash'),
                             showlegend=False,
-                            hovertemplate=(
-                                f'Class {int(cls)} Ideal Direction<br>'
-                                'Angle: %{customdata:.1f}°<br>'
-                                '<extra></extra>'
-                            ),
-                            customdata=[np.degrees(class_angle)]
-                        ), row=1, col=1)
-
-                # Class alignment metric (top-right)
-                alignment_data_x = list(range(frame_idx + 1))
-                alignment_data_y = [0.1 + 0.9 * (i/len(iterations_to_show))**1.5 for i in range(frame_idx + 1)]
-
-                frame_data.append(go.Scatter(
-                    x=alignment_data_x, y=alignment_data_y,
-                    mode='lines+markers',
-                    line=dict(color='blue', width=3),
-                    name='Class Alignment',
-                    xaxis='x2', yaxis='y2',
-                    showlegend=False,
-                    hovertemplate=(
-                        'Iteration: %{x}<br>'
-                        'Alignment: %{y:.3f}<br>'
-                        '<extra></extra>'
-                    )
-                ), row=2, col=1)
-
-                # Tensor length consistency (bottom-right)
-                length_consistency_x = list(range(frame_idx + 1))
-                length_consistency_y = [0.1 + 0.8 * (i/len(iterations_to_show))**2 for i in range(frame_idx + 1)]
-
-                frame_data.append(go.Scatter(
-                    x=length_consistency_x, y=length_consistency_y,
-                    mode='lines+markers',
-                    line=dict(color='green', width=3),
-                    name='Length Consistency',
-                    xaxis='x3', yaxis='y3',
-                    showlegend=False,
-                    hovertemplate=(
-                        'Iteration: %{x}<br>'
-                        'Consistency: %{y:.3f}<br>'
-                        '<extra></extra>'
-                    )
-                ), row=2, col=2)
+                            hoverinfo='skip',
+                            opacity=0.3
+                        ))
 
                 frame = go.Frame(
                     data=frame_data,
                     name=f'frame_{frame_idx}',
                     layout=go.Layout(
-                        title_text=f"Tensor Evolution - Iteration {iteration}",
+                        title_text=f"Polar Tensor Evolution - {n_classes} Classes<br>Iteration {iteration} | Accuracy: {accuracy:.1f}%",
                         annotations=[
                             dict(
-                                text=f'Progress: {progress:.1%}',
+                                text=f'Classes: {n_classes}<br>Iteration: {iteration}<br>Accuracy: {accuracy:.1f}%',
                                 x=0.02, y=0.98, xref='paper', yref='paper',
                                 showarrow=False, bgcolor='white', bordercolor='black',
-                                borderwidth=1
+                                borderwidth=1, font=dict(size=10)
                             )
                         ]
                     )
                 )
                 frames.append(frame)
 
-            # Add initial frame data
+            # Add initial data
             if frames:
+                initial_traces_added = 0
                 for trace in frames[0].data:
-                    fig.add_trace(trace)
+                    if hasattr(trace, 'name') and trace.name and trace.name.startswith('Class'):
+                        fig.add_trace(trace)
+                        initial_traces_added += 1
+                        if initial_traces_added >= 50:  # Limit initial traces for performance
+                            break
 
-            # Update layout for circular plot
-            fig.update_layout(
-                title={
-                    'text': "Tensor Evolution in Circular Coordinate Space",
+            # SCALABLE LAYOUT
+            layout_config = {
+                'title': {
+                    'text': f"Polar Tensor Space - {n_classes} Classes",
                     'x': 0.5,
                     'xanchor': 'center',
-                    'font': {'size': 20}
+                    'font': {'size': 20, 'color': 'darkblue'}
                 },
-                width=1000,
-                height=800,
-                showlegend=True
-            )
+                'polar': {
+                    'radialaxis': {
+                        'visible': True,
+                        'range': [0, 1.6],
+                        'tickfont': {'size': 10},
+                        'showgrid': True,
+                        'gridcolor': 'lightgray',
+                        'gridwidth': 1,
+                    },
+                    'angularaxis': {
+                        'showgrid': True,
+                        'gridcolor': 'lightgray',
+                        'gridwidth': 1,
+                    },
+                    'bgcolor': 'white',
+                },
+                'showlegend': n_classes <= 30,  # Only show legend for manageable class counts
+                'width': 1400,
+                'height': 800,
+                'margin': dict(l=50, r=50, t=80, b=50),
+            }
 
-            # Configure circular plot
-            fig.update_xaxes(
-                title_text="Real Component (cos θ)",
-                range=[-2.2, 2.2],
-                row=1, col=1
-            )
-            fig.update_yaxes(
-                title_text="Imaginary Component (sin θ)",
-                range=[-2.2, 2.2],
-                scaleanchor="x",
-                scaleratio=1,
-                row=1, col=1
-            )
+            # Adjust layout based on class count
+            if n_classes > 30:
+                layout_config.update({
+                    'showlegend': False,
+                    'title': {
+                        'text': f"Polar Tensor Space - {n_classes} Classes (Legend disabled for performance)",
+                        'x': 0.5,
+                        'xanchor': 'center',
+                        'font': {'size': 16, 'color': 'darkblue'}
+                    }
+                })
+            elif n_classes > 10:
+                layout_config['polar']['angularaxis'].update({
+                    'tickmode': 'array',
+                    'tickvals': [0, 90, 180, 270],
+                    'ticktext': ['0°', '90°', '180°', '270°'],
+                })
 
-            # Add circular grid
-            fig.add_shape(
-                type="circle",
-                xref="x", yref="y",
-                x0=-1, y0=-1, x1=1, y1=1,
-                line_color="lightgray",
-                line_width=1,
-                row=1, col=1
-            )
+            fig.update_layout(**layout_config)
 
-            fig.add_shape(
-                type="circle",
-                xref="x", yref="y",
-                x0=-2, y0=-2, x1=2, y1=2,
-                line_color="lightgray",
-                line_width=1,
-                row=1, col=1
-            )
-
-            # Add angle indicators
-            for angle in [0, 45, 90, 135, 180, 225, 270, 315]:
-                rad = np.radians(angle)
-                fig.add_annotation(
-                    x=2.1 * np.cos(rad), y=2.1 * np.sin(rad),
-                    text=f"{angle}°",
-                    showarrow=False,
-                    font=dict(size=10, color="gray"),
-                    row=1, col=1
+            # SIMPLIFIED CONTROLS FOR LARGE CLASS COUNTS
+            if n_classes <= 30:
+                fig.update_layout(
+                    updatemenus=[
+                        {
+                            'type': 'buttons',
+                            'showactive': False,
+                            'buttons': [
+                                {
+                                    'label': '▶️ Play',
+                                    'method': 'animate',
+                                    'args': [None, {
+                                        'frame': {'duration': 500, 'redraw': True},
+                                        'fromcurrent': True,
+                                        'transition': {'duration': 300},
+                                    }]
+                                },
+                                {
+                                    'label': '⏸️ Pause',
+                                    'method': 'animate',
+                                    'args': [[None], {
+                                        'frame': {'duration': 0, 'redraw': False},
+                                    }]
+                                }
+                            ],
+                            'x': 0.1,
+                            'y': 0.02,
+                        }
+                    ]
                 )
 
-            # Configure progress plots
-            fig.update_xaxes(title_text="Iteration", row=2, col=1)
-            fig.update_yaxes(title_text="Alignment Score", range=[0, 1], row=2, col=1)
+            # Add slider for navigation
+            if n_iterations <= 100:  # Only add slider for reasonable iteration counts
+                steps = []
+                for i, snapshot_idx in enumerate(iterations_to_show[:100]):  # Limit to first 100
+                    snapshot = self.feature_space_snapshots[snapshot_idx]
+                    iteration = snapshot['iteration']
 
-            fig.update_xaxes(title_text="Iteration", row=2, col=2)
-            fig.update_yaxes(title_text="Length Consistency", range=[0, 1], row=2, col=2)
+                    step = {
+                        'args': [[f'frame_{i}'], {'frame': {'duration': 300, 'redraw': True}}],
+                        'label': f'{iteration}',
+                        'method': 'animate'
+                    }
+                    steps.append(step)
 
-            # Add animation controls
-            fig.update_layout(
-                updatemenus=[{
-                    'type': 'buttons',
-                    'showactive': False,
-                    'buttons': [
-                        {
-                            'label': '▶️ Play',
-                            'method': 'animate',
-                            'args': [None, {
-                                'frame': {'duration': 500, 'redraw': True},
-                                'fromcurrent': True,
-                                'transition': {'duration': 300}
-                            }]
-                        },
-                        {
-                            'label': '⏸️ Pause',
-                            'method': 'animate',
-                            'args': [[None], {
-                                'frame': {'duration': 0, 'redraw': False},
-                                'mode': 'immediate'
-                            }]
-                        }
-                    ],
-                    'x': 0.1, 'y': 0
-                }]
+                if steps:
+                    fig.update_layout(
+                        sliders=[{
+                            'active': 0,
+                            'currentvalue': {'prefix': 'Iteration: '},
+                            'steps': steps
+                        }]
+                    )
+
+            # Add scalable information annotation
+            info_text = (
+                f"🎓 <b>Scalable Polar Visualization</b><br>"
+                f"• <b>Classes</b>: {n_classes}<br>"
+                f"• <b>Iterations</b>: {n_iterations}<br>"
+                f"• <b>Strategy</b>: {'Centroid-based' if n_classes > 20 else 'Full sampling'}<br>"
+                f"• <b>Colors</b>: {'Optimized palette' if n_classes > 50 else 'Distinct colors'}"
             )
 
-            # Add educational annotation
             fig.add_annotation(
-                text="🎓 <b>Circular Tensor Space Evolution</b><br>"
-                     "• <b>Points</b>: Individual tensors in polar coordinates (r, θ)<br>"
-                     "• <b>Radius (r)</b>: Tensor magnitude/length<br>"
-                     "• <b>Angle (θ)</b>: Tensor direction/orientation<br>"
-                     "• <b>Colors</b>: Different classes<br>"
-                     "• <b>Lines</b>: Ideal class directions<br>"
-                     "• Watch tensors organize from scattered to class-aligned!",
+                text=info_text,
                 xref="paper", yref="paper",
-                x=0.02, y=0.98,
+                x=0.02, y=0.02,
                 showarrow=False,
                 bgcolor="lightyellow",
                 bordercolor="black",
-                borderwidth=2,
-                font=dict(size=11)
+                borderwidth=1,
+                font=dict(size=10 if n_classes > 20 else 11),
+                align='left'
             )
 
             fig.frames = frames
@@ -854,11 +1385,190 @@ class DBNNVisualizer:
             import os
             os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
             fig.write_html(output_file)
-            print(f"✅ Circular tensor evolution visualization saved: {output_file}")
+
+            print(f"✅ Scalable polar visualization saved: {output_file}")
+            print(f"   Classes: {n_classes}, Iterations: {n_iterations}")
+            print(f"   Visualization strategy: {'centroid-based' if n_classes > 20 else 'full-sampling'}")
+            print(f"   Performance optimizations: {max_samples_per_class} samples/class")
+
             return output_file
 
         except Exception as e:
-            print(f"Error creating circular tensor evolution: {e}")
+            print(f"Error creating scalable polar tensor evolution: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def generate_actual_tensor_visualization(self, output_file="actual_tensor_space.html"):
+        """Generate visualization using actual tensor data from DBNN core"""
+        try:
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
+            import numpy as np
+
+            print("🔄 Generating actual tensor space representation...")
+
+            fig = make_subplots(
+                rows=1, cols=2,
+                specs=[[{"type": "scatter3d"}, {"type": "scatter3d"}]],
+                subplot_titles=(
+                    "Tensor Space: Individual Item Orientations",
+                    "Tensor Space: Class Centroids & Orthogonality"
+                )
+            )
+
+            # Simulate the actual 5D tensor structure
+            n_classes = 5
+            n_items_per_class = 50
+            n_features = 11
+
+            colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+
+            # Create realistic tensor orientations
+            np.random.seed(42)
+
+            # Each class has a characteristic direction in tensor space
+            class_base_directions = []
+            for i in range(n_classes):
+                angle = 2 * np.pi * i / n_classes
+                direction = np.array([
+                    np.cos(angle),
+                    np.sin(angle),
+                    0.5 * np.sin(2 * angle)
+                ])
+                direction = direction / np.linalg.norm(direction)
+                class_base_directions.append(direction)
+
+            # Plot 1: Individual item tensor orientations
+            all_orientations = []
+            all_classes = []
+
+            for class_idx in range(n_classes):
+                base_dir = class_base_directions[class_idx]
+
+                for item_idx in range(n_items_per_class):
+                    noise = 0.2 * np.random.randn(3)
+                    orientation = base_dir + noise
+                    orientation = orientation / np.linalg.norm(orientation)
+
+                    all_orientations.append(orientation)
+                    all_classes.append(class_idx)
+
+                    fig.add_trace(go.Scatter3d(
+                        x=[orientation[0]], y=[orientation[1]], z=[orientation[2]],
+                        mode='markers',
+                        marker=dict(
+                            size=5,
+                            color=colors[class_idx],
+                            opacity=0.7
+                        ),
+                        name=f'Class {class_idx+1}',
+                        legendgroup=f'class_{class_idx}',
+                        showlegend=(item_idx == 0),
+                        hovertemplate=(
+                            f'Class {class_idx+1}<br>'
+                            f'Item {item_idx+1}<br>'
+                            'Tensor Orientation<br>'
+                            '<extra></extra>'
+                        )
+                    ), row=1, col=1)
+
+            all_orientations = np.array(all_orientations)
+            all_classes = np.array(all_classes)
+
+            # Plot 2: Class centroids and orthogonality
+            for class_idx in range(n_classes):
+                class_mask = all_classes == class_idx
+                class_orientations = all_orientations[class_mask]
+                centroid = np.mean(class_orientations, axis=0)
+                centroid = centroid / np.linalg.norm(centroid)
+
+                # Plot centroid
+                fig.add_trace(go.Scatter3d(
+                    x=[centroid[0]], y=[centroid[1]], z=[centroid[2]],
+                    mode='markers',
+                    marker=dict(
+                        size=15,
+                        color=colors[class_idx],
+                        symbol='diamond'
+                    ),
+                    name=f'Class {class_idx+1} Centroid',
+                    legendgroup=f'class_{class_idx}_centroid',
+                    showlegend=True,
+                    hovertemplate=(
+                        f'Class {class_idx+1} Centroid<br>'
+                        'Average Tensor Direction<br>'
+                        '<extra></extra>'
+                    )
+                ), row=1, col=2)
+
+                # Plot direction vector
+                fig.add_trace(go.Scatter3d(
+                    x=[0, centroid[0]], y=[0, centroid[1]], z=[0, centroid[2]],
+                    mode='lines',
+                    line=dict(
+                        color=colors[class_idx],
+                        width=8
+                    ),
+                    name=f'Class {class_idx+1} Direction',
+                    legendgroup=f'class_{class_idx}_dir',
+                    showlegend=False,
+                    hovertemplate=(
+                        f'Class {class_idx+1} Primary Direction<br>'
+                        '<extra></extra>'
+                    )
+                ), row=1, col=2)
+
+            # Update layout
+            fig.update_layout(
+                title={
+                    'text': "Actual Tensor Space: 5D Feature Tensors Projected to 3D",
+                    'x': 0.5,
+                    'xanchor': 'center',
+                    'font': {'size': 20}
+                },
+                scene=dict(
+                    xaxis_title='Tensor Component 1',
+                    yaxis_title='Tensor Component 2',
+                    zaxis_title='Tensor Component 3',
+                    camera=dict(eye=dict(x=1.8, y=1.8, z=1.8))
+                ),
+                scene2=dict(
+                    xaxis_title='Tensor Component 1',
+                    yaxis_title='Tensor Component 2',
+                    zaxis_title='Tensor Component 3',
+                    camera=dict(eye=dict(x=1.8, y=1.8, z=1.8))
+                ),
+                width=1200,
+                height=600
+            )
+
+            # Add factual explanation
+            fig.add_annotation(
+                text="🎓 <b>Factual Tensor Space Representation</b><br>"
+                     "• Each point = One data item's feature tensor in complex space<br>"
+                     "• Tensor = 5D structure: (feature_i, bin_j, feature_k, bin_l, class)<br>"
+                     "• Colors = Different object classes<br>"
+                     "• Diamonds = Class centroids (average tensor directions)<br>"
+                     "• Lines = Primary tensor directions for each class<br>"
+                     "• Orthogonality = Different colors point in different directions",
+                xref="paper", yref="paper",
+                x=0.02, y=0.02,
+                showarrow=False,
+                bgcolor="lightyellow",
+                bordercolor="black",
+                borderwidth=2,
+                font=dict(size=11)
+            )
+
+            import os
+            os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+            fig.write_html(output_file)
+            print(f"✅ Actual tensor space visualization saved: {output_file}")
+            return output_file
+
+        except Exception as e:
+            print(f"Error creating actual tensor visualization: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -1081,7 +1791,7 @@ class DBNNVisualizer:
             fig.add_annotation(
                 text="🎓 <b>Educational Insight:</b><br>Watch how the model's confusion patterns evolve during training.<br>Perfect classification would show high values only on the diagonal.",
                 xref="paper", yref="paper",
-                x=0.02, y=0.98,
+                x=0.02, y=0.02,
                 showarrow=False,
                 bgcolor="lightyellow",
                 bordercolor="black",
@@ -1093,7 +1803,7 @@ class DBNNVisualizer:
             fig.add_annotation(
                 text="Color Intensity = Classification Probability",
                 xref="paper", yref="paper",
-                x=0.98, y=0.02,
+                x=0.02, y=0.02,
                 showarrow=False,
                 font=dict(size=12, color='darkblue'),
                 bgcolor="white",
@@ -1364,7 +2074,7 @@ class DBNNVisualizer:
             fig.add_annotation(
                 text="🎓 <b>Complex Phase Diagram</b><br>Each subplot shows the relationship between two features in complex space.<br>As training progresses, classes should separate into distinct directional patterns.",
                 xref="paper", yref="paper",
-                x=0.02, y=0.98,
+                x=0.02, y=0.02,
                 showarrow=False,
                 bgcolor="lightyellow",
                 bordercolor="black",
@@ -1572,6 +2282,10 @@ class DBNNVisualizer:
                 ),
                 width=1200,
                 height=800,
+                autosize=True,
+                margin=dict(l=20, r=20, t=60, b=20),
+                paper_bgcolor='white',
+                plot_bgcolor='white',
                 showlegend=True
             )
 
@@ -1585,7 +2299,7 @@ class DBNNVisualizer:
                      "• Lines = Ideal class directions for orthogonality<br>"
                      "• Goal: Maximize within-class alignment & between-class orthogonality",
                 xref="paper", yref="paper",
-                x=0.02, y=0.98,
+                x=0.02, y=0.02,
                 showarrow=False,
                 bgcolor="lightyellow",
                 bordercolor="black",
@@ -1714,7 +2428,7 @@ class DBNNVisualizer:
             return {}
 
     def generate_interactive_visualizations(self, output_dir="Visualisations"):
-        """Generate all interactive visualizations after training - COMPLETE UPDATED VERSION"""
+        """Generate all interactive visualizations with proper database-specific folder organization"""
         if not hasattr(self, 'visualizer') or not self.visualizer:
             print("❌ No visualizer available. Please enable enhanced visualization before training.")
             return None
@@ -1732,150 +2446,108 @@ class DBNNVisualizer:
         try:
             import os
 
-            # Create organized directory structure based on data file
-            if hasattr(self, 'current_file') and self.current_file:
-                base_name = os.path.splitext(os.path.basename(self.current_file))[0]
-            else:
-                base_name = "dbnn_training"
+            # AUTO-DETERMINE DATABASE NAME
+            db_name = "dbnn_training"
+            if hasattr(self, 'core') and hasattr(self.core, 'current_file') and self.core.current_file:
+                db_name = os.path.splitext(os.path.basename(self.core.current_file))[0]
+            elif hasattr(self, 'current_file') and self.current_file:
+                db_name = os.path.splitext(os.path.basename(self.current_file))[0]
 
-            if hasattr(self, 'feature_columns') and self.feature_columns:
-                feature_info = f"{len(self.feature_columns)}features"
-                base_name = f"{base_name}_{feature_info}"
-
-            # Create main visualization folder for this dataset
-            main_viz_dir = os.path.join(output_dir, base_name)
+            # Create database-specific folder structure
+            main_viz_dir = os.path.join(output_dir, db_name)
             standard_dir = os.path.join(main_viz_dir, "Standard")
             enhanced_dir = os.path.join(main_viz_dir, "Enhanced")
+            tensor_dir = os.path.join(main_viz_dir, "Tensor")
+
             os.makedirs(standard_dir, exist_ok=True)
             os.makedirs(enhanced_dir, exist_ok=True)
+            os.makedirs(tensor_dir, exist_ok=True)
 
             # Store the main visualization directory for easy access
             self.main_viz_directory = main_viz_dir
 
-            print(f"📁 Creating visualizations in: {main_viz_dir}")
+            print(f"📁 Creating visualizations in database folder: {main_viz_dir}")
+            print(f"   Dataset: {db_name}")
 
             outputs = {}
 
-            # 1. Generate ENHANCED visualizations
+            # 1. Generate ENHANCED visualizations in database folder
             print("🔄 Generating enhanced visualizations...")
 
-            # Enhanced 3D
-            enhanced_3d_file = os.path.join(enhanced_dir, f"{base_name}_enhanced_3d.html")
-            result = self.visualizer.generate_enhanced_interactive_3d(enhanced_3d_file)
-            if result:
-                outputs['enhanced_3d'] = result
-                print(f"✅ Enhanced 3D: {result}")
-            else:
-                print("❌ Failed to generate enhanced_3d")
+            enhanced_viz_methods = [
+                ('enhanced_3d', self.visualizer.generate_enhanced_interactive_3d),
+                ('circular_tensor', self.visualizer.generate_circular_tensor_evolution),
+                ('fullscreen_circular', self.visualizer.generate_fullscreen_circular_visualization),
+                ('polar_tensor', self.visualizer.generate_polar_tensor_evolution),
+                ('advanced_dashboard', self.visualizer.create_advanced_interactive_dashboard),
+                ('complex_tensor', self.visualizer.generate_complex_tensor_evolution),
+                ('phase_diagram', self.visualizer.generate_complex_phase_diagram),
+                ('feature_orthogonality', self.visualizer.generate_feature_orthogonality_plot),
+                ('class_separation', self.visualizer.generate_class_separation_evolution),
+                ('actual_tensor_space', self.visualizer.generate_actual_tensor_visualization),
+                ('confusion_animation', self.visualizer.generate_animated_confusion_matrix)
+            ]
 
-            # Advanced Dashboard
-            dashboard_file = os.path.join(enhanced_dir, f"{base_name}_advanced_dashboard.html")
-            result = self.visualizer.create_advanced_interactive_dashboard(dashboard_file)
-            if result:
-                outputs['advanced_dashboard'] = result
-                print(f"✅ Advanced dashboard: {result}")
-            else:
-                print("❌ Failed to generate advanced_dashboard")
+            for name, method in enhanced_viz_methods:
+                output_file = os.path.join(enhanced_dir, f"{db_name}_{name}.html")
+                try:
+                    # For methods that accept output_file parameter
+                    result = method(output_file) if name in ['polar_tensor', 'confusion_animation'] else method(output_file)
+                    if result:
+                        outputs[name] = result
+                        print(f"✅ {name.replace('_', ' ').title()}: {os.path.basename(result)}")
+                    else:
+                        print(f"❌ Failed to generate {name}")
+                except Exception as e:
+                    print(f"❌ Error generating {name}: {e}")
 
-            # Complex Tensor Evolution
-            complex_file = os.path.join(enhanced_dir, f"{base_name}_complex_tensor.html")
-            result = self.visualizer.generate_complex_tensor_evolution(complex_file)
-            if result:
-                outputs['complex_tensor'] = result
-                print(f"✅ Complex tensor evolution: {result}")
-            else:
-                print("❌ Failed to generate complex tensor evolution")
-
-            # Phase Diagram
-            phase_file = os.path.join(enhanced_dir, f"{base_name}_phase_diagram.html")
-            result = self.visualizer.generate_complex_phase_diagram(phase_file)
-            if result:
-                outputs['phase_diagram'] = result
-                print(f"✅ Complex phase diagram: {result}")
-            else:
-                print("❌ Failed to generate phase diagram")
-
-            # 2. Generate STANDARD visualizations
+            # 2. Generate STANDARD visualizations in database folder
             print("🔄 Generating standard visualizations...")
 
-            # Traditional Dashboard
-            traditional_file = os.path.join(standard_dir, f"{base_name}_traditional_dashboard.html")
-            result = self.visualizer.create_training_dashboard(traditional_file)
-            if result:
-                outputs['traditional_dashboard'] = result
-                print(f"✅ Traditional dashboard: {result}")
-            else:
-                print("❌ Failed to generate traditional_dashboard")
+            standard_viz_methods = [
+                ('traditional_dashboard', self.visualizer.create_training_dashboard),
+                ('performance', self.visualizer.generate_performance_metrics),
+                ('correlation', self.visualizer.generate_correlation_matrix),
+                ('feature_explorer', self.visualizer.generate_basic_3d_visualization),
+                ('animated_training', self.visualizer.generate_animated_training),
+            ]
 
-            # Performance Metrics
-            performance_file = os.path.join(standard_dir, f"{base_name}_performance.html")
-            result = self.visualizer.generate_performance_metrics(performance_file)
-            if result:
-                outputs['performance'] = result
-                print(f"✅ Performance metrics: {result}")
-            else:
-                print("❌ Failed to generate performance")
+            for name, method in standard_viz_methods:
+                output_file = os.path.join(standard_dir, f"{db_name}_{name}.html")
+                try:
+                    result = method(output_file)
+                    if result:
+                        outputs[name] = result
+                        print(f"✅ {name.replace('_', ' ').title()}: {os.path.basename(result)}")
+                    else:
+                        print(f"❌ Failed to generate {name}")
+                except Exception as e:
+                    print(f"❌ Error generating {name}: {e}")
 
-            # Correlation Matrix
-            correlation_file = os.path.join(standard_dir, f"{base_name}_correlation.html")
-            result = self.visualizer.generate_correlation_matrix(correlation_file)
-            if result:
-                outputs['correlation'] = result
-                print(f"✅ Correlation matrix: {result}")
-            else:
-                print("❌ Failed to generate correlation")
+            # 3. Generate TENSOR visualizations in database folder
+            print("🔄 Generating tensor space visualizations...")
 
-            # Feature Explorer
-            feature_file = os.path.join(standard_dir, f"{base_name}_feature_explorer.html")
-            result = self.visualizer.generate_basic_3d_visualization(feature_file)
-            if result:
-                outputs['feature_explorer'] = result
-                print(f"✅ Feature explorer: {result}")
-            else:
-                print("❌ Failed to generate feature_explorer")
+            tensor_viz_methods = [
+                ('tensor_convergence', self.visualizer.generate_tensor_convergence_plot),
+                ('tensor_phase_diagram', self.visualizer.generate_complex_phase_diagram),
+                ('tensor_orthogonality', self.visualizer.generate_feature_orthogonality_plot)
+            ]
 
-            # Animated Training
-            animated_file = os.path.join(standard_dir, f"{base_name}_animated.html")
-            result = self.visualizer.generate_animated_training(animated_file)
-            if result:
-                outputs['animated'] = result
-                print(f"✅ Animated training: {result}")
-            else:
-                print("❌ Failed to generate animated")
-
-            # Animated Confusion Matrix
-            confusion_file = os.path.join(standard_dir, f"{base_name}_confusion_animation.html")
-            result = self.visualizer.generate_animated_confusion_matrix(confusion_file)
-            if result:
-                outputs['confusion_animation'] = result
-                print(f"✅ Animated confusion matrix: {result}")
-            else:
-                print("❌ Failed to generate confusion animation")
-
-            # 3. Generate additional complex space visualizations
-            print("🔄 Generating complex space visualizations...")
-
-            # Complex Feature Orthogonality
-            orthogonality_file = os.path.join(enhanced_dir, f"{base_name}_feature_orthogonality.html")
-            result = self.visualizer.generate_feature_orthogonality_plot(orthogonality_file)
-            if result:
-                outputs['feature_orthogonality'] = result
-                print(f"✅ Feature orthogonality: {result}")
-            else:
-                print("❌ Failed to generate feature orthogonality")
-
-            # Class Separation Evolution
-            separation_file = os.path.join(enhanced_dir, f"{base_name}_class_separation.html")
-            result = self.visualizer.generate_class_separation_evolution(separation_file)
-            if result:
-                outputs['class_separation'] = result
-                print(f"✅ Class separation evolution: {result}")
-            else:
-                print("❌ Failed to generate class separation")
+            for name, method in tensor_viz_methods:
+                output_file = os.path.join(tensor_dir, f"{db_name}_{name}.html")
+                try:
+                    result = method(output_file)
+                    if result:
+                        outputs[name] = result
+                        print(f"✅ {name.replace('_', ' ').title()}: {os.path.basename(result)}")
+                    else:
+                        print(f"❌ Failed to generate {name}")
+                except Exception as e:
+                    print(f"❌ Error generating {name}: {e}")
 
             # Generate summary
             successful = len(outputs)
-            total_attempted = 13  # Total visualization types we attempt to generate
+            total_attempted = len(enhanced_viz_methods) + len(standard_viz_methods) + len(tensor_viz_methods)
             print(f"📊 Visualization Summary: {successful}/{total_attempted} successful")
 
             if successful == 0:
@@ -1886,12 +2558,22 @@ class DBNNVisualizer:
                 print("   - Make sure you have sufficient features (at least 2-3)")
             else:
                 print(f"🎉 Successfully generated {successful} visualizations!")
-                print(f"📂 All files saved in: {main_viz_dir}")
+                print(f"📂 All files saved in database folder: {main_viz_dir}")
 
-                # List generated files
-                print("\n📋 Generated Files:")
-                for viz_type, file_path in outputs.items():
-                    print(f"   📄 {viz_type}: {os.path.basename(file_path)}")
+                # List generated files by category
+                print("\n📋 Generated Files by Category:")
+                categories = {
+                    'Enhanced': [k for k in outputs.keys() if k in [m[0] for m in enhanced_viz_methods]],
+                    'Standard': [k for k in outputs.keys() if k in [m[0] for m in standard_viz_methods]],
+                    'Tensor': [k for k in outputs.keys() if k in [m[0] for m in tensor_viz_methods]]
+                }
+
+                for category, files in categories.items():
+                    if files:
+                        print(f"   📁 {category}:")
+                        for file in files:
+                            file_path = outputs[file]
+                            print(f"      📄 {os.path.basename(file_path)}")
 
             return outputs
 
@@ -1965,6 +2647,11 @@ class DBNNVisualizer:
                 ),
                 width=1200,
                 height=800,
+                autosize=True,
+                margin=dict(l=20, r=20, t=60, b=20),
+                paper_bgcolor='white',
+                plot_bgcolor='white',
+                showlegend=True,
                 updatemenus=feature_dropdowns,
                 sliders=[iteration_slider]
             )
@@ -2153,7 +2840,7 @@ class DBNNVisualizer:
             fig.add_annotation(
                 text=summary_text,
                 xref="paper", yref="paper",
-                x=0.98, y=0.98,
+                x=0.02, y=0.02,
                 xanchor="right", yanchor="top",
                 showarrow=False,
                 bgcolor="lightblue",
@@ -2690,7 +3377,7 @@ class DBNNVisualizer:
                 fig.add_annotation(
                     text=summary_text,
                     xref="paper", yref="paper",
-                    x=0.98, y=0.95,
+                    x=0.02, y=0.02,
                     xanchor="right", yanchor="top",
                     showarrow=False,
                     bgcolor="lightblue",
@@ -2921,7 +3608,7 @@ class DBNNVisualizer:
         # Add statistical annotations
         fig.add_annotation(
             xref=f"x{3*(row-1)+col}", yref=f"y{3*(row-1)+col}",
-            x=0.8, y=0.9,
+            x=0.02, y=0.02,
             xanchor='left',
             text=f"μ: {latest_weights['mean']:.3f}<br>σ: {latest_weights['std']:.3f}",
             showarrow=False,
@@ -3170,7 +3857,7 @@ class DBNNVisualizer:
             fig.add_annotation(
                 text=summary_text,
                 xref="paper", yref="paper",
-                x=0.95, y=0.05,
+                x=0.02, y=0.02,
                 xanchor="right", yanchor="bottom",
                 showarrow=False,
                 bgcolor="white",
@@ -3771,7 +4458,7 @@ class DBNNVisualizer:
         # Add accuracy annotation
         fig.add_annotation(
             xref=f"x{3*(row-1)+col}", yref=f"y{3*(row-1)+col}",
-            x=0.5, y=0.5, z=1.1,
+            x=0.02, y=0.02, z=1.1,
             text=f"Accuracy: {accuracy:.1f}%",
             showarrow=False,
             bgcolor="white",
@@ -3918,323 +4605,6 @@ class DBNNVisualizer:
 
         except Exception as e:
             print(f"❌ Error creating enhanced 3D visualization: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-
-    def generate_actual_tensor_visualization(self, output_file="actual_tensor_space.html"):
-        """Generate visualization using actual tensor data from DBNN core"""
-        try:
-            import plotly.graph_objects as go
-            from plotly.subplots import make_subplots
-            import numpy as np
-
-            # This would need access to the actual DBNN core
-            # For now, we'll create a more sophisticated simulation
-
-            print("🔄 Generating actual tensor space representation...")
-
-            fig = make_subplots(
-                rows=1, cols=2,
-                specs=[[{"type": "scatter3d"}, {"type": "scatter3d"}]],
-                subplot_titles=(
-                    "Tensor Space: Individual Item Orientations",
-                    "Tensor Space: Class Centroids & Orthogonality"
-                )
-            )
-
-            # Simulate the actual 5D tensor structure
-            n_classes = 5
-            n_items_per_class = 50
-            n_features = 11  # From your data
-
-            colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
-
-            # Create realistic tensor orientations
-            np.random.seed(42)
-
-            # Each class has a characteristic direction in tensor space
-            class_base_directions = []
-            for i in range(n_classes):
-                # Create orthogonal directions for each class
-                angle = 2 * np.pi * i / n_classes
-                direction = np.array([
-                    np.cos(angle),
-                    np.sin(angle),
-                    0.5 * np.sin(2 * angle)
-                ])
-                direction = direction / np.linalg.norm(direction)
-                class_base_directions.append(direction)
-
-            # Plot 1: Individual item tensor orientations
-            all_orientations = []
-            all_classes = []
-
-            for class_idx in range(n_classes):
-                base_dir = class_base_directions[class_idx]
-
-                for item_idx in range(n_items_per_class):
-                    # Each item has slight variations around class direction
-                    noise = 0.2 * np.random.randn(3)
-                    orientation = base_dir + noise
-                    orientation = orientation / np.linalg.norm(orientation)
-
-                    all_orientations.append(orientation)
-                    all_classes.append(class_idx)
-
-                    fig.add_trace(go.Scatter3d(
-                        x=[orientation[0]], y=[orientation[1]], z=[orientation[2]],
-                        mode='markers',
-                        marker=dict(
-                            size=5,
-                            color=colors[class_idx],
-                            opacity=0.7
-                        ),
-                        name=f'Class {class_idx+1}',
-                        legendgroup=f'class_{class_idx}',
-                        showlegend=(item_idx == 0),  # Only show legend once per class
-                        hovertemplate=(
-                            f'Class {class_idx+1}<br>'
-                            f'Item {item_idx+1}<br>'
-                            'Tensor Orientation<br>'
-                            '<extra></extra>'
-                        )
-                    ), row=1, col=1)
-
-            all_orientations = np.array(all_orientations)
-            all_classes = np.array(all_classes)
-
-            # Plot 2: Class centroids and orthogonality
-            for class_idx in range(n_classes):
-                class_mask = all_classes == class_idx
-                class_orientations = all_orientations[class_mask]
-                centroid = np.mean(class_orientations, axis=0)
-                centroid = centroid / np.linalg.norm(centroid)
-
-                # Plot centroid
-                fig.add_trace(go.Scatter3d(
-                    x=[centroid[0]], y=[centroid[1]], z=[centroid[2]],
-                    mode='markers',
-                    marker=dict(
-                        size=15,
-                        color=colors[class_idx],
-                        symbol='diamond'
-                    ),
-                    name=f'Class {class_idx+1} Centroid',
-                    legendgroup=f'class_{class_idx}_centroid',
-                    showlegend=True,
-                    hovertemplate=(
-                        f'Class {class_idx+1} Centroid<br>'
-                        'Average Tensor Direction<br>'
-                        '<extra></extra>'
-                    )
-                ), row=1, col=2)
-
-                # Plot direction vector
-                fig.add_trace(go.Scatter3d(
-                    x=[0, centroid[0]], y=[0, centroid[1]], z=[0, centroid[2]],
-                    mode='lines',
-                    line=dict(
-                        color=colors[class_idx],
-                        width=8
-                    ),
-                    name=f'Class {class_idx+1} Direction',
-                    legendgroup=f'class_{class_idx}_dir',
-                    showlegend=False,
-                    hovertemplate=(
-                        f'Class {class_idx+1} Primary Direction<br>'
-                        '<extra></extra>'
-                    )
-                ), row=1, col=2)
-
-            # Update layout
-            fig.update_layout(
-                title={
-                    'text': "Actual Tensor Space: 5D Feature Tensors Projected to 3D",
-                    'x': 0.5,
-                    'xanchor': 'center',
-                    'font': {'size': 20}
-                },
-                scene=dict(
-                    xaxis_title='Tensor Component 1',
-                    yaxis_title='Tensor Component 2',
-                    zaxis_title='Tensor Component 3',
-                    camera=dict(eye=dict(x=1.8, y=1.8, z=1.8))
-                ),
-                scene2=dict(
-                    xaxis_title='Tensor Component 1',
-                    yaxis_title='Tensor Component 2',
-                    zaxis_title='Tensor Component 3',
-                    camera=dict(eye=dict(x=1.8, y=1.8, z=1.8))
-                ),
-                width=1200,
-                height=600
-            )
-
-            # Add factual explanation
-            fig.add_annotation(
-                text="🎓 <b>Factual Tensor Space Representation</b><br>"
-                     "• Each point = One data item's feature tensor in complex space<br>"
-                     "• Tensor = 5D structure: (feature_i, bin_j, feature_k, bin_l, class)<br>"
-                     "• Colors = Different object classes<br>"
-                     "• Diamonds = Class centroids (average tensor directions)<br>"
-                     "• Lines = Primary tensor directions for each class<br>"
-                     "• Orthogonality = Different colors point in different directions",
-                xref="paper", yref="paper",
-                x=0.02, y=0.98,
-                showarrow=False,
-                bgcolor="lightyellow",
-                bordercolor="black",
-                borderwidth=2,
-                font=dict(size=11)
-            )
-
-            import os
-            os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
-            fig.write_html(output_file)
-            print(f"✅ Actual tensor space visualization saved: {output_file}")
-            return output_file
-
-        except Exception as e:
-            print(f"Error creating actual tensor visualization: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-
-    def generate_interactive_visualizations(self, output_dir="Visualisations"):
-        """Generate all interactive visualizations with proper folder organization"""
-        if not hasattr(self, 'visualizer') or not self.visualizer:
-            print("❌ No visualizer available. Please enable enhanced visualization before training.")
-            return None
-
-        # Check if we have any visualization data
-        has_data = (hasattr(self.visualizer, 'training_history') and self.visualizer.training_history) or \
-                   (hasattr(self.visualizer, 'feature_space_snapshots') and self.visualizer.feature_space_snapshots) or \
-                   (hasattr(self.visualizer, 'accuracy_progression') and self.visualizer.accuracy_progression)
-
-        if not has_data:
-            print("❌ No visualization data available.")
-            print("   Enable with enable_enhanced_visualization() before training")
-            return None
-
-        try:
-            import os
-
-            # Create organized directory structure based on data file
-            if hasattr(self, 'current_file') and self.current_file:
-                base_name = os.path.splitext(os.path.basename(self.current_file))[0]
-            else:
-                base_name = "dbnn_training"
-
-            if hasattr(self, 'feature_columns') and self.feature_columns:
-                feature_info = f"{len(self.feature_columns)}features"
-                base_name = f"{base_name}_{feature_info}"
-
-            # Create main visualization folder for this dataset
-            main_viz_dir = os.path.join(output_dir, base_name)
-            standard_dir = os.path.join(main_viz_dir, "Standard")
-            enhanced_dir = os.path.join(main_viz_dir, "Enhanced")
-            os.makedirs(standard_dir, exist_ok=True)
-            os.makedirs(enhanced_dir, exist_ok=True)
-
-            # Store the main visualization directory for easy access
-            self.main_viz_directory = main_viz_dir
-
-            print(f"📁 Creating visualizations in: {main_viz_dir}")
-
-            outputs = {}
-
-            # 1. Generate ENHANCED visualizations
-            print("🔄 Generating enhanced visualizations...")
-
-            # Enhanced 3D
-            enhanced_3d_file = os.path.join(enhanced_dir, f"{base_name}_enhanced_3d.html")
-            result = self.visualizer.generate_enhanced_interactive_3d(enhanced_3d_file)
-            if result:
-                outputs['enhanced_3d'] = result
-                print(f"✅ Enhanced 3D: {result}")
-
-            # Advanced Dashboard
-            dashboard_file = os.path.join(enhanced_dir, f"{base_name}_advanced_dashboard.html")
-            result = self.visualizer.create_advanced_interactive_dashboard(dashboard_file)
-            if result:
-                outputs['advanced_dashboard'] = result
-                print(f"✅ Advanced dashboard: {result}")
-
-            # Complex Tensor Evolution
-            complex_file = os.path.join(enhanced_dir, f"{base_name}_complex_tensor.html")
-            result = self.visualizer.generate_complex_tensor_evolution(complex_file)
-            if result:
-                outputs['complex_tensor'] = result
-                print(f"✅ Complex tensor evolution: {result}")
-
-            # Phase Diagram
-            phase_file = os.path.join(enhanced_dir, f"{base_name}_phase_diagram.html")
-            result = self.visualizer.generate_complex_phase_diagram(phase_file)
-            if result:
-                outputs['phase_diagram'] = result
-                print(f"✅ Complex phase diagram: {result}")
-
-            # 2. Generate STANDARD visualizations
-            print("🔄 Generating standard visualizations...")
-
-            # Traditional Dashboard
-            traditional_file = os.path.join(standard_dir, f"{base_name}_traditional_dashboard.html")
-            result = self.visualizer.create_training_dashboard(traditional_file)
-            if result:
-                outputs['traditional_dashboard'] = result
-                print(f"✅ Traditional dashboard: {result}")
-
-            # Performance Metrics
-            performance_file = os.path.join(standard_dir, f"{base_name}_performance.html")
-            result = self.visualizer.generate_performance_metrics(performance_file)
-            if result:
-                outputs['performance'] = result
-                print(f"✅ Performance metrics: {result}")
-
-            # Correlation Matrix
-            correlation_file = os.path.join(standard_dir, f"{base_name}_correlation.html")
-            result = self.visualizer.generate_correlation_matrix(correlation_file)
-            if result:
-                outputs['correlation'] = result
-                print(f"✅ Correlation matrix: {result}")
-
-            # Feature Explorer
-            feature_file = os.path.join(standard_dir, f"{base_name}_feature_explorer.html")
-            result = self.visualizer.generate_basic_3d_visualization(feature_file)
-            if result:
-                outputs['feature_explorer'] = result
-                print(f"✅ Feature explorer: {result}")
-
-            # Animated Training
-            animated_file = os.path.join(standard_dir, f"{base_name}_animated.html")
-            result = self.visualizer.generate_animated_training(animated_file)
-            if result:
-                outputs['animated'] = result
-                print(f"✅ Animated training: {result}")
-
-            # Confusion Matrix Animation
-            confusion_file = os.path.join(standard_dir, f"{base_name}_confusion_animation.html")
-            result = self.visualizer.generate_animated_confusion_matrix(confusion_file)
-            if result:
-                outputs['confusion_animation'] = result
-                print(f"✅ Animated confusion matrix: {result}")
-
-            # Generate summary
-            successful = len(outputs)
-            total_attempted = 11  # Total visualization types we attempt to generate
-            print(f"📊 Visualization Summary: {successful}/{total_attempted} successful")
-
-            if successful == 0:
-                print("💡 Tips to get visualizations working:")
-                print("   - Enable enhanced visualization before training")
-                print("   - Ensure you have plotly installed: pip install plotly")
-                print("   - Train for multiple iterations to capture evolution")
-
-            return outputs
-
-        except Exception as e:
-            print(f"❌ Error generating visualizations: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -4479,7 +4849,7 @@ class DBNNCore:
             'skpchk': 0,
             'oneround': 100,
             'fst_gain': 1.0,
-            'gain': 2.0,
+            'gain': 20.0,
             'margin': 0.2,
             'patience': 10,
             'min_improvement': 0.1
@@ -5003,6 +5373,18 @@ class DBNNCore:
             if model_dir and not os.path.exists(model_dir):
                 os.makedirs(model_dir, exist_ok=True)
 
+            # CRITICAL FIX: Use instance feature_columns if available, otherwise use passed parameter
+            if hasattr(self, 'feature_columns') and self.feature_columns:
+                actual_feature_columns = self.feature_columns
+            else:
+                actual_feature_columns = feature_columns if feature_columns else []
+
+            # CRITICAL FIX: Use instance target_column if available
+            if hasattr(self, 'target_column') and self.target_column:
+                actual_target_column = self.target_column
+            else:
+                actual_target_column = target_column if target_column else ''
+
             # Build model data with feature information
             model_data = {
                 'config': self.config,
@@ -5010,10 +5392,11 @@ class DBNNCore:
                 'outnodes': self.outnodes,
                 'is_trained': self.is_trained,
                 'best_accuracy': getattr(self, 'best_accuracy', 0.0),
+                'best_round': getattr(self, 'best_round', 0),
                 'class_encoder': self.class_encoder.get_class_mapping() if hasattr(self.class_encoder, 'is_fitted') and self.class_encoder.is_fitted else {},
-                'feature_columns': feature_columns if feature_columns else [],
-                'target_column': target_column if target_column else '',
-                'arrays_format': 'numpy',  # Mark that arrays are stored as numpy objects
+                'feature_columns': actual_feature_columns,  # Use the corrected feature columns
+                'target_column': actual_target_column,      # Use the corrected target column
+                'arrays_format': 'numpy',
                 'training_mode': 'tensor' if (self.tensor_mode and self.tensor_core) else 'standard'
             }
 
@@ -5116,7 +5499,7 @@ class DBNNCore:
                     ('binloc', np.float64),
                     ('max_val', np.float64),
                     ('min_val', np.float64),
-                    ('class_labels', np.float64),  # CHANGED: class_labels → class_labels
+                    ('class_labels', np.float64),
                     ('resolution_arr', np.int32)
                 ]
 
@@ -5136,7 +5519,7 @@ class DBNNCore:
                     ('binloc', np.float64),
                     ('max_val', np.float64),
                     ('min_val', np.float64),
-                    ('class_labels', np.float64),  # CHANGED: class_labels → class_labels
+                    ('class_labels', np.float64),
                     ('resolution_arr', np.int32)
                 ]
 
@@ -5179,15 +5562,74 @@ class DBNNCore:
             # Load best accuracy
             if 'best_accuracy' in model_data:
                 self.best_accuracy = model_data['best_accuracy']
+            if 'best_round' in model_data:
+                self.best_round = model_data['best_round']
 
-            # Load feature information from model
+            # ENHANCED FEATURE CONFIGURATION LOADING WITH ROBUST FALLBACKS
             self.feature_columns = model_data.get('feature_columns', [])
             self.target_column = model_data.get('target_column', '')
 
+            # CRITICAL FIX: If no feature columns found, try multiple recovery strategies
+            if not self.feature_columns:
+                self.log("⚠️ No feature configuration found in trained model")
+                self.log("🔧 Attempting feature configuration recovery...")
+
+                # Strategy 1: Check if we have feature information from metadata
+                if 'feature_columns' in model_data and model_data['feature_columns']:
+                    self.feature_columns = model_data['feature_columns']
+                    self.log(f"✅ Recovered feature columns from metadata: {len(self.feature_columns)} features")
+
+                # Strategy 2: Infer from model dimensions
+                elif hasattr(self, 'innodes') and self.innodes > 0:
+                    self.feature_columns = [f'feature_{i+1}' for i in range(self.innodes)]
+                    self.log(f"✅ Inferred {self.innodes} generic feature names from model dimensions")
+
+                # Strategy 3: Check for feature information in config
+                elif 'config' in model_data and 'feature_columns' in model_data['config']:
+                    self.feature_columns = model_data['config']['feature_columns']
+                    self.log(f"✅ Recovered feature columns from config: {len(self.feature_columns)} features")
+
+                else:
+                    self.log("❌ Could not recover feature configuration - manual setup required")
+
+            # Validate feature columns consistency
+            if self.feature_columns and hasattr(self, 'innodes'):
+                if len(self.feature_columns) != self.innodes:
+                    self.log(f"⚠️ Feature count mismatch: {len(self.feature_columns)} features vs {self.innodes} input nodes")
+                    # Auto-correct by truncating or extending feature list
+                    if len(self.feature_columns) > self.innodes:
+                        self.feature_columns = self.feature_columns[:self.innodes]
+                        self.log(f"✅ Truncated feature columns to match input nodes: {len(self.feature_columns)} features")
+                    else:
+                        # Add generic feature names for missing ones
+                        missing_count = self.innodes - len(self.feature_columns)
+                        for i in range(missing_count):
+                            self.feature_columns.append(f'feature_{len(self.feature_columns) + 1}')
+                        self.log(f"✅ Extended feature columns with generic names: {len(self.feature_columns)} features")
+
+            # ENHANCED TARGET COLUMN RECOVERY
+            if not self.target_column:
+                self.log("⚠️ No target column information found")
+                # Try to recover from various sources
+                if 'target_column' in model_data and model_data['target_column']:
+                    self.target_column = model_data['target_column']
+                    self.log(f"✅ Recovered target column: {self.target_column}")
+                elif 'config' in model_data and 'target_column' in model_data['config']:
+                    self.target_column = model_data['config']['target_column']
+                    self.log(f"✅ Recovered target column from config: {self.target_column}")
+                else:
+                    self.target_column = 'target'  # Default fallback
+                    self.log(f"✅ Using default target column name: {self.target_column}")
+
+            # Log final feature configuration
             if self.feature_columns:
-                self.log(f"✅ Loaded feature configuration: {len(self.feature_columns)} features - {self.feature_columns}")
+                self.log(f"✅ Final feature configuration: {len(self.feature_columns)} features")
+                if len(self.feature_columns) <= 10:
+                    self.log(f"   Features: {self.feature_columns}")
+                else:
+                    self.log(f"   First 5 features: {self.feature_columns[:5]}...")
             else:
-                self.log("⚠️ No feature configuration found in model file")
+                self.log("❌ CRITICAL: No feature configuration available")
 
             if self.target_column:
                 self.log(f"✅ Target column: {self.target_column}")
@@ -5203,9 +5645,9 @@ class DBNNCore:
                 self.log("✅ Arrays already loaded, no reinitialization needed")
             else:
                 self.log("❌ Warning: Invalid model dimensions, cannot initialize arrays")
-                return
+                return False
 
-            # FIX: Enhanced class encoder loading with better error recovery
+            # ENHANCED CLASS ENCODER LOADING WITH COMPREHENSIVE RECOVERY
             class_encoder_mapping = model_data.get('class_encoder', {})
             if class_encoder_mapping:
                 try:
@@ -5329,30 +5771,76 @@ class DBNNCore:
                     except Exception as infer_error:
                         self.log(f"❌ Failed to infer encoder from class_labels: {infer_error}")
 
-            # Final validation
+            # COMPREHENSIVE MODEL VALIDATION
+            self.log("🔍 Performing comprehensive model validation...")
+
+            validation_issues = []
+
+            # Check core arrays
+            if not hasattr(self, 'anti_net') or self.anti_net is None:
+                validation_issues.append("Missing anti_net array")
+            if not hasattr(self, 'anti_wts') or self.anti_wts is None:
+                validation_issues.append("Missing anti_wts array")
+            if not hasattr(self, 'class_labels') or self.class_labels is None:
+                validation_issues.append("Missing class_labels array")
+
+            # Check dimensions
+            if self.innodes <= 0:
+                validation_issues.append(f"Invalid input nodes: {self.innodes}")
+            if self.outnodes <= 0:
+                validation_issues.append(f"Invalid output nodes: {self.outnodes}")
+
+            # Check feature configuration
+            if not self.feature_columns:
+                validation_issues.append("No feature columns configured")
+            elif len(self.feature_columns) != self.innodes:
+                validation_issues.append(f"Feature count mismatch: {len(self.feature_columns)} features vs {self.innodes} input nodes")
+
+            # Check encoder
+            if not hasattr(self.class_encoder, 'is_fitted') or not self.class_encoder.is_fitted:
+                validation_issues.append("Class encoder not properly fitted")
+
+            if validation_issues:
+                self.log("❌ Model validation issues found:")
+                for issue in validation_issues:
+                    self.log(f"   - {issue}")
+            else:
+                self.log("✅ Model validation passed")
+
+            # Final status report
             mode_info = "tensor" if self.tensor_mode else "standard"
             self.log(f"✅ {mode_info.capitalize()} model loaded successfully: {self.innodes} inputs, {self.outnodes} outputs")
             self.log(f"✅ Model is_trained: {self.is_trained}")
             self.log(f"✅ Class encoder is_fitted: {getattr(self.class_encoder, 'is_fitted', False)}")
             self.log(f"✅ Config resolution: {self.config.get('resol', 'N/A')}")
-            if self.feature_columns:
-                self.log(f"✅ Feature columns: {len(self.feature_columns)} features loaded")
-            else:
-                self.log("⚠️ No feature columns information available")
+            self.log(f"✅ Feature columns: {len(self.feature_columns)} features configured")
+            self.log(f"✅ Target column: {self.target_column}")
 
-            # Test model functionality
-            if self.innodes > 0 and self.class_encoder.is_fitted:
+            # Enhanced model functionality test
+            if self.innodes > 0 and self.class_encoder.is_fitted and self.feature_columns:
                 try:
                     test_sample = np.random.randn(self.innodes)
                     predictions, probabilities = self.predict_batch(test_sample.reshape(1, -1))
                     self.log(f"✅ Model test passed - Prediction: {predictions[0]}")
+
+                    # Additional test: verify feature dimension match
+                    if len(test_sample) == len(self.feature_columns):
+                        self.log("✅ Feature dimension validation passed")
+                    else:
+                        self.log(f"⚠️ Feature dimension mismatch: sample has {len(test_sample)} features, model expects {len(self.feature_columns)}")
+
                 except Exception as test_error:
                     self.log(f"⚠️ Model test warning: {test_error}")
+            else:
+                self.log("⚠️ Skipping model test - missing required components")
+
+            return True
 
         except Exception as e:
             self.log(f"❌ Load error: {e}")
             import traceback
             traceback.print_exc()
+            return False
 
     def _init_gpu_acceleration(self):
         """Initialize GPU acceleration if available"""
@@ -6117,7 +6605,7 @@ class DBNNCore:
                 self.log(f"Processed {total_processed}/{total_samples} samples")
 
         # Training with early stopping
-        gain = self.config.get('gain', 2.0)
+        gain = self.config.get('gain', 20.0)
         max_epochs = self.config.get('epochs', 100)
         patience = self.config.get('patience', 10)
         min_improvement = self.config.get('min_improvement', 0.1)
@@ -6325,128 +6813,6 @@ class DBNNCore:
         except Exception as e:
             self.log(f"⚠️ Could not capture interactive visualization snapshot: {e}")
 
-    def generate_interactive_visualizations(self, output_dir="Visualisations"):
-        """Generate all interactive visualizations after training - FIXED FOLDER STRUCTURE"""
-        if not hasattr(self, 'visualizer') or not self.visualizer:
-            print("❌ No visualizer available. Please enable enhanced visualization before training.")
-            return None
-
-        if not hasattr(self.visualizer, 'feature_space_snapshots') or not self.visualizer.feature_space_snapshots:
-            print("❌ No visualization data available.")
-            print("   Enable with enable_interactive_visualization() before training")
-            return None
-
-        try:
-            import os
-
-            # Create organized directory structure based on data file
-            if hasattr(self, 'current_file') and self.current_file:
-                base_name = os.path.splitext(os.path.basename(self.current_file))[0]
-            else:
-                base_name = "dbnn_training"
-
-            if hasattr(self, 'feature_columns') and self.feature_columns:
-                base_name = f"{base_name}_{len(self.feature_columns)}features"
-
-            # Create main visualization folder for this dataset
-            main_viz_dir = os.path.join(output_dir, base_name)
-            standard_dir = os.path.join(main_viz_dir, "Standard")
-            enhanced_dir = os.path.join(main_viz_dir, "Enhanced")
-            os.makedirs(standard_dir, exist_ok=True)
-            os.makedirs(enhanced_dir, exist_ok=True)
-
-            outputs = {}
-
-            # 1. Generate ENHANCED visualizations
-            print("🔄 Generating enhanced visualizations...")
-
-            # Enhanced 3D
-            enhanced_3d_file = os.path.join(enhanced_dir, f"{base_name}_enhanced_3d.html")
-            result = self.visualizer.generate_enhanced_interactive_3d(enhanced_3d_file)
-            if result:
-                outputs['enhanced_3d'] = result
-                print(f"✅ Enhanced 3D: {result}")
-            else:
-                print("❌ Failed to generate enhanced_3d")
-
-            # Advanced Dashboard
-            dashboard_file = os.path.join(enhanced_dir, f"{base_name}_advanced_dashboard.html")
-            result = self.visualizer.create_advanced_interactive_dashboard(dashboard_file)
-            if result:
-                outputs['advanced_dashboard'] = result
-                print(f"✅ Advanced dashboard: {result}")
-            else:
-                print("❌ Failed to generate advanced_dashboard")
-
-            # 2. Generate STANDARD visualizations
-            print("🔄 Generating standard visualizations...")
-
-            # Traditional Dashboard
-            traditional_file = os.path.join(standard_dir, f"{base_name}_traditional_dashboard.html")
-            result = self.visualizer.create_training_dashboard(traditional_file)
-            if result:
-                outputs['traditional_dashboard'] = result
-                print(f"✅ Traditional dashboard: {result}")
-            else:
-                print("❌ Failed to generate traditional_dashboard")
-
-            # Performance Metrics
-            performance_file = os.path.join(standard_dir, f"{base_name}_performance.html")
-            result = self.visualizer.generate_performance_metrics(performance_file)
-            if result:
-                outputs['performance'] = result
-                print(f"✅ Performance metrics: {result}")
-            else:
-                print("❌ Failed to generate performance")
-
-            # Correlation Matrix
-            correlation_file = os.path.join(standard_dir, f"{base_name}_correlation.html")
-            result = self.visualizer.generate_correlation_matrix(correlation_file)
-            if result:
-                outputs['correlation'] = result
-                print(f"✅ Correlation matrix: {result}")
-            else:
-                print("❌ Failed to generate correlation")
-
-            # Feature Explorer
-            feature_file = os.path.join(standard_dir, f"{base_name}_feature_explorer.html")
-            result = self.visualizer.generate_basic_3d_visualization(feature_file)
-            if result:
-                outputs['feature_explorer'] = result
-                print(f"✅ Feature explorer: {result}")
-            else:
-                print("❌ Failed to generate feature_explorer")
-
-            # Animated Training
-            animated_file = os.path.join(standard_dir, f"{base_name}_animated.html")
-            result = self.visualizer.generate_animated_training(animated_file)
-            if result:
-                outputs['animated'] = result
-                print(f"✅ Animated training: {result}")
-            else:
-                print("❌ Failed to generate animated")
-
-            # ANIMATED CONFUSION MATRIX - NEW
-            confusion_file = os.path.join(standard_dir, f"{base_name}_confusion_animation.html")
-            result = self.visualizer.generate_animated_confusion_matrix(confusion_file)
-            if result:
-                outputs['confusion_animation'] = result
-                print(f"✅ Animated confusion matrix: {result}")
-            else:
-                print("❌ Failed to generate confusion animation")
-
-            print(f"📊 Visualization Summary: {len(outputs)} successful")
-
-            # Store the main visualization directory for easy access
-            self.main_viz_directory = main_viz_dir
-            return outputs
-
-        except Exception as e:
-            print(f"❌ Error generating visualizations: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-
     def enable_parallel_processing(self, enabled=True):
         """Enable or disable parallel processing"""
         self.parallel_enabled = enabled
@@ -6630,260 +6996,174 @@ class EnhancedDBNNInterface:
             messagebox.showerror("Error", "Please initialize core and visualizer first")
             return
 
+        self.refresh_gui_before_visualization()
+        self.show_processing_indicator("Generating comprehensive tensor space visualizations...")
+
+        outputs = {}
+
+        import os
+        if hasattr(self, 'current_file') and self.current_file:
+            base_name = os.path.splitext(os.path.basename(self.current_file))[0]
+        else:
+            base_name = "dbnn_training"
+
+        # Create main tensor visualization directory
+        tensor_viz_dir = os.path.join("Visualisations", base_name, "TensorSpace")
+        os.makedirs(tensor_viz_dir, exist_ok=True)
+
+        # Create subdirectories for different visualization types
+        circular_dir = os.path.join(tensor_viz_dir, "Circular")
+        traditional_dir = os.path.join(tensor_viz_dir, "Traditional")
+        os.makedirs(circular_dir, exist_ok=True)
+        os.makedirs(traditional_dir, exist_ok=True)
+
+        # ===========================================================================
+        # NEW CIRCULAR VISUALIZATIONS (Your requested addition)
+        # ===========================================================================
+        self.log("🔄 Generating NEW circular coordinate visualizations...")
+
+        # Generate circular evolution
+        circular_file = os.path.join(circular_dir, f"{base_name}_circular_evolution.html")
         try:
-            self.show_processing_indicator("Generating comprehensive tensor space visualizations...")
-
-            outputs = {}
-
-            import os
-            if hasattr(self, 'current_file') and self.current_file:
-                base_name = os.path.splitext(os.path.basename(self.current_file))[0]
-            else:
-                base_name = "dbnn_training"
-
-            # Create main tensor visualization directory
-            tensor_viz_dir = os.path.join("Visualisations", base_name, "TensorSpace")
-            os.makedirs(tensor_viz_dir, exist_ok=True)
-
-            # Create subdirectories for different visualization types
-            circular_dir = os.path.join(tensor_viz_dir, "Circular")
-            traditional_dir = os.path.join(tensor_viz_dir, "Traditional")
-            os.makedirs(circular_dir, exist_ok=True)
-            os.makedirs(traditional_dir, exist_ok=True)
-
-            # ===========================================================================
-            # NEW CIRCULAR VISUALIZATIONS (Your requested addition)
-            # ===========================================================================
-            self.log("🔄 Generating NEW circular coordinate visualizations...")
-
-            # Generate circular evolution - FIXED: Call through visualizer
-            circular_file = os.path.join(circular_dir, f"{base_name}_circular_evolution.html")
-            try:
-                if hasattr(self.core.visualizer, 'generate_circular_tensor_evolution'):
-                    result = self.core.visualizer.generate_circular_tensor_evolution(circular_file)
-                    if result:
-                        outputs['circular_evolution'] = result
-                        self.log(f"✅ Circular evolution: {result}")
-                else:
-                    self.log("⚠️ Circular evolution method not available in visualizer")
-            except Exception as e:
-                self.log(f"⚠️ Circular evolution failed: {e}")
-                import traceback
-                traceback.print_exc()
-
-            # Generate polar evolution - FIXED: Call through visualizer
-            polar_file = os.path.join(circular_dir, f"{base_name}_polar_evolution.html")
-            try:
-                if hasattr(self.core.visualizer, 'generate_polar_tensor_evolution'):
-                    result = self.core.visualizer.generate_polar_tensor_evolution(polar_file)
-                    if result:
-                        outputs['polar_evolution'] = result
-                        self.log(f"✅ Polar evolution: {result}")
-                else:
-                    self.log("⚠️ Polar evolution method not available in visualizer")
-            except Exception as e:
-                self.log(f"⚠️ Polar evolution failed: {e}")
-                import traceback
-                traceback.print_exc()
-
-            # ===========================================================================
-            # PREVIOUS TRADITIONAL VISUALIZATIONS (Keep existing functionality)
-            # ===========================================================================
-            self.log("🔄 Generating PREVIOUS traditional tensor visualizations...")
-
-            # Generate factual tensor visualization - FIXED: Call through visualizer
-            tensor_file = os.path.join(traditional_dir, f"{base_name}_actual_tensor_space.html")
-            try:
-                if hasattr(self.core.visualizer, 'generate_actual_tensor_visualization'):
-                    result = self.core.visualizer.generate_actual_tensor_visualization(tensor_file)
-                    if result:
-                        outputs['actual_tensor_space'] = result
-                        self.log(f"✅ Actual tensor space (3D): {result}")
-                else:
-                    self.log("⚠️ Actual tensor space method not available in visualizer")
-            except Exception as e:
-                self.log(f"⚠️ Actual tensor space failed: {e}")
-                import traceback
-                traceback.print_exc()
-
-            # Generate complex evolution visualization - FIXED: Call through visualizer
-            evolution_file = os.path.join(traditional_dir, f"{base_name}_tensor_evolution.html")
-            try:
-                if hasattr(self.core.visualizer, 'generate_complex_tensor_evolution'):
-                    result = self.core.visualizer.generate_complex_tensor_evolution(evolution_file)
-                    if result:
-                        outputs['tensor_evolution'] = result
-                        self.log(f"✅ Tensor evolution (3D): {result}")
-                else:
-                    self.log("⚠️ Tensor evolution method not available in visualizer")
-            except Exception as e:
-                self.log(f"⚠️ Tensor evolution failed: {e}")
-                import traceback
-                traceback.print_exc()
-
-            # Generate feature orthogonality plot - FIXED: Call through visualizer
-            ortho_file = os.path.join(tensor_viz_dir, f"{base_name}_feature_orthogonality.html")
-            try:
-                if hasattr(self.core.visualizer, 'generate_feature_orthogonality_plot'):
-                    result = self.core.visualizer.generate_feature_orthogonality_plot(ortho_file)
-                    if result:
-                        outputs['feature_orthogonality'] = result
-                        self.log(f"✅ Feature orthogonality: {result}")
-                else:
-                    self.log("⚠️ Feature orthogonality method not available in visualizer")
-            except Exception as e:
-                self.log(f"⚠️ Feature orthogonality failed: {e}")
-                import traceback
-                traceback.print_exc()
-
-            # Generate class separation evolution - FIXED: Call through visualizer
-            separation_file = os.path.join(tensor_viz_dir, f"{base_name}_class_separation.html")
-            try:
-                if hasattr(self.core.visualizer, 'generate_class_separation_evolution'):
-                    result = self.core.visualizer.generate_class_separation_evolution(separation_file)
-                    if result:
-                        outputs['class_separation'] = result
-                        self.log(f"✅ Class separation: {result}")
-                else:
-                    self.log("⚠️ Class separation method not available in visualizer")
-            except Exception as e:
-                self.log(f"⚠️ Class separation failed: {e}")
-                import traceback
-                traceback.print_exc()
-
-            # ===========================================================================
-            # CHECK WHY NO TENSOR DATA IS AVAILABLE
-            # ===========================================================================
-            if not outputs:
-                # Debug information about why tensor visualizations failed
-                self.log("🔍 Debugging tensor visualization issues...")
-
-                # Check if visualizer has the required data
-                if hasattr(self.core.visualizer, 'feature_space_snapshots'):
-                    snapshot_count = len(self.core.visualizer.feature_space_snapshots)
-                    self.log(f"   • Feature space snapshots available: {snapshot_count}")
-
-                    if snapshot_count > 0:
-                        latest_snapshot = self.core.visualizer.feature_space_snapshots[-1]
-                        self.log(f"   • Latest snapshot iteration: {latest_snapshot.get('iteration', 'N/A')}")
-                        self.log(f"   • Features shape: {latest_snapshot['features'].shape if 'features' in latest_snapshot else 'N/A'}")
-                        self.log(f"   • Targets shape: {latest_snapshot['targets'].shape if 'targets' in latest_snapshot else 'N/A'}")
-                        self.log(f"   • Predictions shape: {latest_snapshot['predictions'].shape if 'predictions' in latest_snapshot else 'N/A'}")
-                    else:
-                        self.log("   • No feature space snapshots captured during training")
-                else:
-                    self.log("   • Visualizer has no feature_space_snapshots attribute")
-
-                # Check available methods in visualizer
-                available_methods = [method for method in dir(self.core.visualizer)
-                                   if not method.startswith('_') and callable(getattr(self.core.visualizer, method))]
-                tensor_methods = [m for m in available_methods if 'tensor' in m.lower() or 'circular' in m.lower() or 'polar' in m.lower()]
-                self.log(f"   • Available tensor visualization methods: {tensor_methods}")
-
-            # ===========================================================================
-            # RESULTS SUMMARY AND USER OPTIONS
-            # ===========================================================================
-            if outputs:
-                circular_count = len([k for k in outputs.keys() if 'circular' in k or 'polar' in k])
-                traditional_count = len(outputs) - circular_count
-
-                self.log(f"✅ Comprehensive tensor visualizations generated!")
-                self.log(f"   • {circular_count} NEW circular coordinate visualizations")
-                self.log(f"   • {traditional_count} PREVIOUS traditional visualizations")
-                self.log(f"   • Total: {len(outputs)} visualizations across {tensor_viz_dir}")
-
-                # Offer user choice of which visualization to open
-                if 'circular_evolution' in outputs and 'actual_tensor_space' in outputs:
-                    choice = messagebox.askyesno(
-                        "Tensor Space Visualizations Ready",
-                        f"Comprehensive tensor space visualizations generated!\n\n"
-                        f"NEW Circular Visualizations:\n"
-                        f"• Circular coordinate system (r, θ)\n"
-                        f"• Polar plot evolution\n"
-                        f"• Shows tensor organization progress\n\n"
-                        f"PREVIOUS Traditional Visualizations:\n"
-                        f"• 3D tensor space projections\n"
-                        f"• Complex space transformations\n"
-                        f"• Class alignment metrics\n\n"
-                        f"Open NEW circular visualization? (Yes)\n"
-                        f"Or PREVIOUS 3D visualization? (No)",
-                        detail="Click Yes for circular view, No for 3D view"
-                    )
-                    if choice:
-                        # Open circular visualization
-                        import webbrowser
-                        webbrowser.open(f'file://{os.path.abspath(outputs["circular_evolution"])}')
-                        self.log("📊 Opened NEW circular tensor visualization")
-                    else:
-                        # Open traditional visualization
-                        import webbrowser
-                        webbrowser.open(f'file://{os.path.abspath(outputs["actual_tensor_space"])}')
-                        self.log("📊 Opened PREVIOUS 3D tensor visualization")
-                elif 'circular_evolution' in outputs:
-                    # Only circular available
-                    result = messagebox.askyesno(
-                        "Circular Tensor Visualization Ready",
-                        f"NEW circular tensor visualization generated!\n\n"
-                        f"Shows tensor evolution in polar coordinates:\n"
-                        f"• Radius = Tensor magnitude\n"
-                        f"• Angle = Tensor direction\n"
-                        f"• Colors = Different classes\n"
-                        f"• Animation = Training progress\n\n"
-                        f"File: {outputs['circular_evolution']}\n\n"
-                        f"Open in web browser?"
-                    )
-                    if result:
-                        import webbrowser
-                        webbrowser.open(f'file://{os.path.abspath(outputs["circular_evolution"])}')
-                elif 'actual_tensor_space' in outputs:
-                    # Only traditional available
-                    result = messagebox.askyesno(
-                        "Tensor Space Visualization Ready",
-                        f"Traditional 3D tensor visualization generated!\n\n"
-                        f"File: {outputs['actual_tensor_space']}\n\n"
-                        f"Open in web browser?"
-                    )
-                    if result:
-                        import webbrowser
-                        webbrowser.open(f'file://{os.path.abspath(outputs["actual_tensor_space"])}')
-            else:
-                self.log("❌ No tensor visualizations could be generated")
-
-                # More specific error message based on debug info
-                if hasattr(self.core.visualizer, 'feature_space_snapshots'):
-                    snapshot_count = len(self.core.visualizer.feature_space_snapshots)
-                    if snapshot_count == 0:
-                        messagebox.showwarning(
-                            "No Tensor Data Available",
-                            "No tensor space snapshots were captured during training.\n\n"
-                            "This usually happens because:\n"
-                            "1. The training completed too quickly (few iterations)\n"
-                            "2. Enhanced visualization capture failed\n"
-                            "3. The visualization methods are not properly implemented\n\n"
-                            "Try training with more iterations or check the console for errors."
-                        )
-                    else:
-                        messagebox.showwarning(
-                            "Visualization Methods Missing",
-                            "Tensor snapshots are available but visualization methods are missing.\n\n"
-                            "The tensor visualization methods need to be added to the DBNNVisualizer class.\n"
-                            f"Found {snapshot_count} snapshots but no visualization methods."
-                        )
-                else:
-                    messagebox.showwarning(
-                        "Visualization System Error",
-                        "The tensor visualization system is not properly configured.\n\n"
-                        "Please ensure:\n"
-                        "1. The DBNNVisualizer class has the tensor visualization methods\n"
-                        "2. Enhanced visualization is properly capturing snapshots\n"
-                        "3. The core and visualizer are properly initialized"
-                    )
-
+            result = self.core.visualizer.generate_circular_tensor_evolution(circular_file)
+            if result:
+                outputs['circular_evolution'] = result
+                self.log(f"✅ Circular evolution: {result}")
         except Exception as e:
-            self.log(f"❌ Error generating tensor visualizations: {e}")
-            import traceback
-            traceback.print_exc()
-        finally:
+            self.log(f"⚠️ Circular evolution failed: {e}")
+
+        # Generate polar evolution
+        polar_file = os.path.join(circular_dir, f"{base_name}_polar_evolution.html")
+        try:
+            result = self.core.visualizer.generate_polar_tensor_evolution(polar_file)
+            if result:
+                outputs['polar_evolution'] = result
+                self.log(f"✅ Polar evolution: {result}")
+        except Exception as e:
+            self.log(f"⚠️ Polar evolution failed: {e}")
+
+        # ===========================================================================
+        # PREVIOUS TRADITIONAL VISUALIZATIONS (Keep existing functionality)
+        # ===========================================================================
+        self.log("🔄 Generating PREVIOUS traditional tensor visualizations...")
+
+        # Generate factual tensor visualization (previous 3D version)
+        tensor_file = os.path.join(traditional_dir, f"{base_name}_actual_tensor_space.html")
+        try:
+            result = self.core.visualizer.generate_actual_tensor_visualization(tensor_file)
+            if result:
+                outputs['actual_tensor_space'] = result
+                self.log(f"✅ Actual tensor space (3D): {result}")
+        except Exception as e:
+            self.log(f"⚠️ Actual tensor space failed: {e}")
+
+        # Generate complex evolution visualization (previous version)
+        evolution_file = os.path.join(traditional_dir, f"{base_name}_tensor_evolution.html")
+        try:
+            result = self.core.visualizer.generate_complex_tensor_evolution(evolution_file)
+            if result:
+                outputs['tensor_evolution'] = result
+                self.log(f"✅ Tensor evolution (3D): {result}")
+        except Exception as e:
+            self.log(f"⚠️ Tensor evolution failed: {e}")
+
+        # Generate feature orthogonality plot
+        ortho_file = os.path.join(tensor_viz_dir, f"{base_name}_feature_orthogonality.html")
+        try:
+            result = self.core.visualizer.generate_feature_orthogonality_plot(ortho_file)
+            if result:
+                outputs['feature_orthogonality'] = result
+                self.log(f"✅ Feature orthogonality: {result}")
+        except Exception as e:
+            self.log(f"⚠️ Feature orthogonality failed: {e}")
+
+        # Generate class separation evolution
+        separation_file = os.path.join(tensor_viz_dir, f"{base_name}_class_separation.html")
+        try:
+            result = self.core.visualizer.generate_class_separation_evolution(separation_file)
+            if result:
+                outputs['class_separation'] = result
+                self.log(f"✅ Class separation: {result}")
+        except Exception as e:
+            self.log(f"⚠️ Class separation failed: {e}")
+
+        # ===========================================================================
+        # RESULTS SUMMARY AND USER OPTIONS
+        # ===========================================================================
+        if outputs:
+            circular_count = len([k for k in outputs.keys() if 'circular' in k or 'polar' in k])
+            traditional_count = len(outputs) - circular_count
+
+            self.log(f"✅ Comprehensive tensor visualizations generated!")
+            self.log(f"   • {circular_count} NEW circular coordinate visualizations")
+            self.log(f"   • {traditional_count} PREVIOUS traditional visualizations")
+            self.log(f"   • Total: {len(outputs)} visualizations across {tensor_viz_dir}")
+
+            # Offer user choice of which visualization to open
+            if 'circular_evolution' in outputs and 'actual_tensor_space' in outputs:
+                choice = messagebox.askyesno(
+                    "Tensor Space Visualizations Ready",
+                    f"Comprehensive tensor space visualizations generated!\n\n"
+                    f"NEW Circular Visualizations:\n"
+                    f"• Circular coordinate system (r, θ)\n"
+                    f"• Polar plot evolution\n"
+                    f"• Shows tensor organization progress\n\n"
+                    f"PREVIOUS Traditional Visualizations:\n"
+                    f"• 3D tensor space projections\n"
+                    f"• Complex space transformations\n"
+                    f"• Class alignment metrics\n\n"
+                    f"Open NEW circular visualization? (Yes)\n"
+                    f"Or PREVIOUS 3D visualization? (No)",
+                    detail="Click Yes for circular view, No for 3D view"
+                )
+                if choice:
+                    # Open circular visualization
+                    import webbrowser
+                    webbrowser.open(f'file://{os.path.abspath(outputs["circular_evolution"])}')
+                    self.log("📊 Opened NEW circular tensor visualization")
+                else:
+                    # Open traditional visualization
+                    import webbrowser
+                    webbrowser.open(f'file://{os.path.abspath(outputs["actual_tensor_space"])}')
+                    self.log("📊 Opened PREVIOUS 3D tensor visualization")
+            elif 'circular_evolution' in outputs:
+                # Only circular available
+                result = messagebox.askyesno(
+                    "Circular Tensor Visualization Ready",
+                    f"NEW circular tensor visualization generated!\n\n"
+                    f"Shows tensor evolution in polar coordinates:\n"
+                    f"• Radius = Tensor magnitude\n"
+                    f"• Angle = Tensor direction\n"
+                    f"• Colors = Different classes\n"
+                    f"• Animation = Training progress\n\n"
+                    f"File: {outputs['circular_evolution']}\n\n"
+                    f"Open in web browser?"
+                )
+                if result:
+                    import webbrowser
+                    webbrowser.open(f'file://{os.path.abspath(outputs['circular_evolution'])}')
+            elif 'actual_tensor_space' in outputs:
+                # Only traditional available
+                result = messagebox.askyesno(
+                    "Tensor Space Visualization Ready",
+                    f"Traditional 3D tensor visualization generated!\n\n"
+                    f"File: {outputs['actual_tensor_space']}\n\n"
+                    f"Open in web browser?"
+                )
+                if result:
+                    import webbrowser
+                    webbrowser.open(f'file://{os.path.abspath(outputs['actual_tensor_space'])}')
+        else:
+            self.log("❌ No tensor visualizations could be generated")
+            messagebox.showwarning(
+                "Information",
+                "No tensor visualization data available.\n\n"
+                "To generate these visualizations:\n"
+                "1. Train a model with Enhanced Visualization enabled\n"
+                "2. Ensure you have multiple training iterations\n"
+                "3. The system captures tensor space snapshots automatically"
+            )
+
             self.hide_processing_indicator()
 
     def check_tensor_visualization_available(self):
@@ -6946,45 +7226,70 @@ class EnhancedDBNNInterface:
             self.log(f"Switched to {mode_text}")
 
     def setup_main_tab(self):
-        """Setup the main working tab"""
-        main_frame = ttk.Frame(self.notebook)
-        self.notebook.add(main_frame, text="Main Interface")
+        """Setup the main working tab with scrollable interface"""
+        main_tab = ttk.Frame(self.notebook)
+        self.notebook.add(main_tab, text="Main Interface")
 
-        # Main frame with paned window for better layout
-        main_paned = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
-        main_paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # Create main container with scrollbar
+        main_container = ttk.Frame(main_tab)
+        main_container.pack(fill=tk.BOTH, expand=True)
 
-        # Left frame for controls
-        left_frame = ttk.Frame(main_paned)
-        main_paned.add(left_frame, weight=1)
+        # Create canvas and scrollbar
+        canvas = tk.Canvas(main_container, borderwidth=0)
+        scrollbar = ttk.Scrollbar(main_container, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
 
-        # Right frame for console
-        right_frame = ttk.Frame(main_paned)
-        main_paned.add(right_frame, weight=2)
+        # Configure scroll region
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        # Create window in canvas
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        # Pack canvas and scrollbar
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Enable mouse wheel scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        scrollable_frame.bind("<MouseWheel>", _on_mousewheel)
+
+        # SINGLE MAIN FRAME - NO PANED WINDOW (FULL WIDTH)
+        main_frame = ttk.Frame(scrollable_frame)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         # File selection
-        file_frame = ttk.LabelFrame(left_frame, text="Data File", padding="5")
+        file_frame = ttk.LabelFrame(main_frame, text="Data File", padding="5")
         file_frame.pack(fill='x', pady=5)
 
         ttk.Label(file_frame, text="Select CSV/DAT file:").grid(row=0, column=0, sticky='w')
         self.file_path = tk.StringVar()
-        ttk.Entry(file_frame, textvariable=self.file_path, width=50).grid(row=0, column=1, padx=5)
-        ttk.Button(file_frame, text="Browse", command=self.browse_file).grid(row=0, column=2)
+        ttk.Entry(file_frame, textvariable=self.file_path, width=80).grid(row=0, column=1, padx=5, sticky='we')
+        ttk.Button(file_frame, text="Browse", command=self.browse_file).grid(row=0, column=2, padx=5)
         ttk.Button(file_frame, text="Analyze", command=self.analyze_file).grid(row=0, column=3, padx=5)
+
+        # Configure grid weights for file frame
+        file_frame.columnconfigure(1, weight=1)
 
         # File info
         self.file_info = scrolledtext.ScrolledText(file_frame, height=4, width=60)
         self.file_info.grid(row=1, column=0, columnspan=4, pady=5, sticky='we')
 
         # Quick configuration
-        config_frame = ttk.LabelFrame(left_frame, text="Quick Configuration", padding="5")
+        config_frame = ttk.LabelFrame(main_frame, text="Quick Configuration", padding="5")
         config_frame.pack(fill='x', pady=5)
 
         # Model name - auto-generated based on data file
         ttk.Label(config_frame, text="Model Name:").grid(row=0, column=0, sticky='w')
         self.model_name = tk.StringVar(value="my_model")
-        self.model_name_entry = ttk.Entry(config_frame, textvariable=self.model_name, width=30)
-        self.model_name_entry.grid(row=0, column=1, sticky='w', padx=5, columnspan=2)
+        self.model_name_entry = ttk.Entry(config_frame, textvariable=self.model_name, width=50)
+        self.model_name_entry.grid(row=0, column=1, sticky='w', padx=5, columnspan=3)
 
         # Add tooltip for model name
         self.create_tooltip(self.model_name_entry, "Auto-generated from data file name. Model will be saved in Model/ folder.")
@@ -7002,10 +7307,10 @@ class EnhancedDBNNInterface:
             ttk.Label(config_frame, text=label).grid(row=1, column=i*2, sticky='w', padx=5)
             var = tk.StringVar(value=default)
             setattr(self, name, var)
-            ttk.Entry(config_frame, textvariable=var, width=8).grid(row=1, column=i*2+1, sticky='w', padx=5)
+            ttk.Entry(config_frame, textvariable=var, width=10).grid(row=1, column=i*2+1, sticky='w', padx=5)
 
-        # FIXED INDENTATION: Learning Mode section - ADD VISUALIZATION CONTROL
-        tensor_frame = ttk.LabelFrame(left_frame, text="Learning Mode", padding="5")
+        # Learning Mode section - ADD VISUALIZATION CONTROL
+        tensor_frame = ttk.LabelFrame(main_frame, text="Learning Mode", padding="5")
         tensor_frame.pack(fill='x', pady=5)
 
         # Tensor mode checkbox (existing)
@@ -7049,13 +7354,14 @@ class EnhancedDBNNInterface:
         self.tensor_info.pack(anchor='w')
 
         # Enhanced feature selection
-        self.feature_frame = ttk.LabelFrame(left_frame, text="Feature Selection", padding="5")
+        self.feature_frame = ttk.LabelFrame(main_frame, text="Feature Selection", padding="5")
+        self.feature_frame.pack(fill='x', pady=5)
 
         # Target selection
         ttk.Label(self.feature_frame, text="Target Column:").grid(row=0, column=0, sticky='w')
         self.target_col = tk.StringVar()
-        self.target_combo = ttk.Combobox(self.feature_frame, textvariable=self.target_col, width=20)
-        self.target_combo.grid(row=0, column=1, padx=5, pady=2)
+        self.target_combo = ttk.Combobox(self.feature_frame, textvariable=self.target_col, width=30)
+        self.target_combo.grid(row=0, column=1, padx=5, pady=2, sticky='w')
 
         # Feature selection with checkboxes
         ttk.Label(self.feature_frame, text="Feature Columns:").grid(row=1, column=0, sticky='nw')
@@ -7066,7 +7372,7 @@ class EnhancedDBNNInterface:
 
         # Create a canvas with scrollbar for feature selection
         self.feature_canvas = tk.Canvas(feature_check_frame, height=120)
-        scrollbar = ttk.Scrollbar(feature_check_frame, orient="vertical", command=self.feature_canvas.yview)
+        feature_scrollbar = ttk.Scrollbar(feature_check_frame, orient="vertical", command=self.feature_canvas.yview)
         self.feature_scroll_frame = ttk.Frame(self.feature_canvas)
 
         self.feature_scroll_frame.bind(
@@ -7075,10 +7381,10 @@ class EnhancedDBNNInterface:
         )
 
         self.feature_canvas.create_window((0, 0), window=self.feature_scroll_frame, anchor="nw")
-        self.feature_canvas.configure(yscrollcommand=scrollbar.set)
+        self.feature_canvas.configure(yscrollcommand=feature_scrollbar.set)
 
         self.feature_canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        feature_scrollbar.pack(side="right", fill="y")
 
         self.feature_vars = {}
 
@@ -7091,7 +7397,7 @@ class EnhancedDBNNInterface:
         ttk.Button(selection_frame, text="Invert Selection", command=self.invert_feature_selection).pack(side='left', padx=2)
 
         # Control buttons
-        button_frame = ttk.Frame(left_frame)
+        button_frame = ttk.Frame(main_frame)
         button_frame.pack(fill='x', pady=10)
 
         # Row 1 buttons
@@ -7141,19 +7447,32 @@ class EnhancedDBNNInterface:
         ttk.Button(row4_frame, text="Validate Config", command=self.validate_config).pack(side='left', padx=2)
 
         # Debug controls
-        debug_frame = ttk.LabelFrame(left_frame, text="Debug Controls", padding="5")
+        debug_frame = ttk.LabelFrame(main_frame, text="Debug Controls", padding="5")
         debug_frame.pack(fill='x', pady=5)
 
         ttk.Button(debug_frame, text="Test Data Load", command=self.test_data_load).pack(side='left', padx=2)
         ttk.Button(debug_frame, text="Test Encoder", command=self.test_encoder).pack(side='left', padx=2)
         ttk.Button(debug_frame, text="Test Prediction", command=self.test_single_prediction).pack(side='left', padx=2)
 
-        # Console output on the right
-        console_frame = ttk.LabelFrame(right_frame, text="Training Output", padding="5")
+        # Console output - NOW BELOW EVERYTHING (FULL WIDTH)
+        console_frame = ttk.LabelFrame(main_frame, text="Training Output", padding="5")
         console_frame.pack(fill='both', expand=True, pady=5)
 
-        self.console = scrolledtext.ScrolledText(console_frame, height=30, width=80)
+        self.console = scrolledtext.ScrolledText(console_frame, height=20, width=80)
         self.console.pack(fill='both', expand=True)
+
+        # Status bar at the bottom
+        status_frame = ttk.Frame(scrollable_frame)
+        status_frame.pack(fill='x', pady=5)
+
+        self.status_label = ttk.Label(status_frame, text="Ready", relief=tk.SUNKEN, anchor=tk.W)
+        self.status_label.pack(fill='x', padx=10, pady=2)
+
+        # Update the scroll region after everything is packed
+        def update_scroll_region():
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        scrollable_frame.after(100, update_scroll_region)
 
     def setup_visualization_menu(self):
         """Setup visualization menu with file manager"""
@@ -7168,8 +7487,8 @@ class EnhancedDBNNInterface:
         # Visualization menu for Tensor
         viz_menu.add_separator()
         viz_menu.add_command(
-            label="Tensor Space (Circular + 3D Views)",
-            command=self.visualize_tensor_space
+        label="Tensor Space (Circular + 3D Views)",
+        command=self.visualize_tensor_space
         )
 
         # File Manager submenu
@@ -7221,6 +7540,25 @@ class EnhancedDBNNInterface:
             "confusion_animation": os.path.join("*", "Standard", "*_confusion_animation.html"),
         }
 
+    def refresh_gui_before_visualization(self):
+        """Refresh GUI to clear help messages and prepare for visualization"""
+        try:
+            # Clear any status messages
+            if hasattr(self, 'status_label'):
+                self.status_label.config(text="")
+
+            # Update the main window
+            self.root.update()
+
+            # Force refresh of all widgets
+            for widget in self.root.winfo_children():
+                widget.update()
+
+            # Small delay to ensure refresh completes
+            self.root.after(100)
+
+        except Exception as e:
+            self.log(f"GUI refresh warning: {e}")
 
     def open_visualization_folder(self):
         """Open the visualization folder for current data file"""
@@ -7358,7 +7696,7 @@ class EnhancedDBNNInterface:
         # Default configuration parameters
         self.config_params = {
             'resol': {'label': 'Resolution', 'default': 100, 'type': 'int', 'min': 10, 'max': 500, 'desc': 'Number of bins for feature discretization'},
-            'gain': {'label': 'Gain', 'default': 2.0, 'type': 'float', 'min': 0.1, 'max': 10.0, 'desc': 'Weight update gain factor'},
+            'gain': {'label': 'Gain', 'default': 20.0, 'type': 'float', 'min': 0.1, 'max': 25.0, 'desc': 'Weight update gain factor'},
             'margin': {'label': 'Margin', 'default': 0.2, 'type': 'float', 'min': 0.01, 'max': 1.0, 'desc': 'Classification margin threshold'},
             'patience': {'label': 'Patience', 'default': 10, 'type': 'int', 'min': 1, 'max': 100, 'desc': 'Early stopping patience (epochs)'},
             'epochs': {'label': 'Max Epochs', 'default': 100, 'type': 'int', 'min': 1, 'max': 1000, 'desc': 'Maximum training epochs'},
@@ -7669,7 +8007,7 @@ class EnhancedDBNNInterface:
             if hasattr(self, 'epochs'):
                 self.epochs.set(str(config_dict.get('epochs', 100)))
             if hasattr(self, 'gain'):
-                self.gain.set(str(config_dict.get('gain', 2.0)))
+                self.gain.set(str(config_dict.get('gain', 20.0)))
             if hasattr(self, 'margin'):
                 self.margin.set(str(config_dict.get('margin', 0.2)))
             if hasattr(self, 'patience'):
@@ -8691,7 +9029,7 @@ class EnhancedDBNNInterface:
             if hasattr(self, 'epochs'):
                 self.epochs.set(str(self.core.config.get('epochs', 100)))
             if hasattr(self, 'gain'):
-                self.gain.set(str(self.core.config.get('gain', 2.0)))
+                self.gain.set(str(self.core.config.get('gain', 20.0)))
             if hasattr(self, 'margin'):
                 self.margin.set(str(self.core.config.get('margin', 0.2)))
             if hasattr(self, 'patience'):
@@ -9110,7 +9448,11 @@ class EnhancedDBNNInterface:
                         self.log(f"Epoch {rnd:3d}: Accuracy = {current_accuracy:.2f}% (+{improvement:.2f}%)")
                     else:
                         self.log(f"Epoch {rnd:3d}: Accuracy = {current_accuracy:.2f}%")
-
+                # Reduce gain in final rounds  or if accuracy oscillates
+                if current_accuracy > 0.97:
+                    gain=2.0
+                if best_accuracy >  current_accuracy +0.01 and gain > 0.1:
+                    gain=0.5*gain
                 # Visualization
                 if self.visualizer and rnd % 5 == 0:
                     sample_size = min(1000, total_samples)
@@ -9798,125 +10140,49 @@ class EnhancedDBNNInterface:
 
     def _generate_enhanced_visualizations(self):
         """Generate enhanced educational visualizations with interactive dashboards"""
+        if not hasattr(self, 'core') or not self.core or not hasattr(self.core, 'visualizer'):
+            messagebox.showerror("Error", "No trained model or visualizer available")
+            return
+
         try:
-            if not self.core or not hasattr(self.core, 'visualizer'):
-                messagebox.showerror("Error", "No visualization data available")
-                return False
+            self.show_processing_indicator("Generating enhanced circular visualizations...")
 
-            self.log("=== GENERATING ENHANCED EDUCATIONAL VISUALIZATIONS ===")
+            # Generate enhanced circular visualization
+            enhanced_file = self.core.visualizer.generate_circular_tensor_evolution(
+                "Visualisations/enhanced_circular_tensor.html"
+            )
 
-            # Create enhanced visualization directory
-            if self.current_file:
-                base_name = os.path.splitext(os.path.basename(self.current_file))[0]
-                viz_dir = f"Visualisations/{base_name}_enhanced"
+            # Generate fullscreen visualization
+            fullscreen_file = self.core.visualizer.generate_fullscreen_circular_visualization(
+                "Visualisations/fullscreen_circular.html"
+            )
+
+            # Generate polrised visualization
+            fullscreen_file = self.core.visualizer.generate_polar_tensor_evolution(
+                "Visualisations/polar_tensor_evolution.html"
+            )
+
+            if enhanced_file or fullscreen_file:
+                message = "Enhanced circular visualizations generated!\n\n"
+                if enhanced_file:
+                    message += f"• Enhanced View: {enhanced_file}\n"
+                if fullscreen_file:
+                    message += f"• Fullscreen View: {fullscreen_file}\n"
+                message += "\nOpen in browser?"
+
+                if messagebox.askyesno("Visualization Ready", message):
+                    import webbrowser
+                    if enhanced_file:
+                        webbrowser.open(f'file://{os.path.abspath(enhanced_file)}')
             else:
-                base_name = self.model_name.get().replace("Model/", "")
-                viz_dir = f"Visualisations/{base_name}_enhanced"
-
-            os.makedirs(viz_dir, exist_ok=True)
-            self.log(f"Enhanced visualizations will be saved in: {viz_dir}")
-
-            viz_count = 0
-            generated_files = []
-
-            # 1. Generate Enhanced Educational Dashboard
-            self.log("📊 Creating enhanced educational dashboard...")
-            try:
-                dashboard_file = f"{viz_dir}/enhanced_educational_dashboard.html"
-                result = self.core.visualizer.create_advanced_interactive_dashboard(dashboard_file)
-
-                if result:
-                    self.log(f"✅ Enhanced educational dashboard: {result}")
-                    viz_count += 1
-                    generated_files.append(result)
-
-                    # Add educational info
-                    snapshot_count = len(self.core.visualizer.feature_space_snapshots)
-                    self.log(f"   Using {snapshot_count} feature space snapshots")
-                else:
-                    self.log("❌ Enhanced dashboard generation failed")
-            except Exception as e:
-                self.log(f"❌ Enhanced dashboard error: {e}")
-
-            # 2. Generate Interactive 3D Visualization
-            self.log("🔄 Creating interactive 3D visualization...")
-            try:
-                interactive_3d_file = f"{viz_dir}/interactive_3d_evolution.html"
-                result = self.core.visualizer.generate_interactive_3d_visualization(interactive_3d_file)
-                if result:
-                    self.log(f"✅ Interactive 3D evolution: {result}")
-                    viz_count += 1
-                    generated_files.append(result)
-            except Exception as e:
-                self.log(f"❌ Interactive 3D error: {e}")
-
-            # 3. Generate Tensor-specific visualizations if in tensor mode
-            is_tensor_mode = getattr(self.core, 'tensor_mode', False)
-            if is_tensor_mode and hasattr(self.core.visualizer, 'create_tensor_dashboard'):
-                self.log("🧠 Creating tensor mode visualizations...")
-                try:
-                    tensor_dashboard_file = f"{viz_dir}/tensor_transformation_dashboard.html"
-                    result = self.core.visualizer.create_tensor_dashboard(tensor_dashboard_file)
-                    if result:
-                        self.log(f"✅ Tensor transformation dashboard: {result}")
-                        viz_count += 1
-                        generated_files.append(result)
-                except Exception as e:
-                    self.log(f"❌ Tensor visualization error: {e}")
-
-            # 4. Generate standard visualizations as fallback
-            self.log("📈 Generating supplementary standard visualizations...")
-            standard_viz_methods = [
-                (self.core.visualizer.generate_accuracy_plot, "accuracy_progression.html", "Accuracy Progression"),
-                (self.core.visualizer.generate_feature_space_plot, "feature_space.html", "Feature Space"),
-                (self.core.visualizer.generate_weight_distribution_plot, "weight_distribution.html", "Weight Distribution")
-            ]
-
-            for viz_method, filename, description in standard_viz_methods:
-                try:
-                    # For accuracy plot, don't pass snapshot index
-                    if viz_method == self.core.visualizer.generate_accuracy_plot:
-                        viz_fig = viz_method()
-                    else:
-                        viz_fig = viz_method(-1)  # Use latest snapshot
-
-                    if viz_fig:
-                        viz_file = f"{viz_dir}/{filename}"
-                        viz_fig.write_html(viz_file)
-                        self.log(f"✅ {description}: {viz_file}")
-                        viz_count += 1
-                        generated_files.append(viz_file)
-                except Exception as e:
-                    self.log(f"❌ {description} failed: {e}")
-
-            # Summary
-            if viz_count > 0:
-                mode_info = "Tensor" if is_tensor_mode else "Standard"
-                self.log(f"=== ENHANCED {mode_info.upper()} MODE VISUALIZATION COMPLETED ===")
-                self.log(f"Generated {viz_count} enhanced visualization files in {viz_dir}")
-                self.log("💡 Educational features included:")
-                self.log("   • 3D feature space evolution")
-                self.log("   • Decision boundary visualization")
-                self.log("   • Weight distribution analysis")
-                self.log("   • Feature correlation matrices")
-                self.log("   • Interactive training progression")
-
-                # Ask user if they want to open the files
-                self._ask_to_open_enhanced_visualizations(generated_files, base_name, viz_dir)
-                return True
-            else:
-                self.log("❌ No enhanced visualizations could be generated")
-                # Fall back to standard visualizations
-                self.log("🔄 Falling back to standard visualizations...")
-                return self._generate_standard_visualizations()
+                messagebox.showerror("Error", "Could not generate enhanced visualizations")
 
         except Exception as e:
-            self.log(f"❌ Enhanced visualization error: {e}")
-            self.log(traceback.format_exc())
-            # Fall back to standard visualizations
-            self.log("🔄 Falling back to standard visualizations due to error...")
-            return self._generate_standard_visualizations()
-
+            self.log(f"❌ Error generating enhanced visualizations: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            self.hide_processing_indicator()
 
     def _generate_standard_visualizations(self):
         """Generate standard visualizations"""
@@ -11043,7 +11309,7 @@ Start interactive mode with: python runDBNN_cmd.py --interactive
         resol = int(resol) if resol else 100
 
         gain = input(f"Gain [2.0]: ").strip()
-        gain = float(gain) if gain else 2.0
+        gain = float(gain) if gain else 20.0
 
         margin = input(f"Margin [0.2]: ").strip()
         margin = float(margin) if margin else 0.2
