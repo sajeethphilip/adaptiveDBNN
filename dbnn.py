@@ -1514,7 +1514,6 @@ class DBNNCore:
             bool: Success status
         """
         try:
-            # Implementation from original class
             # Ensure all required fields are set
             if not hasattr(self, 'innodes') or self.innodes is None:
                 # Try to infer from array shapes
@@ -1523,12 +1522,83 @@ class DBNNCore:
                 else:
                     self.innodes = 0
 
-            # ... rest of save_model implementation from original class
+            # Create model data dictionary
+            model_data = {
+                'config': self.config,
+                'innodes': self.innodes,
+                'outnodes': self.outnodes,
+                'is_trained': self.is_trained,
+                'memory_optimized': self.memory_optimized,
+                'disk_backed_training': self.disk_backed_training,
+                'training_mode': 'tensor' if self.tensor_mode else 'standard',
+                'arrays_format': 'numpy'
+            }
+
+            # Add feature configuration if available
+            if feature_columns is not None:
+                model_data['feature_columns'] = feature_columns
+            elif hasattr(self, 'feature_columns'):
+                model_data['feature_columns'] = self.feature_columns
+
+            if target_column is not None:
+                model_data['target_column'] = target_column
+            elif hasattr(self, 'target_column'):
+                model_data['target_column'] = self.target_column
+
+            # Add performance metrics if available
+            if hasattr(self, 'best_accuracy'):
+                model_data['best_accuracy'] = self.best_accuracy
+            if hasattr(self, 'best_round'):
+                model_data['best_round'] = self.best_round
+
+            # Add class encoder information
+            if hasattr(self, 'class_encoder') and self.class_encoder.is_fitted:
+                model_data['class_encoder'] = {
+                    'class_to_encoded': self.class_encoder.class_to_encoded,
+                    'encoded_to_class': {str(k): v for k, v in self.class_encoder.encoded_to_class.items()},
+                    'original_dtype': self.class_encoder.original_dtype
+                }
+
+            # Add numpy arrays
+            array_fields = ['anti_net', 'anti_wts', 'binloc', 'max_val', 'min_val', 'class_labels', 'resolution_arr']
+            for field in array_fields:
+                if hasattr(self, field) and getattr(self, field) is not None:
+                    model_data[field] = getattr(self, field)
+
+            # Add tensor arrays if in tensor mode
+            if self.tensor_mode and hasattr(self, 'tensor_core') and self.tensor_core is not None:
+                tensor_arrays = {}
+                tensor_fields = ['tensor_weights', 'tensor_biases', 'feature_embeddings', 'class_embeddings']
+                for field in tensor_fields:
+                    if hasattr(self.tensor_core, field) and getattr(self.tensor_core, field) is not None:
+                        tensor_arrays[field] = getattr(self.tensor_core, field)
+                model_data['tensor_arrays'] = tensor_arrays
+
+            # Save based on format
+            if use_json:
+                # Convert numpy arrays to lists for JSON
+                for key, value in model_data.items():
+                    if isinstance(value, np.ndarray):
+                        model_data[key] = value.tolist()
+
+                with open(model_path, 'w') as f:
+                    json.dump(model_data, f, indent=2)
+            else:
+                # Binary format with gzip compression
+                with gzip.open(model_path, 'wb') as f:
+                    pickle.dump(model_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+
             self.log(f"Model saved to: {model_path}")
+            self.log(f"Model info: {self.innodes} inputs, {self.outnodes} outputs")
+            if hasattr(self, 'best_accuracy'):
+                self.log(f"Best accuracy: {self.best_accuracy:.2f}%")
+
             return True
 
         except Exception as e:
             self.log(f"Error saving model: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
     def load_model(self, model_path: str):
@@ -2752,8 +2822,9 @@ class DBNNCore:
             timestamp = time.strftime("%Y%m%d_%H%M%S")
             model_filename = os.path.join(model_dir, f"{base_name}_{timestamp}_model.bin")
 
-            # Store additional metadata
-            model_metadata = {
+            # Store additional metadata in the model data itself (not as separate parameter)
+            # We'll modify the model data to include metadata
+            model_data = {
                 'data_file': data_filename,
                 'feature_columns': feature_columns if feature_columns else [],
                 'target_column': target_column if target_column else "",
@@ -2768,23 +2839,22 @@ class DBNNCore:
                 'disk_backed_training': self.disk_backed_training
             }
 
-            # Use core's save method but enhance with metadata
+            # Use core's save method but enhance with metadata by including it in the model data
             success = self.save_model(
                 model_filename,
                 feature_columns=feature_columns,
                 target_column=target_column,
-                use_json=False,  # Always binary format for auto-save
-                metadata=model_metadata
+                use_json=False  # Always binary format for auto-save
             )
 
             if success:
-                # Save additional metadata separately
+                # Save additional metadata separately as well (for easy access)
                 meta_filename = model_filename.replace('.bin', '_meta.json')
                 with open(meta_filename, 'w') as f:
-                    json.dump(model_metadata, f, indent=2)
+                    json.dump(model_data, f, indent=2)
 
                 self.log(f"✅ Model automatically saved: {model_filename}")
-                self.log(f"   Best accuracy: {model_metadata['best_accuracy']:.2f}% at round {model_metadata['best_round']}")
+                self.log(f"   Best accuracy: {model_data['best_accuracy']:.2f}% at round {model_data['best_round']}")
                 self.log(f"   Metadata: {meta_filename}")
                 self.log(f"   Configuration: {len(self.config)} parameters embedded")
 
@@ -2798,6 +2868,79 @@ class DBNNCore:
             import traceback
             traceback.print_exc()
             return None
+
+    def _enable_interactive_visualization_internal(self, capture_interval=5):
+        """
+        Internal method to enable interactive visualization during training.
+        This is the CLI version of the GUI method.
+
+        Args:
+            capture_interval: How often to capture snapshots
+        """
+        if not hasattr(self, 'visualizer') or self.visualizer is None:
+            self.visualizer = DBNNVisualizer()
+            self.log("✅ Visualizer attached for interactive visualization")
+
+        def _capture_interactive_snapshot(features_batches, encoded_targets_batches, iteration):
+            """Capture feature space snapshot for interactive visualization"""
+            try:
+                # Only capture at specified intervals to reduce overhead
+                if iteration % capture_interval != 0:
+                    return
+
+                # Sample data for visualization (limit for performance)
+                all_features = np.vstack(features_batches)
+                all_targets = np.concatenate(encoded_targets_batches)
+
+                # Use smaller sample for performance
+                sample_size = min(500, len(all_features))
+                if len(all_features) > sample_size:
+                    indices = np.random.choice(len(all_features), sample_size, replace=False)
+                    sample_features = all_features[indices]
+                    sample_targets = all_targets[indices]
+                else:
+                    sample_features = all_features
+                    sample_targets = all_targets
+
+                sample_predictions, _ = self.predict_batch(sample_features)
+
+                # Get feature names
+                feature_names = getattr(self, 'feature_columns', None)
+                if feature_names is None:
+                    feature_names = [f'Feature_{i+1}' for i in range(sample_features.shape[1])]
+
+                # Get class names from encoder
+                class_names = []
+                if hasattr(self, 'class_encoder') and self.class_encoder.is_fitted:
+                    encoded_classes = sorted(self.class_encoder.encoded_to_class.keys())
+                    for encoded_val in encoded_classes:
+                        class_name = self.class_encoder.encoded_to_class.get(encoded_val, f'Class_{encoded_val}')
+                        class_names.append(str(class_name))
+                else:
+                    unique_targets = np.unique(sample_targets)
+                    class_names = [f'Class_{int(t)}' for t in unique_targets]
+
+                # Capture the snapshot
+                if hasattr(self, 'visualizer') and self.visualizer:
+                    if hasattr(self.visualizer, 'capture_feature_space_snapshot'):
+                        self.visualizer.capture_feature_space_snapshot(
+                            sample_features, sample_targets, sample_predictions,
+                            iteration, feature_names, class_names
+                        )
+
+                        if iteration % 10 == 0:  # Log every 10 iterations to avoid spam
+                            accuracy = np.mean(sample_predictions == sample_targets) * 100
+                            self.log(f"📊 Captured feature space snapshot at iteration {iteration} (Accuracy: {accuracy:.1f}%)")
+
+            except Exception as e:
+                # Don't crash training if visualization fails
+                if iteration % 10 == 0:  # Only log occasionally
+                    self.log(f"⚠️ Interactive visualization snapshot failed: {e}")
+
+        # Store the capture method for use during training
+        self._capture_interactive_snapshot = _capture_interactive_snapshot
+
+        self.log(f"✅ Interactive visualization enabled (capturing every {capture_interval} iterations)")
 
 class DiskCacheManager:
     """
