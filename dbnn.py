@@ -1810,22 +1810,6 @@ model learns to separate different classes over time.
             )
 
             # Add factual explanation
-            fig.add_annotation(
-                text="🎓 <b>Factual Tensor Space Representation</b><br>"
-                     "• Each point = One data item's feature tensor in complex space<br>"
-                     "• Tensor = 5D structure: (feature_i, bin_j, feature_k, bin_l, class)<br>"
-                     "• Colors = Different object classes<br>"
-                     "• Diamonds = Class centroids (average tensor directions)<br>"
-                     "• Lines = Primary tensor directions for each class<br>"
-                     "• Orthogonality = Different colors point in different directions",
-                xref="paper", yref="paper",
-                x=0.02, y=0.02,
-                showarrow=False,
-                bgcolor="lightyellow",
-                bordercolor="black",
-                borderwidth=2,
-                font=dict(size=11)
-            )
 
             import os
             os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
@@ -2698,184 +2682,6 @@ model learns to separate different classes over time.
         except Exception as e:
             print(f"Error calculating feature alignment: {e}")
             return {}
-
-    def generate_interactive_visualizations(self, output_dir="Visualisations"):
-        """Generate all interactive visualizations with proper database-specific folder organization"""
-        # Create general help window
-        help_content = """
-🎓 DBNN Interactive Visualizations
-
-This will generate a comprehensive suite of visualizations
-showing your model's training evolution and performance.
-
-Visualizations Include:
-• 3D Feature Space - Interactive 3D plots
-• Circular Tensor Evolution - Circular coordinate space
-• Polar Tensor Evolution - Polar coordinate space
-• Confusion Matrix - Classification performance
-• Performance Metrics - Training progress
-• Complex Phase Diagrams - Feature relationships
-
-All visualizations will be saved in organized folders
-based on your dataset name and can be opened in any
-web browser for interactive exploration.
-"""
-        help_window = self.create_help_window("Interactive Visualizations", help_content, width=500, height=400)
-
-
-        if not hasattr(self, 'visualizer') or not self.visualizer:
-            print("❌ No visualizer available. Please enable enhanced visualization before training.")
-            return None
-
-        # Check if we have any visualization data
-        has_data = (hasattr(self.visualizer, 'training_history') and self.visualizer.training_history) or \
-                   (hasattr(self.visualizer, 'feature_space_snapshots') and self.visualizer.feature_space_snapshots) or \
-                   (hasattr(self.visualizer, 'accuracy_progression') and self.visualizer.accuracy_progression)
-
-        if not has_data:
-            print("❌ No visualization data available.")
-            print("   Enable with enable_enhanced_visualization() before training")
-            return None
-
-        try:
-            import os
-
-            # AUTO-DETERMINE DATABASE NAME
-            db_name = "dbnn_training"
-            if hasattr(self, 'core') and hasattr(self.core, 'current_file') and self.core.current_file:
-                db_name = os.path.splitext(os.path.basename(self.core.current_file))[0]
-            elif hasattr(self, 'current_file') and self.current_file:
-                db_name = os.path.splitext(os.path.basename(self.current_file))[0]
-
-            # Create database-specific folder structure
-            main_viz_dir = os.path.join(output_dir, db_name)
-            standard_dir = os.path.join(main_viz_dir, "Standard")
-            enhanced_dir = os.path.join(main_viz_dir, "Enhanced")
-            tensor_dir = os.path.join(main_viz_dir, "Tensor")
-
-            os.makedirs(standard_dir, exist_ok=True)
-            os.makedirs(enhanced_dir, exist_ok=True)
-            os.makedirs(tensor_dir, exist_ok=True)
-
-            # Store the main visualization directory for easy access
-            self.main_viz_directory = main_viz_dir
-
-            print(f"📁 Creating visualizations in database folder: {main_viz_dir}")
-            print(f"   Dataset: {db_name}")
-
-            outputs = {}
-
-            # 1. Generate ENHANCED visualizations in database folder
-            print("🔄 Generating enhanced visualizations...")
-
-            enhanced_viz_methods = [
-                ('enhanced_3d', self.visualizer.generate_enhanced_interactive_3d),
-                ('circular_tensor', self.visualizer.generate_circular_tensor_evolution),
-                ('fullscreen_circular', self.visualizer.generate_fullscreen_circular_visualization),
-                ('polar_tensor', self.visualizer.generate_polar_tensor_evolution),
-                ('advanced_dashboard', self.visualizer.create_advanced_interactive_dashboard),
-                ('complex_tensor', self.visualizer.generate_complex_tensor_evolution),
-                ('phase_diagram', self.visualizer.generate_complex_phase_diagram),
-                ('feature_orthogonality', self.visualizer.generate_feature_orthogonality_plot),
-                ('class_separation', self.visualizer.generate_class_separation_evolution),
-                ('actual_tensor_space', self.visualizer.generate_actual_tensor_visualization),
-                ('confusion_animation', self.visualizer.generate_animated_confusion_matrix)
-            ]
-
-            for name, method in enhanced_viz_methods:
-                output_file = os.path.join(enhanced_dir, f"{db_name}_{name}.html")
-                try:
-                    # For methods that accept output_file parameter
-                    result = method(output_file) if name in ['polar_tensor', 'confusion_animation'] else method(output_file)
-                    if result:
-                        outputs[name] = result
-                        print(f"✅ {name.replace('_', ' ').title()}: {os.path.basename(result)}")
-                    else:
-                        print(f"❌ Failed to generate {name}")
-                except Exception as e:
-                    print(f"❌ Error generating {name}: {e}")
-
-            # 2. Generate STANDARD visualizations in database folder
-            print("🔄 Generating standard visualizations...")
-
-            standard_viz_methods = [
-                ('traditional_dashboard', self.visualizer.create_training_dashboard),
-                ('performance', self.visualizer.generate_performance_metrics),
-                ('correlation', self.visualizer.generate_correlation_matrix),
-                ('feature_explorer', self.visualizer.generate_basic_3d_visualization),
-                ('animated_training', self.visualizer.generate_animated_training),
-            ]
-
-            for name, method in standard_viz_methods:
-                output_file = os.path.join(standard_dir, f"{db_name}_{name}.html")
-                try:
-                    result = method(output_file)
-                    if result:
-                        outputs[name] = result
-                        print(f"✅ {name.replace('_', ' ').title()}: {os.path.basename(result)}")
-                    else:
-                        print(f"❌ Failed to generate {name}")
-                except Exception as e:
-                    print(f"❌ Error generating {name}: {e}")
-
-            # 3. Generate TENSOR visualizations in database folder
-            print("🔄 Generating tensor space visualizations...")
-
-            tensor_viz_methods = [
-                ('tensor_convergence', self.visualizer.generate_tensor_convergence_plot),
-                ('tensor_phase_diagram', self.visualizer.generate_complex_phase_diagram),
-                ('tensor_orthogonality', self.visualizer.generate_feature_orthogonality_plot)
-            ]
-
-            for name, method in tensor_viz_methods:
-                output_file = os.path.join(tensor_dir, f"{db_name}_{name}.html")
-                try:
-                    result = method(output_file)
-                    if result:
-                        outputs[name] = result
-                        print(f"✅ {name.replace('_', ' ').title()}: {os.path.basename(result)}")
-                    else:
-                        print(f"❌ Failed to generate {name}")
-                except Exception as e:
-                    print(f"❌ Error generating {name}: {e}")
-
-            # Generate summary
-            successful = len(outputs)
-            total_attempted = len(enhanced_viz_methods) + len(standard_viz_methods) + len(tensor_viz_methods)
-            print(f"📊 Visualization Summary: {successful}/{total_attempted} successful")
-
-            if successful == 0:
-                print("💡 Tips to get visualizations working:")
-                print("   - Enable enhanced visualization before training")
-                print("   - Ensure you have plotly installed: pip install plotly")
-                print("   - Train for multiple iterations to capture evolution")
-                print("   - Make sure you have sufficient features (at least 2-3)")
-            else:
-                print(f"🎉 Successfully generated {successful} visualizations!")
-                print(f"📂 All files saved in database folder: {main_viz_dir}")
-
-                # List generated files by category
-                print("\n📋 Generated Files by Category:")
-                categories = {
-                    'Enhanced': [k for k in outputs.keys() if k in [m[0] for m in enhanced_viz_methods]],
-                    'Standard': [k for k in outputs.keys() if k in [m[0] for m in standard_viz_methods]],
-                    'Tensor': [k for k in outputs.keys() if k in [m[0] for m in tensor_viz_methods]]
-                }
-
-                for category, files in categories.items():
-                    if files:
-                        print(f"   📁 {category}:")
-                        for file in files:
-                            file_path = outputs[file]
-                            print(f"      📄 {os.path.basename(file_path)}")
-
-            return outputs
-
-        except Exception as e:
-            print(f"❌ Error generating visualizations: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
 
     def generate_interactive_3d_visualization(self, output_file="interactive_3d_visualization.html"):
         """
@@ -6580,6 +6386,183 @@ class DBNNCore:
 
         return all_predictions, all_probabilities
 
+    def generate_interactive_visualizations(self, output_dir="Visualisations"):
+        """Generate all interactive visualizations with proper database-specific folder organization"""
+        # Create general help window
+        help_content = """
+🎓 DBNN Interactive Visualizations
+
+This will generate a comprehensive suite of visualizations
+showing your model's training evolution and performance.
+
+Visualizations Include:
+• 3D Feature Space - Interactive 3D plots
+• Circular Tensor Evolution - Circular coordinate space
+• Polar Tensor Evolution - Polar coordinate space
+• Confusion Matrix - Classification performance
+• Performance Metrics - Training progress
+• Complex Phase Diagrams - Feature relationships
+
+All visualizations will be saved in organized folders
+based on your dataset name and can be opened in any
+web browser for interactive exploration.
+"""
+        help_window = self.create_help_window("Interactive Visualizations", help_content, width=500, height=400)
+
+
+        if not hasattr(self, 'visualizer') or not self.visualizer:
+            print("❌ No visualizer available. Please enable enhanced visualization before training.")
+            return None
+
+        # Check if we have any visualization data
+        has_data = (hasattr(self.visualizer, 'training_history') and self.visualizer.training_history) or \
+                   (hasattr(self.visualizer, 'feature_space_snapshots') and self.visualizer.feature_space_snapshots) or \
+                   (hasattr(self.visualizer, 'accuracy_progression') and self.visualizer.accuracy_progression)
+
+        if not has_data:
+            print("❌ No visualization data available.")
+            print("   Enable with enable_enhanced_visualization() before training")
+            return None
+
+        try:
+            import os
+
+            # AUTO-DETERMINE DATABASE NAME
+            db_name = "dbnn_training"
+            if hasattr(self, 'core') and hasattr(self.core, 'current_file') and self.core.current_file:
+                db_name = os.path.splitext(os.path.basename(self.core.current_file))[0]
+            elif hasattr(self, 'current_file') and self.current_file:
+                db_name = os.path.splitext(os.path.basename(self.current_file))[0]
+
+            # Create database-specific folder structure
+            main_viz_dir = os.path.join(output_dir, db_name)
+            standard_dir = os.path.join(main_viz_dir, "Standard")
+            enhanced_dir = os.path.join(main_viz_dir, "Enhanced")
+            tensor_dir = os.path.join(main_viz_dir, "Tensor")
+
+            os.makedirs(standard_dir, exist_ok=True)
+            os.makedirs(enhanced_dir, exist_ok=True)
+            os.makedirs(tensor_dir, exist_ok=True)
+
+            # Store the main visualization directory for easy access
+            self.main_viz_directory = main_viz_dir
+
+            print(f"📁 Creating visualizations in database folder: {main_viz_dir}")
+            print(f"   Dataset: {db_name}")
+
+            outputs = {}
+
+            # 1. Generate ENHANCED visualizations in database folder
+            print("🔄 Generating enhanced visualizations...")
+
+            enhanced_viz_methods = [
+                ('enhanced_3d', self.visualizer.generate_enhanced_interactive_3d),
+                ('circular_tensor', self.visualizer.generate_circular_tensor_evolution),
+                ('fullscreen_circular', self.visualizer.generate_fullscreen_circular_visualization),
+                ('polar_tensor', self.visualizer.generate_polar_tensor_evolution),
+                ('advanced_dashboard', self.visualizer.create_advanced_interactive_dashboard),
+                ('complex_tensor', self.visualizer.generate_complex_tensor_evolution),
+                ('phase_diagram', self.visualizer.generate_complex_phase_diagram),
+                ('feature_orthogonality', self.visualizer.generate_feature_orthogonality_plot),
+                ('class_separation', self.visualizer.generate_class_separation_evolution),
+                ('actual_tensor_space', self.visualizer.generate_actual_tensor_visualization),
+                ('confusion_animation', self.visualizer.generate_animated_confusion_matrix)
+            ]
+
+            for name, method in enhanced_viz_methods:
+                output_file = os.path.join(enhanced_dir, f"{db_name}_{name}.html")
+                try:
+                    # For methods that accept output_file parameter
+                    result = method(output_file) if name in ['polar_tensor', 'confusion_animation'] else method(output_file)
+                    if result:
+                        outputs[name] = result
+                        print(f"✅ {name.replace('_', ' ').title()}: {os.path.basename(result)}")
+                    else:
+                        print(f"❌ Failed to generate {name}")
+                except Exception as e:
+                    print(f"❌ Error generating {name}: {e}")
+
+            # 2. Generate STANDARD visualizations in database folder
+            print("🔄 Generating standard visualizations...")
+
+            standard_viz_methods = [
+                ('traditional_dashboard', self.visualizer.create_training_dashboard),
+                ('performance', self.visualizer.generate_performance_metrics),
+                ('correlation', self.visualizer.generate_correlation_matrix),
+                ('feature_explorer', self.visualizer.generate_basic_3d_visualization),
+                ('animated_training', self.visualizer.generate_animated_training),
+            ]
+
+            for name, method in standard_viz_methods:
+                output_file = os.path.join(standard_dir, f"{db_name}_{name}.html")
+                try:
+                    result = method(output_file)
+                    if result:
+                        outputs[name] = result
+                        print(f"✅ {name.replace('_', ' ').title()}: {os.path.basename(result)}")
+                    else:
+                        print(f"❌ Failed to generate {name}")
+                except Exception as e:
+                    print(f"❌ Error generating {name}: {e}")
+
+            # 3. Generate TENSOR visualizations in database folder
+            print("🔄 Generating tensor space visualizations...")
+
+            tensor_viz_methods = [
+                ('tensor_convergence', self.visualizer.generate_tensor_convergence_plot),
+                ('tensor_phase_diagram', self.visualizer.generate_complex_phase_diagram),
+                ('tensor_orthogonality', self.visualizer.generate_feature_orthogonality_plot)
+            ]
+
+            for name, method in tensor_viz_methods:
+                output_file = os.path.join(tensor_dir, f"{db_name}_{name}.html")
+                try:
+                    result = method(output_file)
+                    if result:
+                        outputs[name] = result
+                        print(f"✅ {name.replace('_', ' ').title()}: {os.path.basename(result)}")
+                    else:
+                        print(f"❌ Failed to generate {name}")
+                except Exception as e:
+                    print(f"❌ Error generating {name}: {e}")
+
+            # Generate summary
+            successful = len(outputs)
+            total_attempted = len(enhanced_viz_methods) + len(standard_viz_methods) + len(tensor_viz_methods)
+            print(f"📊 Visualization Summary: {successful}/{total_attempted} successful")
+
+            if successful == 0:
+                print("💡 Tips to get visualizations working:")
+                print("   - Enable enhanced visualization before training")
+                print("   - Ensure you have plotly installed: pip install plotly")
+                print("   - Train for multiple iterations to capture evolution")
+                print("   - Make sure you have sufficient features (at least 2-3)")
+            else:
+                print(f"🎉 Successfully generated {successful} visualizations!")
+                print(f"📂 All files saved in database folder: {main_viz_dir}")
+
+                # List generated files by category
+                print("\n📋 Generated Files by Category:")
+                categories = {
+                    'Enhanced': [k for k in outputs.keys() if k in [m[0] for m in enhanced_viz_methods]],
+                    'Standard': [k for k in outputs.keys() if k in [m[0] for m in standard_viz_methods]],
+                    'Tensor': [k for k in outputs.keys() if k in [m[0] for m in tensor_viz_methods]]
+                }
+
+                for category, files in categories.items():
+                    if files:
+                        print(f"   📁 {category}:")
+                        for file in files:
+                            file_path = outputs[file]
+                            print(f"      📄 {os.path.basename(file_path)}")
+
+            return outputs
+
+        except Exception as e:
+            print(f"❌ Error generating visualizations: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     def _train_batch_parallel(self, features_batch, targets_batch, gain: float, batch_idx: int):
         """Train a single batch in parallel (thread-safe)"""
