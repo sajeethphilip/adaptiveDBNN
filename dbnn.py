@@ -184,6 +184,63 @@ def find_closest_bin_numba(value, binloc_row, resolution_val):
         best_bin -= 1
     return best_bin
 
+# =========================================================================
+# HELP MANAGEMENT SYSTEM
+# =========================================================================
+
+class HelpManager:
+    """Manages all help screens and ensures they close on button clicks"""
+
+    def __init__(self, gui):
+        self.gui = gui
+        self.help_windows = set()
+
+    def create_help_window(self, title, content, width=400, height=300):
+        """Create a standardized help window that auto-registers"""
+        # Hide existing help windows
+        self.hide_all_help()
+
+        # Create new help window
+        help_win = tk.Toplevel(self.gui.master)
+        help_win.title(f"{title} - Help")
+        help_win.geometry(f"{width}x{height}+100+100")
+        help_win.configure(bg='lightblue')
+        help_win.attributes('-topmost', True)
+        help_win.transient(self.gui.master)
+
+        # Register this window
+        self.help_windows.add(help_win)
+
+        # Bind destruction to remove from registry
+        help_win.bind('<Destroy>', lambda e: self.help_windows.discard(help_win))
+
+        # Content
+        help_label = tk.Label(help_win, text=content,
+                             justify=tk.LEFT, bg='lightblue',
+                             padx=10, pady=10, wraplength=width-20)
+        help_label.pack(expand=True, fill=tk.BOTH)
+
+        # Close button
+        close_btn = tk.Button(help_win, text="Close Help",
+                             command=help_win.destroy,
+                             bg='white', fg='blue')
+        close_btn.pack(pady=5)
+
+        # Auto-close after 12 seconds
+        help_win.after(12000, help_win.destroy)
+
+        return help_win
+
+    def hide_all_help(self):
+        """Hide all registered help windows"""
+        for window in list(self.help_windows):
+            try:
+                if window.winfo_exists():
+                    window.destroy()
+            except:
+                pass
+        self.help_windows.clear()
+
 class DBNNVisualizer:
     """
     Enhanced visualization class for DBNN with interactive 3D capabilities,
@@ -221,6 +278,208 @@ class DBNNVisualizer:
         self.feature_importance_data = []  # Feature importance metrics
         self.learning_curves = []  # Learning curve data
         self.network_topology_data = []  # Network structure information
+
+        # Help system initialization
+        self.help_windows = set()
+
+    # =========================================================================
+    # HELP SYSTEM METHODS
+    # =========================================================================
+
+    def create_help_window(self, title, content, width=400, height=300):
+        """Create a standardized help window for visualization explanations"""
+        # Hide existing help windows first
+        self.hide_all_help_windows()
+
+        try:
+            import tkinter as tk
+            from tkinter import ttk
+
+            # Create help window
+            help_win = tk.Toplevel()
+            help_win.title(f"{title} - Visualization Help")
+            help_win.geometry(f"{width}x{height}+100+100")
+            help_win.configure(bg='lightblue')
+            help_win.attributes('-topmost', True)
+
+            # Register this window
+            self.help_windows.add(help_win)
+
+            # Content frame
+            content_frame = ttk.Frame(help_win)
+            content_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+            # Help text
+            help_text = tk.Text(content_frame, wrap=tk.WORD, bg='lightyellow',
+                              font=('Arial', 10), padx=10, pady=10)
+            help_text.insert(tk.END, content)
+            help_text.config(state=tk.DISABLED)  # Make read-only
+            help_text.pack(fill=tk.BOTH, expand=True)
+
+            # Close button
+            close_btn = tk.Button(content_frame, text="Close Help",
+                                 command=help_win.destroy,
+                                 bg='white', fg='blue', font=('Arial', 9))
+            close_btn.pack(pady=5)
+
+            # Auto-close after 15 seconds
+            help_win.after(15000, help_win.destroy)
+
+            # Bind destruction to remove from registry
+            help_win.bind('<Destroy>', lambda e: self.help_windows.discard(help_win))
+
+            return help_win
+
+        except ImportError:
+            print("Tkinter not available for help windows")
+            return None
+
+    def hide_all_help_windows(self):
+        """Hide all registered help windows"""
+        for window in list(self.help_windows):
+            try:
+                if hasattr(window, 'winfo_exists') and window.winfo_exists():
+                    window.destroy()
+            except:
+                pass
+        self.help_windows.clear()
+
+    def get_visualization_help_content(self, viz_type):
+        """Get help content for different visualization types"""
+        help_contents = {
+            'circular_tensor': """
+🎓 Circular Tensor Evolution
+
+Shows how tensor orientations evolve during training
+in a circular coordinate space.
+
+• Each point represents a data sample's feature tensor
+• Colors indicate different classes
+• Angles show tensor directions in complex space
+• Radii show feature magnitudes/importance
+
+Watch as classes organize into distinct angular sectors
+as training progresses and the model learns to separate them.
+
+Interactive Features:
+• Play/Pause animation
+• Zoom and rotate view
+• Toggle class visibility
+• Manual iteration control
+""",
+            'polar_tensor': """
+🎓 Polar Tensor Evolution
+
+Displays tensor space transformation using polar coordinates.
+
+• Radial distance = Feature magnitude
+• Angular position = Feature direction
+• Colors = Different object classes
+• Animation = Training progression
+
+Observe how initially random tensor orientations
+gradually organize into well-separated class clusters.
+
+Controls:
+• Full rotation and zoom capability
+• Speed adjustment
+• Class filtering
+• Progress tracking
+""",
+            '3d_feature_space': """
+🎓 3D Feature Space Visualization
+
+Interactive 3D plot showing feature relationships and
+class separation in three dimensions.
+
+• X, Y, Z axes = Selected features
+• Colors = Class assignments
+• Marker size = Confidence level
+• Animation = Training evolution
+
+Use this to understand how your model transforms
+the feature space to separate different classes.
+
+Features:
+• Camera rotation and zoom
+• Feature axis selection
+• Class highlighting
+• Point inspection
+""",
+            'confusion_matrix': """
+🎓 Animated Confusion Matrix
+
+Shows how classification performance evolves during training.
+
+• Rows = True classes
+• Columns = Predicted classes
+• Color intensity = Classification probability
+• Diagonal = Correct classifications
+
+Watch as the matrix becomes more diagonal over time,
+indicating improving classification accuracy.
+
+Interactive Elements:
+• Play/Pause animation
+• Iteration slider
+• Hover for details
+• Accuracy tracking
+""",
+            'performance_metrics': """
+🎓 Performance Metrics Dashboard
+
+Comprehensive view of training progress and model performance.
+
+• Accuracy progression over time
+• Weight distribution analysis
+• Feature correlation patterns
+• Training summary statistics
+
+Monitor model convergence and identify potential
+issues like overfitting or underfitting.
+
+Metrics Shown:
+• Training accuracy history
+• Best achieved accuracy
+• Weight statistics
+• Feature relationships
+""",
+            'complex_phase': """
+🎓 Complex Phase Diagram
+
+Shows feature relationships in complex space using
+phase plots for different feature pairs.
+
+• Real/imaginary components = Complex features
+• Subplots = Different feature combinations
+• Colors = Class memberships
+• Patterns = Class separation boundaries
+
+Useful for understanding how complex feature
+transformations help with class separation.
+
+Analysis:
+• Feature correlation patterns
+• Class cluster formation
+• Separation boundary evolution
+"""
+        }
+
+        return help_contents.get(viz_type, """
+🎓 Visualization Help
+
+This interactive visualization shows the evolution
+of your DBNN model during training.
+
+Use the controls to:
+• Play/Pause the animation
+• Zoom and rotate the view
+• Hover for detailed information
+• Adjust speed and settings
+
+The visualization helps you understand how your
+model learns to separate different classes over time.
+""")
 
     # =========================================================================
     # CORE TRAINING DATA CAPTURE METHODS
@@ -376,6 +635,10 @@ class DBNNVisualizer:
 
     def generate_circular_tensor_evolution(self, output_file="circular_tensor_evolution_enhanced.html"):
         """Generate enhanced circular coordinate visualization with full width, rotation, and class controls"""
+        # Create help window for this visualization type
+        help_content = self.get_visualization_help_content('circular_tensor')
+        help_window = self.create_help_window("Circular Tensor Evolution", help_content)
+
         try:
             import plotly.graph_objects as go
             import plotly.express as px
@@ -1012,6 +1275,9 @@ class DBNNVisualizer:
 
     def generate_polar_tensor_evolution(self, output_file="polar_tensor_evolution.html"):
         """Generate polar coordinate visualization that scales to 100+ classes"""
+        # Create help window for this visualization type
+        help_content = self.get_visualization_help_content('polar_tensor')
+        help_window = self.create_help_window("Polar Tensor Evolution", help_content)
         try:
             import plotly.graph_objects as go
             import plotly.express as px
@@ -1575,6 +1841,9 @@ class DBNNVisualizer:
 
     def generate_animated_confusion_matrix(self, output_file="confusion_animation.html", frame_delay=500):
         """Generate animated confusion matrix showing evolution over training iterations"""
+        # Create help window for this visualization type
+        help_content = self.get_visualization_help_content('confusion_matrix')
+        help_window = self.create_help_window("Confusion Matrix Animation", help_content)
         try:
             import plotly.graph_objects as go
             import numpy as np
@@ -1984,6 +2253,9 @@ class DBNNVisualizer:
 
     def generate_complex_phase_diagram(self, output_file="complex_phase_diagram.html"):
         """Generate phase diagram showing feature vectors in complex space"""
+        # Create help window for this visualization type
+        help_content = self.get_visualization_help_content('complex_phase')
+        help_window = self.create_help_window("Complex Phase Diagram", help_content)
         try:
             import plotly.graph_objects as go
             import plotly.express as px
@@ -2429,6 +2701,28 @@ class DBNNVisualizer:
 
     def generate_interactive_visualizations(self, output_dir="Visualisations"):
         """Generate all interactive visualizations with proper database-specific folder organization"""
+        # Create general help window
+        help_content = """
+🎓 DBNN Interactive Visualizations
+
+This will generate a comprehensive suite of visualizations
+showing your model's training evolution and performance.
+
+Visualizations Include:
+• 3D Feature Space - Interactive 3D plots
+• Circular Tensor Evolution - Circular coordinate space
+• Polar Tensor Evolution - Polar coordinate space
+• Confusion Matrix - Classification performance
+• Performance Metrics - Training progress
+• Complex Phase Diagrams - Feature relationships
+
+All visualizations will be saved in organized folders
+based on your dataset name and can be opened in any
+web browser for interactive exploration.
+"""
+        help_window = self.create_help_window("Interactive Visualizations", help_content, width=500, height=400)
+
+
         if not hasattr(self, 'visualizer') or not self.visualizer:
             print("❌ No visualizer available. Please enable enhanced visualization before training.")
             return None
@@ -2740,6 +3034,10 @@ class DBNNVisualizer:
 
     def generate_performance_metrics(self, output_file="performance_metrics.html"):
         """Generate performance metrics visualization - FIXED VERSION"""
+        # Create help window for this visualization type
+        help_content = self.get_visualization_help_content('performance_metrics')
+        help_window = self.create_help_window("Performance Metrics", help_content)
+
         try:
             import plotly.graph_objects as go
             from plotly.subplots import make_subplots
@@ -4468,6 +4766,10 @@ class DBNNVisualizer:
 
     def generate_enhanced_interactive_3d(self, output_file="enhanced_3d_visualization.html"):
         """Generate enhanced 3D visualization with interactive controls - FIXED FEATURE NAMES"""
+        # Create help window for this visualization type
+        help_content = self.get_visualization_help_content('3d_feature_space')
+        help_window = self.create_help_window("3D Feature Space", help_content)
+
         try:
             import plotly.graph_objects as go
             import plotly.express as px
@@ -7427,16 +7729,9 @@ class EnhancedDBNNInterface:
                   command=self.visualize_tensor_space).pack(side='left', padx=2)
 
         # Updated tooltip for the tensor visualization button
-        self.create_tooltip(row3_frame,
-            "Tensor Space Visualization:\n"
-            "• NEW: Circular coordinate system (r, θ) with animation\n"
-            "• PREVIOUS: 3D complex space projections\n"
-            "• Shows tensor evolution from scattered to organized\n"
-            "• Each class aligns to distinct directions\n"
-            "• Demonstrates conditional independence progress\n"
-            "• Works with standard iterative training mode\n"
-            "• Requires Enhanced Visualization during training"
-        )
+        #self.create_tooltip(row3_frame,
+         #   ""
+        #)
 
         # Row 4 buttons - Configuration management
         row4_frame = ttk.Frame(button_frame)
@@ -7559,6 +7854,49 @@ class EnhancedDBNNInterface:
 
         except Exception as e:
             self.log(f"GUI refresh warning: {e}")
+
+    def hide_all_help_screens(self):
+        """Hide all help screens/tooltips when any button is clicked"""
+        help_widgets = [
+            getattr(self, attr) for attr in dir(self)
+            if hasattr(getattr(self, attr), 'winfo_exists') and
+               getattr(self, attr).winfo_exists() and
+               any(keyword in str(type(getattr(self, attr)).lower() for keyword in ['help', 'tooltip', 'info']))
+            ]
+
+        # Also check common help screen attribute names
+        common_help_attrs = ['help_window', 'tooltip_window', 'info_window', 'help_screen']
+        for attr in common_help_attrs:
+            if hasattr(self, attr) and hasattr(getattr(self, attr), 'winfo_exists') and getattr(self, attr).winfo_exists():
+                help_widgets.append(getattr(self, attr))
+
+        for widget in help_widgets:
+            try:
+                widget.destroy()
+            except:
+                pass  # Widget might already be destroyed
+
+    def bind_hide_help_to_buttons(self):
+        """Bind the hide_all_help_screens method to all interactive buttons"""
+        # List of button attributes to bind (add more as needed)
+        button_attrs = [
+            'btn_visualize_complex_space', 'btn_train_model', 'btn_load_model',
+            'btn_predict', 'btn_generate_viz', 'btn_advanced_viz',
+            'btn_tensor_viz', 'btn_performance_viz', 'btn_3d_viz',
+            'btn_circular_viz', 'btn_polar_viz', 'btn_confusion_viz',
+            'btn_export_results', 'btn_save_model', 'btn_load_data'
+        ]
+
+        for attr in button_attrs:
+            if hasattr(self, attr):
+                try:
+                    button = getattr(self, attr)
+                    # Remove existing bindings to avoid duplicates
+                    button.unbind('<Button-1>')
+                    # Add new binding that hides help screens first
+                    button.bind('<Button-1>', lambda e: self.hide_all_help_screens())
+                except Exception as e:
+                    print(f"Could not bind help hiding to {attr}: {e}")
 
     def open_visualization_folder(self):
         """Open the visualization folder for current data file"""
