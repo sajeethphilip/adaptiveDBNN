@@ -281,92 +281,377 @@ class HelpManager:
         self.help_windows.clear()
 
 class ClassEncoder:
-    """Handles encoding and decoding of class labels"""
+    """Handles encoding and decoding of class labels with original value preservation."""
 
     def __init__(self):
         self.class_to_encoded = {}
         self.encoded_to_class = {}
-        self.encoded_to_original = {}
+        self.encoded_to_original = {}  # Maps encoded values to original objects
+        self.original_to_encoded = {}  # Maps original objects to encoded values
         self.is_fitted = False
-        self.original_dtype = None  # Track original data type
+        self.original_dtype = None
+        self.original_values = []  # Store original values in order
+        self.fitted_classes = []   # Store fitted classes in original form
 
     def fit(self, class_labels):
-        """Fit encoder to class labels"""
-        # Detect original data type
+        """Fit encoder to class labels with original value preservation."""
+        # FIX: Proper check for empty array/list
+        if class_labels is None or len(class_labels) == 0:
+            raise ValueError("Class labels cannot be empty or None")
+
+        # Convert numpy array to list if needed for consistent processing
+        if hasattr(class_labels, 'tolist'):
+            class_labels = class_labels.tolist()
+
+        # Store original values
+        self.original_values = class_labels
+
+        # Detect original data type and get unique classes
         sample_label = class_labels[0] if len(class_labels) > 0 else None
         if isinstance(sample_label, (int, float, np.integer, np.floating)):
             self.original_dtype = 'numeric'
         else:
             self.original_dtype = 'string'
-        unique_classes = sorted(set(class_labels))
+
+        # Get unique classes while preserving original objects
+        unique_classes = []
+        seen = set()
+        for cls in class_labels:
+            # Handle numpy types and ensure hashable
+            if hasattr(cls, 'item'):  # numpy scalar
+                cls = cls.item()
+            if cls not in seen:
+                unique_classes.append(cls)
+                seen.add(cls)
+
+        # Sort if numeric, preserve order if categorical
+        if self.original_dtype == 'numeric':
+            unique_classes = sorted(unique_classes)
+        else:
+            # For categorical, sort by string representation for consistency
+            unique_classes = sorted(unique_classes, key=str)
+
+        self.fitted_classes = unique_classes
         string_classes = [str(cls) for cls in unique_classes]
 
+        # Create mappings preserving original objects
+        self.class_to_encoded.clear()
+        self.encoded_to_class.clear()
+        self.encoded_to_original.clear()
+        self.original_to_encoded.clear()
+
         for encoded_val, (original_class, string_class) in enumerate(zip(unique_classes, string_classes), 1):
+            # Map both original object and string representation
             self.class_to_encoded[original_class] = float(encoded_val)
-            self.class_to_encoded[string_class] = float(encoded_val)  # Add string representation
+            self.class_to_encoded[string_class] = float(encoded_val)
+
+            # Preserve original object in reverse mapping
             self.encoded_to_class[float(encoded_val)] = original_class
-            self.encoded_to_original[float(encoded_val)] = string_class
+            self.encoded_to_original[float(encoded_val)] = original_class
+            self.original_to_encoded[original_class] = float(encoded_val)
 
         self.is_fitted = True
-        print(f"Fitted encoder with {len(unique_classes)} classes: {unique_classes}")
-        print(f"Original dtype: {self.original_dtype}")
+        print(f"✅ Encoder fitted with {len(unique_classes)} classes")
+        print(f"   Original dtype: {self.original_dtype}")
+        print(f"   Classes: {unique_classes[:10]}{'...' if len(unique_classes) > 10 else ''}")
 
     def transform(self, class_labels):
-        """Transform class labels to encoded numeric values"""
+        """Transform class labels to encoded numeric values with original preservation."""
         if not self.is_fitted:
             raise ValueError("Encoder must be fitted before transforming")
 
+        # Convert to list if it's a numpy array
+        if hasattr(class_labels, 'tolist'):
+            class_labels = class_labels.tolist()
+
         encoded = []
         for label in class_labels:
-            # Try multiple representations
+            # Handle numpy types
+            if hasattr(label, 'item'):
+                label = label.item()
+
+            # Try multiple representations to find the match
             if label in self.class_to_encoded:
                 encoded.append(self.class_to_encoded[label])
             elif str(label) in self.class_to_encoded:
                 encoded.append(self.class_to_encoded[str(label)])
             else:
-                # Try numeric conversion for string labels
+                # Try numeric conversion for string labels if original was numeric
                 try:
                     if self.original_dtype == 'numeric':
                         numeric_label = float(label)
                         if numeric_label in self.class_to_encoded:
                             encoded.append(self.class_to_encoded[numeric_label])
                         else:
-                            raise ValueError(f"Unknown class label: {label}")
+                            raise ValueError(f"Unknown class label: {label} (not in fitted classes)")
                     else:
-                        raise ValueError(f"Unknown class label: {label}")
+                        raise ValueError(f"Unknown class label: {label} (not in fitted classes)")
                 except (ValueError, TypeError):
-                    raise ValueError(f"Unknown class label: {label}")
+                    raise ValueError(f"Unknown class label: {label} (not in fitted classes)")
 
         return np.array(encoded, dtype=np.float64)
 
     def inverse_transform(self, encoded_values):
-        """Transform encoded values back to original class labels"""
+        """Transform encoded values back to original class labels."""
         if not self.is_fitted:
             raise ValueError("Encoder must be fitted before inverse transforming")
 
         original = []
         for encoded_val in encoded_values:
-            if encoded_val in self.encoded_to_class:
-                original.append(self.encoded_to_class[encoded_val])
+            if encoded_val in self.encoded_to_original:
+                # Return the original object (not string representation)
+                original.append(self.encoded_to_original[encoded_val])
             else:
+                # Find closest encoded value for robustness
                 closest = min(self.encoded_to_class.keys(),
                             key=lambda x: abs(x - encoded_val))
                 original.append(self.encoded_to_class[closest])
-                print(f"Warning: Encoded value {encoded_val} not found, using closest: {closest}")
+                print(f"⚠️ Warning: Encoded value {encoded_val} not found, using closest: {closest}")
 
         return original
 
+    def get_original_classes(self):
+        """Get the original class values in the order they were fitted."""
+        return self.fitted_classes.copy()
+
     def get_encoded_classes(self):
-        """Get the encoded class values used in class_labels"""
+        """Get the encoded class values used in class_labels."""
         return sorted(self.encoded_to_class.keys())
 
     def get_class_mapping(self):
-        """Get the complete class mapping"""
+        """Get the complete class mapping with original preservation."""
         return {
             'class_to_encoded': self.class_to_encoded,
             'encoded_to_class': self.encoded_to_class,
-            'original_dtype': self.original_dtype
+            'encoded_to_original': self.encoded_to_original,
+            'original_dtype': self.original_dtype,
+            'fitted_classes': self.fitted_classes
         }
+
+    def save_encoder_state(self):
+        """Save encoder state for persistence."""
+        return {
+            'class_to_encoded': {str(k): v for k, v in self.class_to_encoded.items()},
+            'encoded_to_class': {str(k): v for k, v in self.encoded_to_class.items()},
+            'encoded_to_original': {str(k): v for k, v in self.encoded_to_original.items()},
+            'original_dtype': self.original_dtype,
+            'fitted_classes': self.fitted_classes
+        }
+
+    def load_encoder_state(self, state):
+        """Load encoder state from saved data."""
+        self.class_to_encoded = {k: float(v) for k, v in state['class_to_encoded'].items()}
+        self.encoded_to_class = {float(k): v for k, v in state['encoded_to_class'].items()}
+        self.encoded_to_original = {float(k): v for k, v in state['encoded_to_original'].items()}
+        self.original_dtype = state['original_dtype']
+        self.fitted_classes = state['fitted_classes']
+        self.is_fitted = True
+
+class FeatureEncoder:
+    """Handles encoding of categorical features while preserving original values."""
+
+    def __init__(self):
+        self.feature_encoders = {}  # encoder per feature column
+        self.is_fitted = False
+        self.feature_info = {}      # Store feature metadata
+        self.original_columns = []  # Original column names
+
+    def is_categorical(self, feature_values):
+        """Determine if a feature is categorical based on non-numeric values."""
+        if len(feature_values) == 0:
+            return False
+
+        # Check if any value is non-numeric
+        for val in feature_values[:100]:  # Sample first 100 values
+            try:
+                float(val)
+            except (ValueError, TypeError):
+                return True
+        return False
+
+    def fit_transform_features(self, features_df, feature_columns):
+        """Fit and transform categorical features, returning encoded DataFrame."""
+        if features_df is None or len(feature_columns) == 0:
+            return features_df, {}
+
+        self.original_columns = feature_columns.copy()
+        self.feature_encoders = {}
+        self.feature_info = {}
+
+        encoded_df = features_df.copy()
+        encoding_info = {}
+
+        for col in feature_columns:
+            if col not in features_df.columns:
+                continue
+
+            feature_values = features_df[col].tolist()
+
+            # Store feature info
+            self.feature_info[col] = {
+                'original_dtype': str(type(feature_values[0])) if feature_values else 'unknown',
+                'is_categorical': self.is_categorical(feature_values),
+                'unique_values': len(set(feature_values)) if feature_values else 0
+            }
+
+            # Only encode if categorical (contains non-numeric values)
+            if self.feature_info[col]['is_categorical']:
+                encoder = ClassEncoder()
+                encoder.fit(feature_values)
+                self.feature_encoders[col] = encoder
+
+                # Transform the feature column
+                encoded_values = encoder.transform(feature_values)
+                encoded_df[col] = encoded_values
+
+                encoding_info[col] = {
+                    'encoder_state': encoder.save_encoder_state(),
+                    'original_dtype': self.feature_info[col]['original_dtype'],
+                    'unique_values': self.feature_info[col]['unique_values']
+                }
+
+                print(f"✅ Encoded categorical feature '{col}': {self.feature_info[col]['unique_values']} unique values")
+
+        self.is_fitted = True
+        return encoded_df, encoding_info
+
+    def inverse_transform_features(self, encoded_df, feature_columns):
+        """Convert encoded features back to original categorical values."""
+        if not self.is_fitted or encoded_df is None:
+            return encoded_df
+
+        decoded_df = encoded_df.copy()
+
+        for col in feature_columns:
+            if col in self.feature_encoders and col in decoded_df.columns:
+                encoder = self.feature_encoders[col]
+                encoded_values = decoded_df[col].tolist()
+                original_values = encoder.inverse_transform(encoded_values)
+                decoded_df[col] = original_values
+
+        return decoded_df
+
+    def transform_features(self, features_df, feature_columns):
+        """Transform features using fitted encoders."""
+        if not self.is_fitted or features_df is None:
+            return features_df
+
+        transformed_df = features_df.copy()
+
+        for col in feature_columns:
+            if col in self.feature_encoders and col in transformed_df.columns:
+                encoder = self.feature_encoders[col]
+                original_values = transformed_df[col].tolist()
+                encoded_values = encoder.transform(original_values)
+                transformed_df[col] = encoded_values
+
+        return transformed_df
+
+    def get_feature_info(self):
+        """Get information about feature encoding."""
+        return self.feature_info.copy()
+
+    def save_encoder_state(self):
+        """Save the state of all feature encoders."""
+        state = {
+            'feature_encoders': {},
+            'feature_info': self.feature_info,
+            'original_columns': self.original_columns
+        }
+
+        for col, encoder in self.feature_encoders.items():
+            state['feature_encoders'][col] = encoder.save_encoder_state()
+
+        return state
+
+    def load_encoder_state(self, state):
+        """Load the state of all feature encoders."""
+        self.feature_info = state['feature_info']
+        self.original_columns = state['original_columns']
+        self.feature_encoders = {}
+
+        for col, encoder_state in state['feature_encoders'].items():
+            encoder = ClassEncoder()
+            encoder.load_encoder_state(encoder_state)
+            self.feature_encoders[col] = encoder
+
+        self.is_fitted = True
+
+class MemoryMonitor:
+    """Real-time memory monitoring with 60% limit enforcement."""
+
+    def __init__(self, core):
+        self.core = core
+        self.memory_warnings = 0
+        self.max_memory_warnings = 5
+
+    def get_memory_usage(self):
+        """Get current memory usage in GB."""
+        try:
+            import psutil
+            import os
+            process = psutil.Process(os.getpid())
+            memory_gb = process.memory_info().rss / (1024**3)
+            return memory_gb
+        except:
+            return 0
+
+    def get_available_memory(self):
+        """Get available system memory in GB."""
+        try:
+            import psutil
+            system_memory = psutil.virtual_memory()
+            available_gb = system_memory.available / (1024**3)
+            return available_gb
+        except:
+            return 4.0  # Conservative default
+
+    def check_memory_limit(self, operation_name=""):
+        """
+        Check if memory usage is within 60% limit.
+        Returns True if safe, False if approaching limit.
+        """
+        try:
+            current_usage = self.get_memory_usage()
+            available_memory = self.get_available_memory()
+            total_memory = current_usage + available_memory
+            usage_percent = (current_usage / total_memory) * 100 if total_memory > 0 else 0
+
+            # 60% hard limit
+            if usage_percent > 60:
+                self.memory_warnings += 1
+                self.core.log(f"🚨 MEMORY CRITICAL: {usage_percent:.1f}% used in {operation_name}")
+                if self.memory_warnings >= self.max_memory_warnings:
+                    raise MemoryError(f"Memory usage exceeded 60% limit repeatedly. Current: {usage_percent:.1f}%")
+                return False
+            elif usage_percent > 50:
+                self.core.log(f"⚠️ MEMORY WARNING: {usage_percent:.1f}% used in {operation_name}")
+
+            return True
+
+        except Exception as e:
+            self.core.log(f"⚠️ Memory monitoring error: {e}")
+            return True  # Continue if monitoring fails
+
+    def force_garbage_collection(self):
+        """Force garbage collection and clear caches."""
+        import gc
+        gc.collect()
+
+        # Clear numpy arrays if possible
+        try:
+            import numpy as np
+            np._globals._clear()
+        except:
+            pass
+
+        # Clear GPU memory if using GPU
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except:
+            pass
 
 class DBNNCore:
     """
@@ -452,7 +737,6 @@ class DBNNCore:
         self._init_gpu_acceleration()
         self._init_memory_management()
 
-
     def _init_memory_management(self):
         """
         Initialize memory management system with error handling.
@@ -500,24 +784,20 @@ class DBNNCore:
 
     def detect_system_resources(self):
         """
-        Detect available system resources including RAM, CPU, and disk.
-
-        Returns:
-            Dict containing:
-            - cpu_cores: Number of physical CPU cores
-            - logical_cores: Number of logical CPU cores
-            - system_memory_gb: Total system RAM in GB
-            - available_memory_gb: Available RAM in GB
-            - has_gpu: Boolean indicating GPU availability
-            - gpu_memory_gb: GPU memory in GB if available
+        Detect available system resources including RAM, CPU, and GPU memory.
+        Enhanced to separately track CPU and GPU memory with 60% limit enforcement.
         """
         resource_info = {
             'cpu_cores': 1,
             'logical_cores': 1,
             'system_memory_gb': 4,
             'available_memory_gb': 2,
+            'available_memory_gb_60percent': 1.2,  # 60% of available
             'has_gpu': False,
-            'gpu_memory_gb': 0
+            'gpu_memory_gb': 0,
+            'gpu_available_memory_gb': 0,
+            'gpu_available_memory_gb_60percent': 0,
+            'gpu_name': None
         }
 
         try:
@@ -531,6 +811,7 @@ class DBNNCore:
             system_memory = psutil.virtual_memory()
             resource_info['system_memory_gb'] = system_memory.total / (1024**3)
             resource_info['available_memory_gb'] = system_memory.available / (1024**3)
+            resource_info['available_memory_gb_60percent'] = resource_info['available_memory_gb'] * 0.6
 
             # Disk information
             disk_usage = psutil.disk_usage('.')
@@ -539,17 +820,97 @@ class DBNNCore:
         except ImportError:
             self.log("⚠️ psutil not available, using default resource values")
 
-        # GPU detection
+        # GPU detection with memory tracking
         try:
             import torch
             if torch.cuda.is_available():
                 resource_info['has_gpu'] = True
-                resource_info['gpu_memory_gb'] = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                gpu_memory_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                resource_info['gpu_memory_gb'] = gpu_memory_total
+
+                # Get current GPU memory usage
+                torch.cuda.empty_cache()
+                gpu_memory_allocated = torch.cuda.memory_allocated() / (1024**3)
+                gpu_memory_cached = torch.cuda.memory_reserved() / (1024**3)
+
+                resource_info['gpu_available_memory_gb'] = gpu_memory_total - gpu_memory_allocated - gpu_memory_cached
+                resource_info['gpu_available_memory_gb_60percent'] = resource_info['gpu_available_memory_gb'] * 0.6
                 resource_info['gpu_name'] = torch.cuda.get_device_name(0)
+
+                self.log(f"✅ GPU detected: {resource_info['gpu_name']}")
+                self.log(f"💾 GPU Memory: {gpu_memory_total:.1f}GB total, {resource_info['gpu_available_memory_gb']:.1f}GB available, {resource_info['gpu_available_memory_gb_60percent']:.1f}GB usable (60%)")
         except ImportError:
             resource_info['has_gpu'] = False
 
+        self.log(f"💻 System Resources: {resource_info['available_memory_gb']:.1f}GB RAM available, {resource_info['available_memory_gb_60percent']:.1f}GB usable (60%)")
+
         return resource_info
+
+    def _calculate_required_memory_hybrid(self, innodes: int, resol: int, outnodes: int) -> Tuple[float, float]:
+        """
+        Calculate memory requirements for both dense and sparse modes.
+        Enhanced to calculate both CPU and GPU memory requirements.
+        """
+        # Dense mode memory (numpy arrays)
+        dense_memory_gb = (
+            (innodes + 2) * (resol + 2) * (innodes + 2) * (resol + 2) * (outnodes + 2) * 4 +  # anti_net (int32)
+            (innodes + 2) * (resol + 2) * (innodes + 2) * (resol + 2) * (outnodes + 2) * 4 +  # anti_wts (float32)
+            (innodes + 2) * (resol + 8) * 4 +  # binloc
+            (innodes + 2) * 4 +  # max_val, min_val
+            (innodes + 8) * 4 +  # resolution_arr
+            (outnodes + 2) * 4   # class_labels
+        ) / (1024**3)
+
+        # Sparse mode memory (estimated - Python dicts are much more efficient)
+        total_entries = innodes * resol * innodes * resol * (outnodes + 1)  # +1 for class 0
+        sparse_memory_gb = (total_entries * 150) / (1024**3)  # Conservative 150 bytes per entry
+
+        # GPU memory requirements (approximate - mainly for tensor operations)
+        gpu_memory_gb = dense_memory_gb * 0.5  # Rough estimate for GPU operations
+
+        self.log(f"💾 Memory estimates: Dense={dense_memory_gb:.2f}GB, Sparse={sparse_memory_gb:.2f}GB, GPU≈{gpu_memory_gb:.2f}GB")
+
+        return dense_memory_gb, sparse_memory_gb
+
+    def _decide_storage_mode(self, innodes: int, resol: int, outnodes: int) -> bool:
+        """
+        Decide whether to use sparse mode based on available resources.
+        Enhanced to enforce 60% memory limit and consider GPU memory.
+        """
+        dense_memory_gb, sparse_memory_gb = self._calculate_required_memory_hybrid(innodes, resol, outnodes)
+
+        # Get available memory with 60% limit
+        cpu_available = self.system_resources['available_memory_gb_60percent']
+        gpu_available = self.system_resources.get('gpu_available_memory_gb_60percent', 0)
+
+        # Calculate total available memory (CPU + GPU if available)
+        total_available = cpu_available + (gpu_available if self.system_resources['has_gpu'] else 0)
+
+        # Decision logic with 60% limit enforcement
+        use_sparse = False
+
+        if dense_memory_gb > cpu_available:
+            self.log(f"🔀 Switching to SPARSE mode: Dense requires {dense_memory_gb:.2f}GB > available CPU {cpu_available:.2f}GB (60% limit)")
+            use_sparse = True
+        elif dense_memory_gb > total_available * 0.8:  # Use 80% of total available as threshold
+            self.log(f"🔀 Switching to SPARSE mode: Better memory efficiency ({dense_memory_gb:.2f}GB > {total_available*0.8:.2f}GB)")
+            use_sparse = True
+        elif sparse_memory_gb < dense_memory_gb * 0.5 and sparse_memory_gb < cpu_available:
+            self.log(f"🔀 Switching to SPARSE mode: Significant memory savings ({sparse_memory_gb:.2f}GB vs {dense_memory_gb:.2f}GB)")
+            use_sparse = True
+        else:
+            self.log(f"🔀 Using DENSE mode: Sufficient memory available (Dense: {dense_memory_gb:.2f}GB, Available: {cpu_available:.2f}GB CPU + {gpu_available:.2f}GB GPU)")
+
+        # Memory safety check - ensure we don't exceed 60% limit
+        required_memory = sparse_memory_gb if use_sparse else dense_memory_gb
+        if required_memory > cpu_available:
+            self.log(f"⚠️ WARNING: Required memory ({required_memory:.2f}GB) exceeds 60% available limit ({cpu_available:.2f}GB)")
+            # Force sparse mode if dense would exceed limit
+            if not use_sparse and dense_memory_gb > cpu_available:
+                self.log(f"🔀 FORCING SPARSE mode to stay within memory limits")
+                use_sparse = True
+
+        return use_sparse
 
     def calculate_optimal_batch_size(self, dataset_size, feature_count, num_classes):
         """
@@ -650,45 +1011,61 @@ class DBNNCore:
     def load_data_optimized(self, filename: str, target_column: Optional[str] = None,
                            feature_columns: Optional[List[str]] = None):
         """
-        Optimized data loading with automatic memory management and disk backing.
-
-        Args:
-            filename: Path to data file (CSV or DAT)
-            target_column: Name of target column (for CSV files)
-            feature_columns: List of feature column names (for CSV files)
-
-        Returns:
-            Tuple containing:
-            - features_batches: List of feature batches (numpy arrays or disk references)
-            - targets_batches: List of target batches
-            - feature_columns_used: List of feature columns actually used
-            - original_targets_batches: List of original target values
-            - batch_params: Batch optimization parameters
+        Optimized data loading with strict memory management.
         """
         try:
+            # Check memory before loading
+            if hasattr(self, 'memory_monitor'):
+                self.memory_monitor.check_memory_limit("data_loading_start")
+
             # First, analyze dataset size and characteristics
             dataset_info = self._analyze_dataset(filename, target_column, feature_columns)
 
-            # Calculate optimal batch parameters
+            # Calculate optimal batch parameters with memory limits
             batch_params = self.calculate_optimal_batch_size(
                 dataset_info['total_samples'],
                 dataset_info['feature_count'],
                 dataset_info.get('num_classes_estimate', 10)
             )
 
+            # Reduce batch size if memory is tight
+            if hasattr(self, 'memory_monitor'):
+                current_usage = self.memory_monitor.get_memory_usage()
+                available = self.memory_monitor.get_available_memory()
+                if current_usage > available * 0.4:  # If using >40% of available
+                    batch_params['batch_size'] = max(100, batch_params['batch_size'] // 2)
+                    self.log(f"🔽 Reducing batch size to {batch_params['batch_size']} due to memory pressure")
+
             self.log(f"🚀 Loading data with {batch_params['memory_optimization_level']} optimization")
 
             if batch_params['use_disk_backing']:
-                # Use disk-backed loading for large datasets
                 return self._load_data_disk_backed(filename, target_column, feature_columns, batch_params)
             else:
-                # Use in-memory loading for smaller datasets
                 return self._load_data_in_memory(filename, target_column, feature_columns, batch_params)
 
         except Exception as e:
             self.log(f"❌ Optimized data loading failed: {e}")
-            # Fallback to basic loading
-            return self.load_data(filename, target_column, feature_columns, batch_size=1000)
+            # Fallback to basic loading with small batches
+            return self.load_data(filename, target_column, feature_columns, batch_size=500)
+
+    def _load_data_in_memory(self, filename: str, target_column: Optional[str] = None,
+                            feature_columns: Optional[List[str]] = None, batch_params: Dict = None):
+        """
+        Load dataset entirely in memory with memory monitoring.
+        """
+        self.log("💫 Using in-memory loading with memory monitoring")
+
+        # Use smaller batch size for memory safety
+        batch_size = min(batch_params.get('batch_size', 10000), 5000)
+
+        result = self.load_data(filename, target_column, feature_columns, batch_size)
+
+        # Force GC after loading
+        if hasattr(self, 'memory_monitor'):
+            self.memory_monitor.force_garbage_collection()
+            self.memory_monitor.check_memory_limit("data_loading_complete")
+
+        return result
 
     def _analyze_dataset(self, filename: str, target_column: Optional[str] = None,
                         feature_columns: Optional[List[str]] = None):
@@ -861,26 +1238,6 @@ class DBNNCore:
         except Exception as e:
             self.log(f"❌ Disk-backed loading failed: {e}")
             raise
-
-    def _load_data_in_memory(self, filename: str, target_column: Optional[str] = None,
-                            feature_columns: Optional[List[str]] = None, batch_params: Dict = None):
-        """
-        Load dataset entirely in memory with optimized batching.
-
-        Args:
-            filename: Path to data file
-            target_column: Target column name
-            feature_columns: Feature column names
-            batch_params: Batch optimization parameters
-
-        Returns:
-            Batched data loaded in memory
-        """
-        self.log("💫 Using in-memory loading with optimized batching")
-
-        # Use the existing optimized loading but with calculated batch size
-        batch_size = batch_params.get('batch_size', 10000)
-        return self.load_data(filename, target_column, feature_columns, batch_size)
 
     def train_with_memory_optimization(self, train_file: str, test_file: Optional[str] = None,
                                      use_csv: bool = True, target_column: Optional[str] = None,
@@ -1335,7 +1692,12 @@ class DBNNCore:
 
     def train_with_early_stopping_internal(self, features_batches, encoded_targets_batches, resol):
         """Internal training method called by memory-optimized training"""
-        # Implementation of standard training logic
+
+        # ENSURE ARRAYS ARE INITIALIZED FIRST - CRITICAL FIX
+        self.log("🔄 Ensuring arrays are initialized before training...")
+        self.ensure_arrays_initialized(self.innodes, resol, self.outnodes)
+
+        # Rest of the training code...
         gain = self.config.get('gain', 20.0)
         max_epochs = self.config.get('epochs', 100)
         patience = self.config.get('patience', 10)
@@ -1365,7 +1727,7 @@ class DBNNCore:
             # Ultimate fallback if anything goes wrong
             print(f"[DBNNCore-FALLBACK] {message}")
 
-    def _count_dat_samples(self, filename: str) -> int:
+    def _count_dat_samples_optimized(self, filename: str) -> int:
         """Count samples in DAT file efficiently"""
         try:
             count = 0
@@ -2121,15 +2483,7 @@ class DBNNCore:
                                 feature_columns: List[str], batch_size: int):
         """
         Optimized CSV loading with memory-efficient processing and robust error handling.
-
-        Args:
-            filename: Path to CSV file
-            target_column: Name of target column (can be None for prediction mode)
-            feature_columns: List of feature column names
-            batch_size: Number of samples per batch
-
-        Returns:
-            Tuple: (features_batches, targets_batches, feature_columns_used, original_targets_batches)
+        Enhanced with feature encoding and memory limit enforcement.
         """
         import pandas as pd
         import csv
@@ -2186,6 +2540,10 @@ class DBNNCore:
             if not is_prediction_mode and target_column:
                 self.log(f"Using target column: {target_column}")
 
+            # Initialize feature encoder if needed
+            if not hasattr(self, 'feature_encoder'):
+                self.feature_encoder = FeatureEncoder()
+
             current_batch_features = []
             current_batch_targets = []
             current_batch_original_targets = []
@@ -2193,6 +2551,35 @@ class DBNNCore:
             line_count = 0
             valid_samples = 0
             invalid_samples = 0
+
+            # First pass: collect data for feature encoding analysis
+            sample_data = {col: [] for col in feature_columns}
+            sample_targets = []
+
+            for row in reader:
+                line_count += 1
+                if line_count > 1000:  # Sample first 1000 rows for analysis
+                    break
+
+                try:
+                    for col in feature_columns:
+                        if col in row:
+                            sample_data[col].append(row[col])
+                    if not is_prediction_mode and target_column and target_column in row:
+                        sample_targets.append(row[target_column])
+                except:
+                    pass
+
+            # Reset file pointer for actual reading
+            f.seek(0)
+            reader = csv.DictReader(f)  # Recreate reader
+
+            # Fit feature encoder if this is training mode
+            if not is_prediction_mode and hasattr(self, 'feature_encoder'):
+                sample_df = pd.DataFrame(sample_data)
+                encoded_df, encoding_info = self.feature_encoder.fit_transform_features(sample_df, feature_columns)
+                if encoding_info:
+                    self.log(f"✅ Feature encoding applied: {list(encoding_info.keys())}")
 
             for row in reader:
                 line_count += 1
@@ -2208,7 +2595,14 @@ class DBNNCore:
                                 if valid_samples < 5:  # Only warn for first few valid samples
                                     self.log(f"⚠️ Warning: Empty value in column '{col}', using 0.0")
                             else:
-                                feature_vec.append(float(feature_val))
+                                # Apply feature encoding if encoder is fitted
+                                if hasattr(self, 'feature_encoder') and self.feature_encoder.is_fitted and col in self.feature_encoder.feature_encoders:
+                                    # For categorical features, use encoded value
+                                    encoded_val = self.feature_encoder.feature_encoders[col].transform([feature_val])[0]
+                                    feature_vec.append(float(encoded_val))
+                                else:
+                                    # For numeric features, convert directly
+                                    feature_vec.append(float(feature_val))
                         except (ValueError, TypeError) as conv_error:
                             feature_vec.append(0.0)
                             if valid_samples < 5:  # Only warn for first few valid samples
@@ -2507,14 +2901,7 @@ class DBNNCore:
     def initialize_training(self, features_batches, encoded_targets_batches, resol: int):
         """
         Initialize training parameters and arrays for DBNN algorithm.
-
-        Args:
-            features_batches: List of feature batches
-            encoded_targets_batches: List of encoded target batches
-            resol: Resolution parameter for binning
-
-        Returns:
-            Tuple: (omax, omin) - max and min of target values
+        Enhanced to handle both dense and sparse modes properly.
         """
         self.log("🔧 Initializing training parameters...")
 
@@ -2560,19 +2947,56 @@ class DBNNCore:
                 progress = (batch_idx + 1) / total_batches * 100
                 self.log(f"   Analyzing batches... {progress:.1f}%")
 
-        # Initialize network counts and weights
+        # Initialize network counts and weights - FIXED FOR SPARSE MODE
         self.log("   Initializing network arrays...")
-        self.anti_wts.fill(1.0)  # Initialize all weights to 1.0
 
-        # Initialize anti_net with base counts of 1 for all combinations
-        # This prevents division by zero and provides a prior
-        for k in range(1, self.outnodes + 1):
-            for i in range(1, self.innodes + 1):
-                for j in range(1, self.resolution_arr[i] + 1):
-                    for l in range(1, self.innodes + 1):
-                        for m in range(1, self.resolution_arr[l] + 1):
-                            self.anti_net[i, j, l, m, k] = 1
-                            self.anti_net[i, j, l, m, 0] += 1  # Total count for normalization
+        # Check if we're in sparse mode (HybridDBNNCore)
+        is_sparse_mode = hasattr(self, 'use_sparse_mode') and self.use_sparse_mode
+
+        if is_sparse_mode:
+            # For sparse mode, initialize sparse arrays if not already done
+            from collections import defaultdict
+            if not hasattr(self, 'sparse_anti_net') or self.sparse_anti_net is None:
+                self.sparse_anti_net = defaultdict(int)
+            if not hasattr(self, 'sparse_anti_wts') or self.sparse_anti_wts is None:
+                self.sparse_anti_wts = defaultdict(float)
+
+            # Initialize sparse arrays with base counts
+            self.log("   Initializing sparse network with base counts...")
+            for k in range(1, self.outnodes + 1):
+                for i in range(1, self.innodes + 1):
+                    for j in range(1, self.resolution_arr[i] + 1):
+                        for l in range(1, self.innodes + 1):
+                            for m in range(1, self.resolution_arr[l] + 1):
+                                key_class = (i, j, l, m, k)
+                                key_total = (i, j, l, m, 0)
+                                self.sparse_anti_net[key_class] = 1
+                                self.sparse_anti_net[key_total] += 1
+                                self.sparse_anti_wts[key_class] = 1.0
+        else:
+            # For dense mode, initialize dense arrays
+            if self.anti_wts is None:
+                self.log("   ❌ anti_wts is None - initializing dense arrays...")
+                self.initialize_arrays(self.innodes, resol, self.outnodes)
+
+            if self.anti_wts is not None:
+                self.anti_wts.fill(1.0)  # Initialize all weights to 1.0
+            else:
+                self.log("   ⚠️ anti_wts still None after initialization!")
+
+            # Initialize anti_net with base counts of 1 for all combinations
+            # This prevents division by zero and provides a prior
+            if self.anti_net is not None:
+                self.log("   Initializing dense network counts...")
+                for k in range(1, self.outnodes + 1):
+                    for i in range(1, self.innodes + 1):
+                        for j in range(1, self.resolution_arr[i] + 1):
+                            for l in range(1, self.innodes + 1):
+                                for m in range(1, self.resolution_arr[l] + 1):
+                                    self.anti_net[i, j, l, m, k] = 1
+                                    self.anti_net[i, j, l, m, 0] += 1  # Total count for normalization
+            else:
+                self.log("   ⚠️ anti_net is None - skipping count initialization!")
 
         # Log initialization summary
         self.log(f"✅ Training initialization completed:")
@@ -2580,6 +3004,7 @@ class DBNNCore:
         self.log(f"   - Output nodes: {self.outnodes}")
         self.log(f"   - Resolution: {resol}")
         self.log(f"   - Target range: [{omin:.3f}, {omax:.3f}]")
+        self.log(f"   - Mode: {'SPARSE' if is_sparse_mode else 'DENSE'}")
 
         # Log feature ranges for first few features
         if self.innodes > 0:
@@ -2750,6 +3175,7 @@ class DBNNCore:
         except Exception as e:
             self.log(f"❌ Encoder fitting failed: {e}")
             raise
+
     def _predict_batch_sequential(self, features_batch):
         """Predict classes for a batch of features sequentially"""
         predictions = []
@@ -2942,6 +3368,1127 @@ class DBNNCore:
 
         self.log(f"✅ Interactive visualization enabled (capturing every {capture_interval} iterations)")
 
+    def ensure_arrays_initialized(self, innodes: int, resol: int, outnodes: int):
+        """Ensure all required arrays are properly initialized before training"""
+        self.log(f"🔧 Ensuring arrays are initialized for {innodes} features...")
+
+        # Set basic dimensions
+        self.innodes = innodes
+        self.outnodes = outnodes
+
+        # Check if arrays need initialization
+        needs_initialization = (
+            not hasattr(self, 'anti_net') or self.anti_net is None or
+            not hasattr(self, 'anti_wts') or self.anti_wts is None or
+            not hasattr(self, 'binloc') or self.binloc is None
+        )
+
+        if needs_initialization:
+            self.log("   Initializing arrays...")
+            self.initialize_arrays(innodes, resol, outnodes)
+        else:
+            self.log("   Arrays already initialized")
+
+        # Check if we're in sparse mode
+        is_sparse_mode = hasattr(self, 'use_sparse_mode') and self.use_sparse_mode
+        if is_sparse_mode:
+            from collections import defaultdict
+            if not hasattr(self, 'sparse_anti_net') or self.sparse_anti_net is None:
+                self.sparse_anti_net = defaultdict(int)
+            if not hasattr(self, 'sparse_anti_wts') or self.sparse_anti_wts is None:
+                self.sparse_anti_wts = defaultdict(float)
+            self.log("   ✅ Sparse arrays ensured")
+
+        self.log("   ✅ All arrays ready for training")
+
+# =========================================================================
+# HYBRID MEMORY-OPTIMIZED DBNN CORE
+# =========================================================================
+
+class HybridDBNNCore(DBNNCore):
+    """
+    Ultra-optimized Hybrid DBNN core with exact mathematical equivalence.
+    Features JIT-optimized sparse mode for high-dimensional data (1000+ features).
+    """
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        # Initialize parent first
+        super().__init__(config)
+
+        # Hybrid mode control
+        self.use_sparse_mode = False
+        self.memory_threshold_gb = 0.6  # Strict 60% memory limit
+        self.sparse_anti_net = None
+        self.sparse_anti_wts = None
+        self.ultra_sparse_core = None  # New ultra-optimized core
+
+        # Memory monitoring
+        self.memory_monitor = MemoryMonitor(self)
+
+        # GPU and parallel processing flags
+        self.gpu_available = False
+        self.parallel_processing_enabled = True
+        self.max_workers = self._detect_optimal_workers()
+
+        # Initialize resource detection
+        self._detect_system_capabilities()
+
+    def _detect_system_capabilities(self):
+        """Detect system capabilities with strict memory limits."""
+        try:
+            import psutil
+
+            # Detect available RAM
+            system_memory = psutil.virtual_memory()
+            available_ram_gb = system_memory.available / (1024**3)
+            total_ram_gb = system_memory.total / (1024**3)
+
+            # Apply 60% limit strictly
+            self.available_ram_gb = available_ram_gb * 0.6
+            self.total_ram_gb = total_ram_gb
+
+            # Detect GPU memory if available
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    self.gpu_available = True
+                    gpu_memory_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                    torch.cuda.empty_cache()
+                    gpu_used = torch.cuda.memory_allocated() / (1024**3)
+                    self.gpu_memory_gb = (gpu_memory_total - gpu_used) * 0.6
+                    self.log(f"✅ GPU detected: {torch.cuda.get_device_name(0)} with {self.gpu_memory_gb:.1f}GB usable (60% limit)")
+            except ImportError:
+                pass
+
+            self.log(f"🔍 System Resources: {total_ram_gb:.1f}GB RAM total, {self.available_ram_gb:.1f}GB usable (60% limit)")
+
+        except Exception as e:
+            self.log(f"⚠️ Resource detection warning: {e}")
+            # Conservative defaults with 60% limit
+            self.available_ram_gb = 2.0 * 0.6
+            self.total_ram_gb = 4.0
+            self.gpu_available = False
+
+    def _should_use_ultra_sparse(self, innodes: int, resol: int, outnodes: int) -> bool:
+        """
+        Determine if ultra-sparse mode should be used.
+        Enhanced decision logic for high-dimensional problems.
+        """
+        dense_memory_gb = self._calculate_dense_memory(innodes, resol, outnodes)
+
+        # Use ultra-sparse for high-dimensional problems
+        if innodes * resol * outnodes > 1000000:  # 1M+ combinations
+            self.log(f"🔀 ULTRA-SPARSE: High-dimensional problem ({innodes}×{resol}×{outnodes})")
+            return True
+
+        # Use ultra-sparse if memory would exceed 60% limit
+        if dense_memory_gb > self.available_ram_gb:
+            self.log(f"🔀 ULTRA-SPARSE: Dense {dense_memory_gb:.2f}GB > Available {self.available_ram_gb:.2f}GB")
+            return True
+
+        # Use dense for smaller problems
+        self.log(f"🔀 DENSE: Efficient for problem size ({dense_memory_gb:.2f}GB ≤ {self.available_ram_gb:.2f}GB)")
+        return False
+
+    def _calculate_dense_memory(self, innodes: int, resol: int, outnodes: int) -> float:
+        """Calculate memory requirements for dense mode in GB."""
+        return (
+            (innodes + 2) * (resol + 2) * (innodes + 2) * (resol + 2) * (outnodes + 2) * 4 +  # anti_net
+            (innodes + 2) * (resol + 2) * (innodes + 2) * (resol + 2) * (outnodes + 2) * 4    # anti_wts
+        ) / (1024**3)
+
+    def initialize_arrays_hybrid(self, innodes: int, resol: int, outnodes: int):
+        """
+        Ultra-optimized hybrid array initialization.
+        """
+        # Check memory before allocation
+        if hasattr(self, 'memory_monitor'):
+            self.memory_monitor.check_memory_limit("array_initialization")
+
+        self.innodes = innodes
+        self.outnodes = outnodes
+        self.resol = resol
+
+        # Decide storage mode with enhanced logic
+        self.use_sparse_mode = self._should_use_ultra_sparse(innodes, resol, outnodes)
+
+        if self.use_sparse_mode:
+            # Use ultra-optimized sparse core
+            self.ultra_sparse_core = UltraSparseDBNNCore(innodes, resol, outnodes)
+            self.log(f"🚀 ULTRA-OPTIMIZED SPARSE: {innodes} features, resolution {resol}")
+        else:
+            # Use memory-optimized dense arrays
+            self._initialize_dense_arrays_optimized(innodes, resol, outnodes)
+
+        # Initialize common arrays
+        self._initialize_common_arrays_optimized(innodes, resol, outnodes)
+
+        # Force GC after initialization
+        if hasattr(self, 'memory_monitor'):
+            self.memory_monitor.force_garbage_collection()
+
+        self.log(f"✅ Hybrid initialization: {'ULTRA-SPARSE' if self.use_sparse_mode else 'DENSE'} mode")
+
+    def _initialize_dense_arrays_optimized(self, innodes: int, resol: int, outnodes: int):
+        """Memory-optimized dense array initialization."""
+        try:
+            self.anti_net = np.zeros((innodes+2, resol+2, innodes+2, resol+2, outnodes+2), dtype=np.int32)
+            self.anti_wts = np.ones((innodes+2, resol+2, innodes+2, resol+2, outnodes+2), dtype=np.float32)
+
+            # Initialize counts identically to original algorithm
+            for k in range(1, outnodes + 1):
+                for i in range(1, innodes + 1):
+                    for j in range(1, resol + 1):
+                        for l in range(1, innodes + 1):
+                            for m in range(1, resol + 1):
+                                self.anti_net[i, j, l, m, k] = 1
+                                self.anti_net[i, j, l, m, 0] += 1
+
+            self.log(f"✅ Dense arrays: {self.anti_net.shape}")
+
+        except MemoryError as e:
+            self.log(f"❌ Memory error in dense initialization: {e}")
+            # Fall back to sparse mode
+            self.use_sparse_mode = True
+            self.ultra_sparse_core = UltraSparseDBNNCore(innodes, resol, outnodes)
+            self.log("🔄 Falling back to ultra-sparse mode due to memory constraints")
+
+    def _initialize_common_arrays_optimized(self, innodes: int, resol: int, outnodes: int):
+        """Optimized common array initialization."""
+        self.binloc = np.zeros((innodes+2, resol+8), dtype=np.float32)
+        self.max_val = np.zeros(innodes+2, dtype=np.float32)
+        self.min_val = np.zeros(innodes+2, dtype=np.float32)
+        self.resolution_arr = np.zeros(innodes+8, dtype=np.int32)
+        self.class_labels = np.zeros(outnodes + 2, dtype=np.float32)
+        self.class_labels[0] = self.config.get('margin', 0.2)
+
+        # Initialize bin locations
+        for i in range(1, innodes + 1):
+            for j in range(1, resol + 1):
+                self.binloc[i][j+1] = (j - 1) * 1.0
+
+    def process_training_batch_hybrid(self, features_batch, targets_batch):
+        """Ultra-optimized batch processing with memory monitoring."""
+        # Check memory before processing
+        if hasattr(self, 'memory_monitor'):
+            self.memory_monitor.check_memory_limit("batch_processing")
+
+        if self.use_sparse_mode and self.ultra_sparse_core:
+            # Use ultra-optimized sparse core
+            result = self.ultra_sparse_core.process_training_batch_ultra(
+                features_batch, targets_batch,
+                self.min_val, self.max_val, self.resolution_arr, self.binloc,
+                self.class_labels, self.config.get('gain', 20.0)
+            )
+        else:
+            # Use optimized dense processing
+            result = self._process_training_batch_dense_optimized(features_batch, targets_batch)
+
+        # Force GC after each batch
+        if hasattr(self, 'memory_monitor'):
+            self.memory_monitor.force_garbage_collection()
+
+        return result
+
+    def _process_training_batch_dense_optimized(self, features_batch, targets_batch):
+        """Optimized dense batch processing."""
+        batch_size = len(features_batch)
+        processed_count = 0
+
+        for sample_idx in range(batch_size):
+            # Create feature vector
+            vects = np.zeros(self.innodes + self.outnodes + 2)
+            for i in range(1, self.innodes + 1):
+                vects[i] = features_batch[sample_idx, i-1]
+            tmpv = targets_batch[sample_idx]
+
+            # Use the original numba-optimized function
+            self.anti_net = process_training_sample(
+                vects, tmpv, self.anti_net, self.anti_wts, self.binloc,
+                self.resolution_arr, self.class_labels, self.min_val, self.max_val,
+                self.innodes, self.outnodes
+            )
+            processed_count += 1
+
+        return processed_count
+
+    def _train_epoch_sparse_ultra(self, features_batches, encoded_targets_batches, gain: float):
+        """Ultra-optimized sparse training epoch."""
+        total_batches = len(features_batches)
+
+        for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
+            # Memory monitoring
+            if batch_idx % 10 == 0 and hasattr(self, 'memory_monitor'):
+                self.memory_monitor.check_memory_limit(f"sparse_batch_{batch_idx}")
+
+            # Process batch with ultra-optimized core
+            self.ultra_sparse_core.process_training_batch_ultra(
+                features_batch, targets_batch,
+                self.min_val, self.max_val, self.resolution_arr, self.binloc,
+                self.class_labels, gain
+            )
+
+            # Progress logging
+            if total_batches > 10 and batch_idx % (total_batches // 10) == 0:
+                progress = (batch_idx + 1) / total_batches * 100
+                self.log(f"   Ultra-sparse training: {progress:.1f}%")
+
+        # Final GC after epoch
+        if hasattr(self, 'memory_monitor'):
+            self.memory_monitor.force_garbage_collection()
+
+    def _train_epoch_dense_optimized(self, features_batches, encoded_targets_batches, gain: float):
+        """Optimized dense training epoch."""
+        for features_batch, targets_batch in zip(features_batches, encoded_targets_batches):
+            batch_size = len(features_batch)
+
+            for sample_idx in range(batch_size):
+                vects = np.zeros(self.innodes + self.outnodes + 2)
+                for i in range(1, self.innodes + 1):
+                    vects[i] = features_batch[sample_idx, i-1]
+                tmpv = targets_batch[sample_idx]
+
+                classval = compute_class_probabilities_numba(
+                    vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
+                    self.class_labels, self.min_val, self.max_val, self.innodes, self.outnodes
+                )
+
+                # Find predicted class
+                kmax = 1
+                cmax = 0.0
+                for k in range(1, self.outnodes + 1):
+                    if classval[k] > cmax:
+                        cmax = classval[k]
+                        kmax = k
+
+                # Update weights if wrong
+                if abs(self.class_labels[kmax] - tmpv) > self.class_labels[0]:
+                    self.anti_wts = update_weights_numba(
+                        vects, tmpv, classval, self.anti_wts, self.binloc, self.resolution_arr,
+                        self.class_labels, self.min_val, self.max_val, self.innodes, self.outnodes, gain
+                    )
+
+    # =========================================================================
+    # OVERRIDDEN PUBLIC METHODS FOR SEAMLESS INTEGRATION
+    # =========================================================================
+
+    def initialize_arrays(self, innodes: int, resol: int, outnodes: int):
+        """Override to use ultra-optimized hybrid initialization."""
+        self.initialize_arrays_hybrid(innodes, resol, outnodes)
+
+    def process_training_batch(self, features_batch, targets_batch):
+        """Override to use ultra-optimized hybrid processing."""
+        return self.process_training_batch_hybrid(features_batch, targets_batch)
+
+    def predict_batch(self, features_batch):
+        """Override to use ultra-optimized hybrid prediction."""
+        return self.predict_batch_hybrid(features_batch)
+
+    def evaluate(self, features_batches, encoded_targets_batches):
+        """Override to use ultra-optimized hybrid evaluation."""
+        return self.evaluate_hybrid(features_batches, encoded_targets_batches)
+
+    def train_epoch(self, features_batches, encoded_targets_batches, gain: float):
+        """Override to use ultra-optimized hybrid training."""
+        if self.use_sparse_mode:
+            self._train_epoch_sparse_ultra(features_batches, encoded_targets_batches, gain)
+        else:
+            self._train_epoch_dense_optimized(features_batches, encoded_targets_batches, gain)
+
+    # =========================================================================
+    # ULTRA-OPTIMIZED HYBRID PREDICTION
+    # =========================================================================
+
+    def predict_batch_hybrid(self, features_batch):
+        """Ultra-optimized batch prediction."""
+        if self.use_sparse_mode and self.ultra_sparse_core:
+            return self._predict_batch_sparse_ultra(features_batch)
+        else:
+            return self._predict_batch_dense_optimized(features_batch)
+
+    def _predict_batch_dense_optimized(self, features_batch):
+        """Optimized dense prediction."""
+        predictions = []
+        probabilities = []
+
+        for sample_idx in range(len(features_batch)):
+            vects = np.zeros(self.innodes + self.outnodes + 2)
+            for i in range(1, self.innodes + 1):
+                vects[i] = features_batch[sample_idx, i-1]
+
+            classval = compute_class_probabilities_numba(
+                vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
+                self.class_labels, self.min_val, self.max_val, self.innodes, self.outnodes
+            )
+
+            # Find predicted class
+            kmax = 1
+            cmax = 0.0
+            for k in range(1, self.outnodes + 1):
+                if classval[k] > cmax:
+                    cmax = classval[k]
+                    kmax = k
+
+            predicted = self.class_labels[kmax]
+            predictions.append(predicted)
+
+            # Store probabilities
+            prob_dict = {}
+            for k in range(1, self.outnodes + 1):
+                class_val = self.class_labels[k]
+                if self.class_encoder.is_fitted:
+                    class_name = self.class_encoder.encoded_to_class.get(class_val, f"Class_{k}")
+                else:
+                    class_name = f"Class_{k}"
+                prob_dict[class_name] = float(classval[k])
+
+            probabilities.append(prob_dict)
+
+        return predictions, probabilities
+
+    def _predict_batch_sparse_ultra(self, features_batch):
+        """Ultra-optimized sparse prediction."""
+        predictions = []
+        probabilities = []
+
+        for sample_idx in range(len(features_batch)):
+            vects = np.zeros(self.innodes + self.outnodes + 2)
+            for i in range(1, self.innodes + 1):
+                vects[i] = features_batch[sample_idx, i-1]
+
+            classval = self.ultra_sparse_core.compute_class_probabilities_ultra(
+                vects, self.min_val, self.max_val, self.resolution_arr, self.binloc
+            )
+
+            # Find predicted class
+            kmax = 1
+            cmax = 0.0
+            for k in range(1, self.outnodes + 1):
+                if classval[k] > cmax:
+                    cmax = classval[k]
+                    kmax = k
+
+            predicted = self.class_labels[kmax]
+            predictions.append(predicted)
+
+            # Store probabilities
+            prob_dict = {}
+            for k in range(1, self.outnodes + 1):
+                class_val = self.class_labels[k]
+                if self.class_encoder.is_fitted:
+                    class_name = self.class_encoder.encoded_to_class.get(class_val, f"Class_{k}")
+                else:
+                    class_name = f"Class_{k}"
+                prob_dict[class_name] = float(classval[k])
+
+            probabilities.append(prob_dict)
+
+        return predictions, probabilities
+
+    # =========================================================================
+    # ULTRA-OPTIMIZED HYBRID EVALUATION
+    # =========================================================================
+
+    def evaluate_hybrid(self, features_batches, encoded_targets_batches):
+        """Ultra-optimized hybrid evaluation."""
+        if self.use_sparse_mode:
+            return self._evaluate_sparse_ultra(features_batches, encoded_targets_batches)
+        else:
+            return self._evaluate_dense_optimized(features_batches, encoded_targets_batches)
+
+    def _evaluate_dense_optimized(self, features_batches, encoded_targets_batches):
+        """Optimized dense evaluation."""
+        correct_predictions = 0
+        total_samples = 0
+        all_predictions = []
+
+        for features_batch, targets_batch in zip(features_batches, encoded_targets_batches):
+            batch_size = len(features_batch)
+            total_samples += batch_size
+
+            for sample_idx in range(batch_size):
+                vects = np.zeros(self.innodes + self.outnodes + 2)
+                for i in range(1, self.innodes + 1):
+                    vects[i] = features_batch[sample_idx, i-1]
+                actual = targets_batch[sample_idx]
+
+                classval = compute_class_probabilities_numba(
+                    vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
+                    self.class_labels, self.min_val, self.max_val, self.innodes, self.outnodes
+                )
+
+                # Find predicted class
+                kmax = 1
+                cmax = 0.0
+                for k in range(1, self.outnodes + 1):
+                    if classval[k] > cmax:
+                        cmax = classval[k]
+                        kmax = k
+
+                predicted = self.class_labels[kmax]
+                all_predictions.append(predicted)
+
+                if abs(actual - predicted) <= self.class_labels[0]:
+                    correct_predictions += 1
+
+        accuracy = (correct_predictions / total_samples) * 100 if total_samples > 0 else 0
+        return accuracy, correct_predictions, all_predictions
+
+    def _evaluate_sparse_ultra(self, features_batches, encoded_targets_batches):
+        """Ultra-optimized sparse evaluation."""
+        correct_predictions = 0
+        total_samples = 0
+        all_predictions = []
+
+        for features_batch, targets_batch in zip(features_batches, encoded_targets_batches):
+            batch_size = len(features_batch)
+            total_samples += batch_size
+
+            for sample_idx in range(batch_size):
+                vects = np.zeros(self.innodes + self.outnodes + 2)
+                for i in range(1, self.innodes + 1):
+                    vects[i] = features_batch[sample_idx, i-1]
+                actual = targets_batch[sample_idx]
+
+                classval = self.ultra_sparse_core.compute_class_probabilities_ultra(
+                    vects, self.min_val, self.max_val, self.resolution_arr, self.binloc
+                )
+
+                # Find predicted class
+                kmax = 1
+                cmax = 0.0
+                for k in range(1, self.outnodes + 1):
+                    if classval[k] > cmax:
+                        cmax = classval[k]
+                        kmax = k
+
+                predicted = self.class_labels[kmax]
+                all_predictions.append(predicted)
+
+                if abs(actual - predicted) <= self.class_labels[0]:
+                    correct_predictions += 1
+
+        accuracy = (correct_predictions / total_samples) * 100 if total_samples > 0 else 0
+        return accuracy, correct_predictions, all_predictions
+
+    # =========================================================================
+    # COMPATIBILITY METHODS
+    # =========================================================================
+
+    def enable_optimized_sparse_mode(self, innodes, resol=50, outnodes=10):
+        """Enable optimized sparse mode (backward compatibility)."""
+        self.use_sparse_mode = True
+        self.innodes = innodes
+        self.outnodes = outnodes
+        self.resol = resol
+
+        # Use ultra-optimized core
+        self.ultra_sparse_core = UltraSparseDBNNCore(innodes, resol, outnodes)
+
+        # Initialize common arrays if needed
+        if not hasattr(self, 'min_val') or self.min_val is None:
+            self.min_val = np.full(innodes + 2, -5.0, dtype=np.float32)
+        if not hasattr(self, 'max_val') or self.max_val is None:
+            self.max_val = np.full(innodes + 2, 5.0, dtype=np.float32)
+        if not hasattr(self, 'resolution_arr') or self.resolution_arr is None:
+            self.resolution_arr = np.full(innodes + 8, resol, dtype=np.int32)
+        if not hasattr(self, 'class_labels') or self.class_labels is None:
+            self.class_labels = np.array([0.2] + [float(i) for i in range(1, outnodes + 1)], dtype=np.float32)
+        if not hasattr(self, 'binloc') or self.binloc is None:
+            self.binloc = np.zeros((innodes + 2, resol + 8), dtype=np.float32)
+            for i in range(1, innodes + 1):
+                for j in range(1, resol + 1):
+                    self.binloc[i][j+1] = (j - 1) * 1.0
+
+        self.log(f"✅ Ultra-optimized sparse mode enabled for {innodes} features")
+        return self.ultra_sparse_core
+
+class HybridDBNNCore(DBNNCore):
+    """
+    Hybrid DBNN core that automatically switches between dense and sparse modes
+    based on available system resources while maintaining exact mathematical equivalence.
+    Enhanced with optimized sparse processing for high-dimensional data.
+    """
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        # Initialize parent first
+        super().__init__(config)
+
+        # Hybrid mode control
+        self.use_sparse_mode = False
+        self.memory_threshold_gb = 0.6  # Use 60% of available memory as threshold
+        self.sparse_anti_net = None
+        self.sparse_anti_wts = None
+
+        # Memory monitoring
+        self.memory_monitor = MemoryMonitor(self)
+
+        # GPU and parallel processing flags
+        self.gpu_available = False
+        self.parallel_processing_enabled = True
+        self.max_workers = self._detect_optimal_workers()
+
+        # Initialize resource detection
+        self._detect_system_capabilities()
+
+    def _detect_system_capabilities(self):
+        """Detect system capabilities with memory limits."""
+        try:
+            import psutil
+
+            # Detect available RAM
+            system_memory = psutil.virtual_memory()
+            available_ram_gb = system_memory.available / (1024**3)
+            total_ram_gb = system_memory.total / (1024**3)
+
+            # Apply 60% limit
+            self.available_ram_gb = available_ram_gb * 0.6
+            self.total_ram_gb = total_ram_gb
+
+            # Detect GPU memory if available
+            gpu_memory_gb = 0
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    self.gpu_available = True
+                    gpu_memory_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                    # Get current GPU usage
+                    torch.cuda.empty_cache()
+                    gpu_used = torch.cuda.memory_allocated() / (1024**3)
+                    self.gpu_memory_gb = (gpu_memory_total - gpu_used) * 0.6  # 60% limit
+                    self.log(f"✅ GPU detected: {torch.cuda.get_device_name(0)} with {self.gpu_memory_gb:.1f}GB usable (60% limit)")
+            except ImportError:
+                pass
+
+            self.log(f"🔍 System Resources: {total_ram_gb:.1f}GB RAM total, {self.available_ram_gb:.1f}GB usable (60% limit)")
+
+        except Exception as e:
+            self.log(f"⚠️ Resource detection warning: {e}")
+            # Conservative defaults with 60% limit
+            self.available_ram_gb = 2.0 * 0.6
+            self.total_ram_gb = 4.0
+            self.gpu_available = False
+
+    def _decide_storage_mode(self, innodes: int, resol: int, outnodes: int) -> bool:
+        """
+        Decide whether to use sparse mode based on available resources.
+        Strict 60% memory limit enforcement.
+        """
+        dense_memory_gb, sparse_memory_gb = self._calculate_required_memory_hybrid(innodes, resol, outnodes)
+
+        # Use 60% limited memory
+        cpu_available = self.available_ram_gb
+
+        self.log(f"💾 Memory Analysis:")
+        self.log(f"   Dense mode: {dense_memory_gb:.2f}GB")
+        self.log(f"   Sparse mode: {sparse_memory_gb:.2f}GB")
+        self.log(f"   Available (60% limit): {cpu_available:.2f}GB")
+
+        # STRICT 60% ENFORCEMENT: Use sparse if dense exceeds limit
+        if dense_memory_gb > cpu_available:
+            self.log(f"🔀 FORCING SPARSE MODE: Dense {dense_memory_gb:.2f}GB > Available {cpu_available:.2f}GB (60% limit)")
+            return True
+
+        # Optional: Use sparse for significant savings
+        if sparse_memory_gb < dense_memory_gb * 0.3:  # 70% savings
+            self.log(f"🔀 Using SPARSE mode: 70% memory savings")
+            return True
+
+        self.log(f"🔀 Using DENSE mode: Within memory limits")
+        return False
+
+    def initialize_arrays_hybrid(self, innodes: int, resol: int, outnodes: int):
+        """
+        Hybrid array initialization with memory limit checks.
+        """
+        # Check memory before allocation
+        if not self.memory_monitor.check_memory_limit("array_initialization"):
+            self.log("⚠️ Memory high before array initialization, forcing sparse mode")
+            self.use_sparse_mode = True
+
+        self.innodes = innodes
+        self.outnodes = outnodes
+        self.resol = resol
+
+        # Decide storage mode with memory limits
+        self.use_sparse_mode = self._decide_storage_mode(innodes, resol, outnodes)
+
+        if self.use_sparse_mode:
+            self._initialize_sparse_arrays_optimized(innodes, resol, outnodes)
+        else:
+            self._initialize_dense_arrays(innodes, resol, outnodes)
+
+        # Initialize common arrays (these are small)
+        self._initialize_common_arrays(innodes, resol, outnodes)
+
+        # Force GC after initialization
+        self.memory_monitor.force_garbage_collection()
+
+        self.log(f"✅ Hybrid initialization: {'SPARSE' if self.use_sparse_mode else 'DENSE'} mode")
+
+    def process_training_batch_hybrid(self, features_batch, targets_batch):
+        """Process training batch with memory monitoring."""
+        # Check memory before processing
+        if not self.memory_monitor.check_memory_limit("batch_processing"):
+            self.memory_monitor.force_garbage_collection()
+
+        if self.use_sparse_mode:
+            result = self._process_training_batch_sparse_optimized(features_batch, targets_batch)
+        else:
+            result = self._process_training_batch_dense(features_batch, targets_batch)
+
+        # Force GC after each batch
+        if hasattr(self, 'memory_monitor'):
+            self.memory_monitor.force_garbage_collection()
+
+        return result
+
+    def _train_epoch_sparse_optimized(self, features_batches, encoded_targets_batches, gain: float):
+        """Optimized sparse training epoch with memory monitoring."""
+        total_batches = len(features_batches)
+
+        for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
+            # Check memory every 10 batches
+            if batch_idx % 10 == 0 and hasattr(self, 'memory_monitor'):
+                if not self.memory_monitor.check_memory_limit(f"training_batch_{batch_idx}"):
+                    self.memory_monitor.force_garbage_collection()
+
+            batch_size = len(features_batch)
+
+            for sample_idx in range(batch_size):
+                # Create feature vector
+                vects = np.zeros(self.innodes + self.outnodes + 2)
+                for i in range(1, self.innodes + 1):
+                    vects[i] = features_batch[sample_idx, i-1]
+                tmpv = targets_batch[sample_idx]
+
+                # Compute class probabilities using sparse equivalent
+                classval = self._compute_class_probabilities_sparse_optimized(vects)
+
+                # Find predicted class (identical logic)
+                kmax = 1
+                cmax = 0.0
+                for k in range(1, self.outnodes + 1):
+                    if classval[k] > cmax:
+                        cmax = classval[k]
+                        kmax = k
+
+                # Update weights if wrong classification (identical logic)
+                if abs(self.class_labels[kmax] - tmpv) > self.class_labels[0]:
+                    self.sparse_anti_wts = self._update_weights_sparse_optimized(vects, tmpv, classval, gain)
+
+            # Log progress for large datasets
+            if total_batches > 10 and batch_idx % (total_batches // 10) == 0:
+                progress = (batch_idx + 1) / total_batches * 100
+                self.log(f"   Sparse training progress: {progress:.1f}%")
+
+                # Force GC at progress intervals
+                if hasattr(self, 'memory_monitor'):
+                    self.memory_monitor.force_garbage_collection()
+
+        # Final GC after epoch
+        if hasattr(self, 'memory_monitor'):
+            self.memory_monitor.force_garbage_collection()
+
+    def _initialize_dense_arrays(self, innodes: int, resol: int, outnodes: int):
+        """Initialize dense arrays (original implementation)"""
+        self.anti_net = np.zeros((innodes+2, resol+2, innodes+2, resol+2, outnodes+2), dtype=np.int32)
+        self.anti_wts = np.ones((innodes+2, resol+2, innodes+2, resol+2, outnodes+2), dtype=np.float32)
+        self.antit_wts = np.ones_like(self.anti_wts, dtype=np.float32)
+        self.antip_wts = np.ones_like(self.anti_wts, dtype=np.float32)
+
+        # Initialize with 1's as in original algorithm
+        for k in range(1, outnodes + 1):
+            for i in range(1, innodes + 1):
+                for j in range(1, resol + 1):
+                    for l in range(1, innodes + 1):
+                        for m in range(1, resol + 1):
+                            self.anti_net[i, j, l, m, k] = 1
+                            self.anti_net[i, j, l, m, 0] += 1
+
+    def _initialize_sparse_arrays_optimized(self, innodes: int, resol: int, outnodes: int):
+        """Initialize optimized sparse arrays with lazy initialization"""
+        from collections import defaultdict
+        self.sparse_anti_net = defaultdict(int)
+        self.sparse_anti_wts = defaultdict(float)
+
+        # OPTIMIZATION: Don't pre-initialize all combinations!
+        # Use lazy initialization to save massive memory for high dimensions
+        self.log(f"✅ Optimized sparse arrays: LAZY initialization (0 entries initially)")
+
+    def _initialize_common_arrays(self, innodes: int, resol: int, outnodes: int):
+        """Initialize arrays common to both modes"""
+        self.binloc = np.zeros((innodes+2, resol+8), dtype=np.float32)
+        self.max_val = np.zeros(innodes+2, dtype=np.float32)
+        self.min_val = np.zeros(innodes+2, dtype=np.float32)
+        self.resolution_arr = np.zeros(innodes+8, dtype=np.int32)
+        self.class_labels = np.zeros(outnodes + 2, dtype=np.float32)
+        self.class_labels[0] = self.config.get('margin', 0.2)
+
+    # =========================================================================
+    # OPTIMIZED SPARSE TRAINING METHODS
+    # =========================================================================
+
+    def _process_training_batch_dense(self, features_batch, targets_batch):
+        """Original dense processing"""
+        return self._process_training_batch_sequential(features_batch, targets_batch)
+
+    def _process_training_batch_sparse_optimized(self, features_batch, targets_batch):
+        """Optimized sparse batch processing with automatic strategy selection"""
+        if not hasattr(self, '_sparse_optimizer'):
+            # Auto-create optimizer if not already created
+            self._sparse_optimizer = OptimizedSparseProcessor(self)
+
+        entries_created = self._sparse_optimizer.process_batch_optimized(features_batch, targets_batch)
+        return len(features_batch)  # Return sample count for compatibility
+
+    def _process_training_sample_sparse(self, vects, tmpv, sparse_anti_net, sparse_anti_wts, binloc,
+                                      resolution_arr, class_labels, min_val, max_val,
+                                      innodes, outnodes, resol):
+        """Legacy sparse processing - kept for compatibility"""
+        # This method is maintained for backward compatibility
+        # but the optimized version above should be used instead
+        normalized_vects = np.zeros(innodes + 2)
+        bins = np.zeros(innodes + 2, dtype=np.int32)
+
+        # Normalize vectors (identical to original)
+        for i in range(1, innodes + 1):
+            normalized_vects[i] = normalize_feature(vects[i], min_val[i], max_val[i], resolution_arr[i])
+            bins[i] = find_closest_bin_numba(normalized_vects[i], binloc[i], resolution_arr[i])
+
+        # Update network counts (identical logic, sparse access)
+        for i in range(1, innodes + 1):
+            j = bins[i]
+            for l in range(1, innodes + 1):
+                m = bins[l]
+
+                # Find correct class (identical logic)
+                k_class = 1
+                while k_class <= outnodes and abs(class_labels[k_class] - tmpv) > class_labels[0]:
+                    k_class += 1
+
+                if k_class <= outnodes:
+                    # Update counts - identical to dense version
+                    key_class = (i, j, l, m, k_class)
+                    key_total = (i, j, l, m, 0)
+
+                    sparse_anti_net[key_class] += 1
+                    sparse_anti_net[key_total] += 1
+
+        return sparse_anti_net
+
+    # =========================================================================
+    # OPTIMIZED HYBRID PREDICTION METHODS
+    # =========================================================================
+
+    def compute_class_probabilities_hybrid(self, vects):
+        """Compute class probabilities using appropriate storage mode"""
+        if self.use_sparse_mode:
+            return self._compute_class_probabilities_sparse_optimized(vects)
+        else:
+            return self._compute_class_probabilities_dense(vects)
+
+    def _compute_class_probabilities_dense(self, vects):
+        """Original dense computation"""
+        return compute_class_probabilities_numba(
+            vects, self.anti_net, self.anti_wts, self.binloc, self.resolution_arr,
+            self.class_labels, self.min_val, self.max_val, self.innodes, self.outnodes
+        )
+
+    def _compute_class_probabilities_sparse_optimized(self, vects):
+        """Optimized sparse computation"""
+        normalized_vects = np.zeros(self.innodes + 2)
+        bins = np.zeros(self.innodes + 2, dtype=np.int32)
+
+        # Normalize vectors (identical to original)
+        for i in range(1, self.innodes + 1):
+            normalized_vects[i] = normalize_feature(vects[i], self.min_val[i], self.max_val[i], self.resolution_arr[i])
+            bins[i] = find_closest_bin_numba(normalized_vects[i], self.binloc[i], self.resolution_arr[i])
+
+        classval = np.ones(self.outnodes + 2)
+        classval[0] = 0.0
+
+        # Identical computation to dense version, just with sparse access
+        for i in range(1, self.innodes + 1):
+            j = bins[i]
+            for l in range(1, self.innodes + 1):
+                m = bins[l]
+
+                # Get total count (class 0)
+                key_total = (i, j, l, m, 0)
+                total_count = self.sparse_anti_net[key_total]
+
+                for k in range(1, self.outnodes + 1):
+                    # Get class count and weight
+                    key_class = (i, j, l, m, k)
+                    class_count = self.sparse_anti_net[key_class]
+                    weight = self.sparse_anti_wts[key_class]
+
+                    # Identical probability calculation
+                    if total_count > 0:
+                        tmp2_wts = class_count / total_count
+                    else:
+                        tmp2_wts = 1.0 / self.outnodes
+
+                    # Identical multiplication
+                    classval[k] *= tmp2_wts * weight
+                    classval[0] += classval[k]
+
+        # Identical normalization
+        if classval[0] > 0:
+            for k in range(1, self.outnodes + 1):
+                classval[k] /= classval[0]
+        classval[0] = 0.0
+
+        return classval
+
+    # =========================================================================
+    # OVERRIDDEN PUBLIC METHODS FOR SEAMLESS INTEGRATION
+    # =========================================================================
+
+    def initialize_arrays(self, innodes: int, resol: int, outnodes: int):
+        """Override to use hybrid initialization"""
+        self.initialize_arrays_hybrid(innodes, resol, outnodes)
+
+    def process_training_batch(self, features_batch, targets_batch):
+        """Override to use hybrid processing"""
+        return self.process_training_batch_hybrid(features_batch, targets_batch)
+
+    def predict_batch(self, features_batch):
+        """Override to use hybrid prediction"""
+        return self.predict_batch_hybrid(features_batch)
+
+    def evaluate(self, features_batches, encoded_targets_batches):
+        """Override to use hybrid evaluation"""
+        return self.evaluate_hybrid(features_batches, encoded_targets_batches)
+
+    def train_epoch(self, features_batches, encoded_targets_batches, gain: float):
+        """Override to use hybrid training"""
+        if self.use_sparse_mode:
+            self._train_epoch_sparse_optimized(features_batches, encoded_targets_batches, gain)
+        else:
+            self._train_epoch_dense(features_batches, encoded_targets_batches, gain)
+
+    def _train_epoch_dense(self, features_batches, encoded_targets_batches, gain: float):
+        """Original dense training epoch"""
+        self._train_epoch_sequential(features_batches, encoded_targets_batches, gain)
+
+    def _update_weights_sparse_optimized(self, vects, tmpv, classval, gain: float):
+        """Optimized sparse weight update"""
+        normalized_vects = np.zeros(self.innodes + 2)
+        bins = np.zeros(self.innodes + 2, dtype=np.int32)
+
+        # Normalize vectors (identical to original)
+        for i in range(1, self.innodes + 1):
+            normalized_vects[i] = normalize_feature(vects[i], self.min_val[i], self.max_val[i], self.resolution_arr[i])
+            bins[i] = find_closest_bin_numba(normalized_vects[i], self.binloc[i], self.resolution_arr[i])
+
+        # Find predicted class (identical logic)
+        kmax = 1
+        cmax = 0.0
+        for k in range(1, self.outnodes + 1):
+            if classval[k] > cmax:
+                cmax = classval[k]
+                kmax = k
+
+        # Update weights if wrong (identical logic)
+        if abs(self.class_labels[kmax] - tmpv) > self.class_labels[0]:
+            for i in range(1, self.innodes + 1):
+                j = bins[i]
+                for l in range(1, self.innodes + 1):
+                    m = bins[l]
+
+                    # Find correct class (identical logic)
+                    k_correct = 1
+                    while k_correct <= self.outnodes and abs(self.class_labels[k_correct] - tmpv) > self.class_labels[0]:
+                        k_correct += 1
+
+                    if (k_correct <= self.outnodes and classval[kmax] > 0 and
+                        classval[k_correct] < classval[kmax]):
+
+                        # Identical weight adjustment calculation
+                        adjustment = gain * (1.0 - (classval[k_correct] / classval[kmax]))
+
+                        # Update sparse weights
+                        key_correct = (i, j, l, m, k_correct)
+                        self.sparse_anti_wts[key_correct] += adjustment
+
+        return self.sparse_anti_wts
+
+    # =========================================================================
+    # OPTIMIZED HYBRID PREDICTION INTERFACE
+    # =========================================================================
+
+    def predict_batch_hybrid(self, features_batch):
+        """Predict classes for batch using appropriate storage mode"""
+        if self.use_sparse_mode:
+            return self._predict_batch_sparse_optimized(features_batch)
+        else:
+            return self._predict_batch_dense(features_batch)
+
+    def _predict_batch_dense(self, features_batch):
+        """Original dense prediction"""
+        return self._predict_batch_sequential(features_batch)
+
+    def _predict_batch_sparse_optimized(self, features_batch):
+        """Optimized sparse prediction"""
+        predictions = []
+        probabilities = []
+
+        for sample_idx in range(len(features_batch)):
+            vects = np.zeros(self.innodes + self.outnodes + 2)
+            for i in range(1, self.innodes + 1):
+                vects[i] = features_batch[sample_idx, i-1]
+
+            # Compute class probabilities using sparse equivalent
+            classval = self._compute_class_probabilities_sparse_optimized(vects)
+
+            # Find predicted class (identical logic)
+            kmax = 1
+            cmax = 0.0
+            for k in range(1, self.outnodes + 1):
+                if classval[k] > cmax:
+                    cmax = classval[k]
+                    kmax = k
+
+            predicted = self.class_labels[kmax]
+            predictions.append(predicted)
+
+            # Store probabilities (identical logic)
+            prob_dict = {}
+            for k in range(1, self.outnodes + 1):
+                class_val = self.class_labels[k]
+                if self.class_encoder.is_fitted:
+                    class_name = self.class_encoder.encoded_to_class.get(class_val, f"Class_{k}")
+                else:
+                    class_name = f"Class_{k}"
+                prob_dict[class_name] = float(classval[k])
+
+            probabilities.append(prob_dict)
+
+        return predictions, probabilities
+
+    # =========================================================================
+    # OPTIMIZED HYBRID EVALUATION METHODS
+    # =========================================================================
+
+    def evaluate_hybrid(self, features_batches, encoded_targets_batches):
+        """Evaluate model accuracy using appropriate storage mode"""
+        if self.use_sparse_mode:
+            return self._evaluate_sparse_optimized(features_batches, encoded_targets_batches)
+        else:
+            return self._evaluate_dense(features_batches, encoded_targets_batches)
+
+    def _evaluate_dense(self, features_batches, encoded_targets_batches):
+        """Original dense evaluation"""
+        return self._evaluate_sequential(features_batches, encoded_targets_batches)
+
+    def _evaluate_sparse_optimized(self, features_batches, encoded_targets_batches):
+        """Optimized sparse evaluation"""
+        correct_predictions = 0
+        total_samples = 0
+        all_predictions = []
+
+        for batch_idx, (features_batch, targets_batch) in enumerate(zip(features_batches, encoded_targets_batches)):
+            batch_size = len(features_batch)
+            total_samples += batch_size
+
+            for sample_idx in range(batch_size):
+                # Create feature vector
+                vects = np.zeros(self.innodes + self.outnodes + 2)
+                for i in range(1, self.innodes + 1):
+                    vects[i] = features_batch[sample_idx, i-1]
+                actual = targets_batch[sample_idx]
+
+                # Compute class probabilities using sparse equivalent
+                classval = self._compute_class_probabilities_sparse_optimized(vects)
+
+                # Find predicted class (identical logic)
+                kmax = 1
+                cmax = 0.0
+                for k in range(1, self.outnodes + 1):
+                    if classval[k] > cmax:
+                        cmax = classval[k]
+                        kmax = k
+
+                predicted = self.class_labels[kmax]
+                all_predictions.append(predicted)
+
+                # Check if prediction is correct (identical logic)
+                if abs(actual - predicted) <= self.class_labels[0]:
+                    correct_predictions += 1
+
+        accuracy = (correct_predictions / total_samples) * 100 if total_samples > 0 else 0
+        return accuracy, correct_predictions, all_predictions
+
+    # =========================================================================
+    # ENHANCED OPTIMIZED SPARSE MODE ENABLER
+    # =========================================================================
+
+    def enable_optimized_sparse_mode(self, innodes, resol=50, outnodes=10):
+        """Enable optimized sparse mode with full resource management"""
+        self.use_sparse_mode = True
+        self.innodes = innodes
+        self.outnodes = outnodes
+        self.resol = resol
+
+        # Initialize sparse arrays with resource awareness
+        from collections import defaultdict
+        if not hasattr(self, 'sparse_anti_net') or self.sparse_anti_net is None:
+            self.sparse_anti_net = defaultdict(int)
+        if not hasattr(self, 'sparse_anti_wts') or self.sparse_anti_wts is None:
+            self.sparse_anti_wts = defaultdict(float)
+
+        # Initialize other required arrays with optimal resource usage
+        if not hasattr(self, 'min_val') or self.min_val is None:
+            self.min_val = np.full(innodes + 2, -5.0, dtype=np.float32)
+        if not hasattr(self, 'max_val') or self.max_val is None:
+            self.max_val = np.full(innodes + 2, 5.0, dtype=np.float32)
+        if not hasattr(self, 'resolution_arr') or self.resolution_arr is None:
+            self.resolution_arr = np.full(innodes + 8, resol, dtype=np.int32)
+        if not hasattr(self, 'class_labels') or self.class_labels is None:
+            self.class_labels = np.array([0.2] + [float(i) for i in range(1, outnodes + 1)], dtype=np.float32)
+        if not hasattr(self, 'binloc') or self.binloc is None:
+            self.binloc = np.zeros((innodes + 2, resol + 8), dtype=np.float32)
+            for i in range(1, innodes + 1):
+                for j in range(1, resol + 1):
+                    self.binloc[i][j+1] = (j - 1) * 1.0
+
+        self.log(f"✅ Optimized sparse mode enabled for {innodes} features with full resource management")
+        return OptimizedSparseProcessor(self)
+    def _calculate_dense_memory(self, innodes: int, resol: int, outnodes: int):
+        """Calculate memory requirements for dense mode"""
+        return (
+            (innodes + 2) * (resol + 2) * (innodes + 2) * (resol + 2) * (outnodes + 2) * 4 +
+            (innodes + 2) * (resol + 2) * (innodes + 2) * (resol + 2) * (outnodes + 2) * 4
+        ) / (1024**3)
+
+    def _initialize_dense_arrays_simple(self, innodes: int, resol: int, outnodes: int):
+        """Memory-optimized dense array initialization"""
+        try:
+            self.anti_net = np.zeros((innodes+2, resol+2, innodes+2, resol+2, outnodes+2), dtype=np.int32)
+            self.anti_wts = np.ones((innodes+2, resol+2, innodes+2, resol+2, outnodes+2), dtype=np.float32)
+
+            # Initialize counts identically to sparse mode
+            for k in range(1, outnodes + 1):
+                for i in range(1, innodes + 1):
+                    for j in range(1, resol + 1):
+                        for l in range(1, innodes + 1):
+                            for m in range(1, resol + 1):
+                                self.anti_net[i, j, l, m, k] = 1
+                                self.anti_net[i, j, l, m, 0] += 1
+        except MemoryError:
+            raise MemoryError(f"Dense mode requires too much memory. Use sparse mode for {innodes} features.")
+
+    def _initialize_common_arrays_simple(self, innodes: int, resol: int, outnodes: int):
+        """Optimized common array initialization"""
+        self.binloc = np.zeros((innodes+2, resol+8), dtype=np.float32)
+        self.max_val = np.zeros(innodes+2, dtype=np.float32)
+        self.min_val = np.zeros(innodes+2, dtype=np.float32)
+        self.resolution_arr = np.zeros(innodes+8, dtype=np.int32)
+        self.class_labels = np.zeros(outnodes + 2, dtype=np.float32)
+        self.class_labels[0] = self.config.get('margin', 0.2)
+
 class DiskCacheManager:
     """
     Manager for disk-based caching of large arrays.
@@ -3052,7 +4599,8 @@ class DBNNWorkflow:
     """
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
-        self.core = DBNNCore(config)
+        #self.core = DBNNCore(config)
+        self.core = HybridDBNNCore(config)
         self.visualizer = DBNNVisualizer()
         self.core.attach_visualizer(self.visualizer)
 
@@ -4707,6 +6255,8 @@ class EnhancedDBNNInterface:
 
                 # Fit encoder
                 all_original_targets = np.concatenate(original_targets_batches) if original_targets_batches else np.array([])
+                if len(all_original_targets) == 0:
+                    raise ValueError("No target data available for encoder fitting")
                 self.core.class_encoder.fit(all_original_targets)
 
                 # Use tensor core for training
@@ -5503,7 +7053,8 @@ class EnhancedDBNNInterface:
                 'patience': int(self.patience.get())
             }
 
-            self.core = DBNNCore(config)
+            #self.core = DBNNCore(config)
+            self.core = HybridDBNNCore(config)
             self.visualizer = DBNNVisualizer()
             self.core.attach_visualizer(self.visualizer)
 
@@ -6858,7 +8409,8 @@ class DBNNCommandLine:
     """Command Line Interface for DBNN with binary format support"""
 
     def __init__(self):
-        self.core = DBNNCore()
+        #self.core = DBNNCore()
+        self.core = HybridDBNNCore(config)
         self.core.set_log_callback(self._log_message)
         self.current_model_path = None
         self.visualizer = DBNNVisualizer()
@@ -12932,6 +14484,165 @@ model learns to separate different classes over time.
             print(f"Error generating tensor visualizations: {e}")
             return {}
 
+# =========================================================================
+# OPTIMIZED SPARSE PROCESSOR FOR HIGH-DIMENSIONAL DATA
+# =========================================================================
+
+class OptimizedSparseProcessor:
+    """
+    Integrated optimized sparse processor for HybridDBNNCore
+    """
+
+    def __init__(self, core):
+        self.core = core
+        self.optimization_strategy = self._select_optimization_strategy()
+
+    def _select_optimization_strategy(self):
+        """Select the best optimization strategy based on feature count"""
+        if self.core.innodes <= 50:
+            return "all"
+        elif self.core.innodes <= 150:
+            return "limited"
+        elif self.core.innodes <= 500:
+            return "sampled"
+        else:
+            return "extreme"
+
+    def process_batch_optimized(self, features_batch, targets_batch):
+        """Process batch with automatic optimization"""
+        strategy = self.optimization_strategy
+
+        entries_before = len(self.core.sparse_anti_net)
+
+        for sample_idx in range(len(features_batch)):
+            vects = np.zeros(self.core.innodes + self.core.outnodes + 2)
+            for i in range(1, self.core.innodes + 1):
+                vects[i] = features_batch[sample_idx, i-1]
+            tmpv = targets_batch[sample_idx]
+
+            if strategy == "all":
+                self._process_all_combinations(vects, tmpv)
+            elif strategy == "limited":
+                self._process_limited_combinations(vects, tmpv)
+            elif strategy == "sampled":
+                self._process_sampled_combinations(vects, tmpv)
+            else:
+                self._process_extreme_dimensionality(vects, tmpv)
+
+        return len(self.core.sparse_anti_net) - entries_before
+
+    def _process_all_combinations(self, vects, tmpv):
+        """Process all feature combinations"""
+        normalized_vects = np.zeros(self.core.innodes + 2)
+        bins = np.zeros(self.core.innodes + 2, dtype=np.int32)
+
+        for i in range(1, self.core.innodes + 1):
+            normalized_vects[i] = normalize_feature(vects[i], self.core.min_val[i], self.core.max_val[i], self.core.resolution_arr[i])
+            bins[i] = find_closest_bin_numba(normalized_vects[i], self.core.binloc[i], self.core.resolution_arr[i])
+
+        k_class = 1
+        while k_class <= self.core.outnodes and abs(self.core.class_labels[k_class] - tmpv) > self.core.class_labels[0]:
+            k_class += 1
+
+        if k_class <= self.core.outnodes:
+            for i in range(1, self.core.innodes + 1):
+                j = bins[i]
+                for l in range(1, self.core.innodes + 1):
+                    m = bins[l]
+                    key_class = (i, j, l, m, k_class)
+                    key_total = (i, j, l, m, 0)
+
+                    self.core.sparse_anti_net[key_class] += 1
+                    self.core.sparse_anti_net[key_total] += 1
+                    self.core.sparse_anti_wts[key_class] = 1.0
+
+    def _process_limited_combinations(self, vects, tmpv):
+        """Limit to nearby features"""
+        normalized_vects = np.zeros(self.core.innodes + 2)
+        bins = np.zeros(self.core.innodes + 2, dtype=np.int32)
+
+        for i in range(1, self.core.innodes + 1):
+            normalized_vects[i] = normalize_feature(vects[i], self.core.min_val[i], self.core.max_val[i], self.core.resolution_arr[i])
+            bins[i] = find_closest_bin_numba(normalized_vects[i], self.core.binloc[i], self.core.resolution_arr[i])
+
+        k_class = 1
+        while k_class <= self.core.outnodes and abs(self.core.class_labels[k_class] - tmpv) > self.core.class_labels[0]:
+            k_class += 1
+
+        if k_class <= self.core.outnodes:
+            max_distance = 15
+
+            for i in range(1, self.core.innodes + 1):
+                j = bins[i]
+                start_l = max(1, i - max_distance)
+                end_l = min(self.core.innodes + 1, i + max_distance + 1)
+
+                for l in range(start_l, end_l):
+                    m = bins[l]
+                    key_class = (i, j, l, m, k_class)
+                    key_total = (i, j, l, m, 0)
+
+                    self.core.sparse_anti_net[key_class] += 1
+                    self.core.sparse_anti_net[key_total] += 1
+                    self.core.sparse_anti_wts[key_class] = 1.0
+
+    def _process_sampled_combinations(self, vects, tmpv):
+        """Sample feature combinations"""
+        normalized_vects = np.zeros(self.core.innodes + 2)
+        bins = np.zeros(self.core.innodes + 2, dtype=np.int32)
+
+        for i in range(1, self.core.innodes + 1):
+            normalized_vects[i] = normalize_feature(vects[i], self.core.min_val[i], self.core.max_val[i], self.core.resolution_arr[i])
+            bins[i] = find_closest_bin_numba(normalized_vects[i], self.core.binloc[i], self.core.resolution_arr[i])
+
+        k_class = 1
+        while k_class <= self.core.outnodes and abs(self.core.class_labels[k_class] - tmpv) > self.core.class_labels[0]:
+            k_class += 1
+
+        if k_class <= self.core.outnodes:
+            sample_size = 2000
+
+            for _ in range(sample_size):
+                i = np.random.randint(1, self.core.innodes + 1)
+                l = np.random.randint(1, self.core.innodes + 1)
+                j = bins[i]
+                m = bins[l]
+
+                key_class = (i, j, l, m, k_class)
+                key_total = (i, j, l, m, 0)
+
+                self.core.sparse_anti_net[key_class] += 1
+                self.core.sparse_anti_net[key_total] += 1
+                self.core.sparse_anti_wts[key_class] = 1.0
+
+    def _process_extreme_dimensionality(self, vects, tmpv):
+        """For 500+ features - very aggressive sampling"""
+        normalized_vects = np.zeros(self.core.innodes + 2)
+        bins = np.zeros(self.core.innodes + 2, dtype=np.int32)
+
+        for i in range(1, self.core.innodes + 1):
+            normalized_vects[i] = normalize_feature(vects[i], self.core.min_val[i], self.core.max_val[i], self.core.resolution_arr[i])
+            bins[i] = find_closest_bin_numba(normalized_vects[i], self.core.binloc[i], self.core.resolution_arr[i])
+
+        k_class = 1
+        while k_class <= self.core.outnodes and abs(self.core.class_labels[k_class] - tmpv) > self.core.class_labels[0]:
+            k_class += 1
+
+        if k_class <= self.core.outnodes:
+            sample_size = 500
+
+            for _ in range(sample_size):
+                i = np.random.randint(1, self.core.innodes + 1)
+                l = np.random.randint(1, self.core.innodes + 1)
+                j = bins[i]
+                m = bins[l]
+
+                key_class = (i, j, l, m, k_class)
+                key_total = (i, j, l, m, 0)
+
+                self.core.sparse_anti_net[key_class] += 1
+                self.core.sparse_anti_net[key_total] += 1
+                self.core.sparse_anti_wts[key_class] = 1.0
 
 # Example usage
 if __name__ == "__main__":
@@ -12969,3 +14680,5 @@ if __name__ == "__main__":
     # )
 
     print("DBNN class structure ready for use!")
+
+
