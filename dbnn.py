@@ -36,6 +36,13 @@ import pickle
 import gzip
 from typing import List, Tuple, Dict, Any, Optional, Union
 
+import psutil
+import threading
+import time
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import matplotlib.animation as animation
+
 # Global constants
 max_resol = 1600
 features = 100
@@ -578,80 +585,373 @@ class FeatureEncoder:
         self.is_fitted = True
 
 class MemoryMonitor:
-    """Real-time memory monitoring with 60% limit enforcement."""
+    """Complete memory monitoring implementation with all methods"""
 
-    def __init__(self, core):
+    def __init__(self, core, gui_root=None):
         self.core = core
+        self.gui_root = gui_root
         self.memory_warnings = 0
-        self.max_memory_warnings = 5
+        self.max_memory_warnings = 3
+        self.monitoring_active = False
+        self.monitor_thread = None
+        self.memory_history = []
+        self.max_history = 100
+        self.cleanup_callbacks = []
 
-    def get_memory_usage(self):
-        """Get current memory usage in GB."""
-        try:
-            import psutil
-            import os
-            process = psutil.Process(os.getpid())
-            memory_gb = process.memory_info().rss / (1024**3)
-            return memory_gb
-        except:
-            return 0
+        # GUI components
+        self.memory_label = None
+        self.progress_bar = None
+        self.status_label = None
 
-    def get_available_memory(self):
-        """Get available system memory in GB."""
+        self.setup_memory_limits()
+
+        # Register default cleanup callbacks
+        self.register_cleanup_callback(self.force_standard_cleanup)
+        self.register_cleanup_callback(self.force_garbage_collection)
+
+    def setup_memory_limits(self):
+        """Calculate absolute memory limits in bytes"""
         try:
             import psutil
             system_memory = psutil.virtual_memory()
-            available_gb = system_memory.available / (1024**3)
-            return available_gb
+            self.total_memory_bytes = system_memory.total
+            self.available_memory_bytes = system_memory.available
+
+            # Use 60% of available memory as soft limit, 90% as hard limit
+            self.limit_60_bytes = self.available_memory_bytes * 0.6
+            self.limit_90_bytes = self.available_memory_bytes * 0.9
+
+            if hasattr(self.core, 'log'):
+                self.core.log(f"🔒 Memory limits set: {self.limit_60_bytes/(1024**3):.1f}GB (60%), {self.limit_90_bytes/(1024**3):.1f}GB (90%)")
+        except Exception as e:
+            if hasattr(self.core, 'log'):
+                self.core.log(f"⚠️ Memory limit setup warning: {e}")
+            # Conservative defaults
+            self.total_memory_bytes = 8 * 1024**3  # 8GB
+            self.available_memory_bytes = 6 * 1024**3  # 6GB available
+            self.limit_60_bytes = self.available_memory_bytes * 0.6
+            self.limit_90_bytes = self.available_memory_bytes * 0.9
+
+    def get_memory_usage(self):
+        """Get current memory usage in bytes and percentage"""
+        try:
+            import psutil
+            process = psutil.Process()
+            memory_bytes = process.memory_info().rss
+
+            # Calculate percentage of AVAILABLE memory
+            memory_percent = (memory_bytes / self.available_memory_bytes) if self.available_memory_bytes > 0 else 0
+
+            return memory_bytes, memory_percent
+        except Exception as e:
+            if hasattr(self.core, 'log'):
+                self.core.log(f"⚠️ Memory monitoring error: {e}")
+            return 0, 0
+
+    def get_available_memory(self):
+        """Get available system memory"""
+        try:
+            import psutil
+            return psutil.virtual_memory().available
         except:
-            return 4.0  # Conservative default
+            return self.available_memory_bytes
+
+    def get_memory_info(self):
+        """Get comprehensive memory information"""
+        try:
+            import psutil
+            system_memory = psutil.virtual_memory()
+            process = psutil.Process()
+            process_memory = process.memory_info().rss
+
+            return {
+                'system_total_gb': system_memory.total / (1024**3),
+                'system_available_gb': system_memory.available / (1024**3),
+                'system_used_gb': system_memory.used / (1024**3),
+                'system_used_percent': system_memory.percent,
+                'process_memory_gb': process_memory / (1024**3),
+                'process_memory_percent': (process_memory / self.available_memory_bytes) * 100,
+                'monitor_60_limit_gb': self.limit_60_bytes / (1024**3),
+                'monitor_90_limit_gb': self.limit_90_bytes / (1024**3),
+                'memory_warnings': self.memory_warnings,
+                'monitoring_active': self.monitoring_active
+            }
+        except Exception as e:
+            if hasattr(self.core, 'log'):
+                self.core.log(f"Memory info error: {e}")
+            return {}
 
     def check_memory_limit(self, operation_name=""):
-        """
-        Check if memory usage is within 60% limit.
-        Returns True if safe, False if approaching limit.
-        """
+        """Check current memory usage against limits"""
         try:
-            current_usage = self.get_memory_usage()
-            available_memory = self.get_available_memory()
-            total_memory = current_usage + available_memory
-            usage_percent = (current_usage / total_memory) * 100 if total_memory > 0 else 0
+            memory_bytes, memory_percent = self.get_memory_usage()
 
-            # 60% hard limit
-            if usage_percent > 60:
-                self.memory_warnings += 1
-                self.core.log(f"🚨 MEMORY CRITICAL: {usage_percent:.1f}% used in {operation_name}")
-                if self.memory_warnings >= self.max_memory_warnings:
-                    raise MemoryError(f"Memory usage exceeded 60% limit repeatedly. Current: {usage_percent:.1f}%")
-                return False
-            elif usage_percent > 50:
-                self.core.log(f"⚠️ MEMORY WARNING: {usage_percent:.1f}% used in {operation_name}")
+            # Log memory status for the operation
+            if hasattr(self.core, 'log'):
+                memory_gb = memory_bytes / (1024**3)
+                available_gb = self.available_memory_bytes / (1024**3)
+                self.core.log(f"💾 Memory check for {operation_name}: {memory_percent*100:.1f}% ({memory_gb:.2f}GB / {available_gb:.1f}GB available)")
 
-            return True
+            # Check memory limits and take appropriate action
+            self._check_memory_limits(memory_bytes, memory_percent)
+
+            return memory_percent
 
         except Exception as e:
-            self.core.log(f"⚠️ Memory monitoring error: {e}")
-            return True  # Continue if monitoring fails
+            if hasattr(self.core, 'log'):
+                self.core.log(f"⚠️ Memory check warning for {operation_name}: {e}")
+            return 0.0
 
-    def force_garbage_collection(self):
-        """Force garbage collection and clear caches."""
+    def start_monitoring(self):
+        """Start real-time memory monitoring"""
+        if self.monitoring_active:
+            return
+
+        self.monitoring_active = True
+        self.monitor_thread = threading.Thread(target=self._monitoring_loop, daemon=True)
+        self.monitor_thread.start()
+
+        if hasattr(self.core, 'log'):
+            self.core.log("🔍 Real-time memory monitoring started")
+
+    def stop_monitoring(self):
+        """Stop memory monitoring"""
+        self.monitoring_active = False
+        if self.monitor_thread and self.monitor_thread.is_alive():
+            self.monitor_thread.join(timeout=1.0)
+        if hasattr(self.core, 'log'):
+            self.core.log("🔍 Memory monitoring stopped")
+
+    def _monitoring_loop(self):
+        """Main monitoring loop"""
+        check_interval = 2.0  # Check every 2 seconds to reduce overhead
+
+        while self.monitoring_active:
+            try:
+                memory_bytes, memory_percent = self.get_memory_usage()
+                self.memory_history.append((time.time(), memory_bytes, memory_percent))
+
+                # Keep only recent history
+                if len(self.memory_history) > self.max_history:
+                    self.memory_history.pop(0)
+
+                # Check memory limits
+                self._check_memory_limits(memory_bytes, memory_percent)
+
+                # Update GUI if available
+                self._update_gui_display(memory_bytes, memory_percent)
+
+                # Log memory status periodically (less frequent to avoid spam)
+                if len(self.memory_history) % 15 == 0:  # Every ~30 seconds
+                    if hasattr(self.core, 'log'):
+                        self.core.log(f"💾 Memory: {memory_percent*100:.1f}% ({memory_bytes/(1024**3):.2f}GB)")
+
+            except Exception as e:
+                if hasattr(self.core, 'log'):
+                    self.core.log(f"⚠️ Monitoring loop error: {e}")
+
+            time.sleep(check_interval)
+
+    def _update_gui_display(self, memory_bytes, memory_percent):
+        """Update GUI display safely"""
+        if not GUI_AVAILABLE or not self.gui_root:
+            return
+
+        try:
+            # Use after() to schedule in main thread
+            self.gui_root.after(0, self._safe_gui_update, memory_bytes, memory_percent)
+        except Exception as e:
+            # Silently fail for GUI updates in headless mode
+            pass
+
+    def _safe_gui_update(self, memory_bytes, memory_percent):
+        """Safe GUI update that runs in main thread"""
+        try:
+            memory_gb = memory_bytes / (1024**3)
+            available_gb = self.available_memory_bytes / (1024**3)
+
+            # Update memory label if it exists
+            if hasattr(self, 'memory_label') and self.memory_label:
+                self.memory_label.config(
+                    text=f"Memory: {memory_percent*100:.1f}% ({memory_gb:.2f} GB / {available_gb:.1f} GB available)"
+                )
+
+            # Update progress bar if it exists
+            if hasattr(self, 'progress_bar') and self.progress_bar:
+                self.progress_bar['value'] = memory_percent * 100
+
+                # Color coding based on memory usage
+                if memory_percent > 0.9:
+                    self.progress_bar.configure(style="Emergency.Horizontal.TProgressbar")
+                    if hasattr(self, 'status_label'):
+                        self.status_label.config(text="🔴 CRITICAL - SHUTDOWN IMMINENT", foreground="darkred")
+                elif memory_percent > 0.8:
+                    self.progress_bar.configure(style="Warning.Horizontal.TProgressbar")
+                    if hasattr(self, 'status_label'):
+                        self.status_label.config(text="🟠 SEVERE - AGGRESSIVE CLEANUP", foreground="red")
+                elif memory_percent > 0.7:
+                    self.progress_bar.configure(style="Warning.Horizontal.TProgressbar")
+                    if hasattr(self, 'status_label'):
+                        self.status_label.config(text="🟡 HIGH - CLEANING", foreground="orange")
+                elif memory_percent > 0.6:
+                    self.progress_bar.configure(style="Caution.Horizontal.TProgressbar")
+                    if hasattr(self, 'status_label'):
+                        self.status_label.config(text="🟢 WARNING - MONITORING", foreground="orange")
+                else:
+                    self.progress_bar.configure(style="Normal.Horizontal.TProgressbar")
+                    if hasattr(self, 'status_label'):
+                        self.status_label.config(text="🟢 NORMAL", foreground="green")
+
+        except Exception as e:
+            # Ignore GUI update errors
+            pass
+
+    def _check_memory_limits(self, memory_bytes, memory_percent):
+        """Enforce memory limits with progressive actions"""
+        # 90% CRITICAL - Emergency shutdown
+        if memory_bytes > self.limit_90_bytes:
+            if hasattr(self.core, 'log'):
+                self.core.log(f"🚨 CRITICAL: Memory {memory_percent*100:.1f}% > 90% limit - EMERGENCY SHUTDOWN")
+            self._emergency_shutdown()
+            return
+
+        # 80% SEVERE - Force garbage collection and warn
+        elif memory_percent > 0.8:
+            if hasattr(self.core, 'log'):
+                self.core.log(f"🚨 SEVERE: Memory {memory_percent*100:.1f}% > 80% - Forcing cleanup")
+            self.force_emergency_cleanup()
+
+        # 70% HIGH - Aggressive cleanup
+        elif memory_percent > 0.7:
+            if self.memory_warnings < 2:  # Only log first few times
+                if hasattr(self.core, 'log'):
+                    self.core.log(f"⚠️ HIGH: Memory {memory_percent*100:.1f}% > 70% - Aggressive cleanup")
+            self.force_aggressive_cleanup()
+
+        # 60% WARNING - Standard cleanup
+        elif memory_percent > 0.6:
+            if self.memory_warnings == 0:  # Only log first time
+                if hasattr(self.core, 'log'):
+                    self.core.log(f"⚠️ WARNING: Memory {memory_percent*100:.1f}% > 60% - Standard cleanup")
+            self.memory_warnings += 1
+            self.force_standard_cleanup()
+
+    def _emergency_shutdown(self):
+        """Emergency shutdown when memory exceeds 90%"""
+        try:
+            if hasattr(self.core, 'log'):
+                self.core.log("🛑 INITIATING EMERGENCY SHUTDOWN")
+
+            # Attempt emergency model save
+            if hasattr(self.core, 'is_trained') and self.core.is_trained:
+                try:
+                    if hasattr(self.core, 'log'):
+                        self.core.log("💾 Attempting emergency model save...")
+                    if hasattr(self.core, 'save_model_auto'):
+                        self.core.save_model_auto(model_dir="Emergency_Saves")
+                except:
+                    pass
+
+            # Force final cleanup
+            self.force_emergency_cleanup()
+
+            # Exit process
+            import os
+            os._exit(1)
+
+        except Exception as e:
+            if hasattr(self.core, 'log'):
+                self.core.log(f"❌ Emergency shutdown failed: {e}")
+            import os
+            os._exit(1)
+
+    def register_cleanup_callback(self, callback):
+        """Register a callback function to be called during cleanup"""
+        if callable(callback) and callback not in self.cleanup_callbacks:
+            self.cleanup_callbacks.append(callback)
+
+    def unregister_cleanup_callback(self, callback):
+        """Unregister a cleanup callback"""
+        if callback in self.cleanup_callbacks:
+            self.cleanup_callbacks.remove(callback)
+
+    def force_standard_cleanup(self):
+        """Standard memory cleanup"""
         import gc
         gc.collect()
 
-        # Clear numpy arrays if possible
+        # Execute registered cleanup callbacks
+        for callback in self.cleanup_callbacks:
+            try:
+                callback()
+            except Exception as e:
+                if hasattr(self.core, 'log'):
+                    self.core.log(f"Cleanup callback error: {e}")
+
+    def force_aggressive_cleanup(self):
+        """Aggressive memory cleanup"""
+        self.force_standard_cleanup()
+
+        # Additional cleanup attempts
         try:
-            import numpy as np
-            np._globals._clear()
+            import matplotlib.pyplot as plt
+            plt.close('all')
         except:
             pass
 
-        # Clear GPU memory if using GPU
         try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            # Clear numpy arrays from core if possible
+            if hasattr(self.core, 'optimize_memory_usage'):
+                self.core.optimize_memory_usage()
         except:
             pass
+
+    def force_emergency_cleanup(self):
+        """Emergency memory cleanup - most aggressive"""
+        self.force_aggressive_cleanup()
+
+        # Try to clear large arrays from core
+        if hasattr(self.core, 'cleanup'):
+            try:
+                self.core.cleanup()
+            except:
+                pass
+
+        # Force multiple GC passes
+        import gc
+        for i in range(3):
+            gc.collect()
+
+    def force_garbage_collection(self):
+        """Force garbage collection"""
+        import gc
+        gc.collect()
+        if hasattr(self.core, 'log'):
+            self.core.log("🧹 Forced garbage collection completed")
+
+    def get_memory_history(self):
+        """Get memory usage history"""
+        return self.memory_history.copy()
+
+    def clear_memory_history(self):
+        """Clear memory history"""
+        self.memory_history.clear()
+
+    def get_memory_stats(self):
+        """Get memory usage statistics"""
+        if not self.memory_history:
+            return {}
+
+        memory_values = [entry[2] for entry in self.memory_history]  # percentages
+
+        return {
+            'samples': len(memory_values),
+            'current_percent': memory_values[-1] if memory_values else 0,
+            'average_percent': np.mean(memory_values) if memory_values else 0,
+            'max_percent': np.max(memory_values) if memory_values else 0,
+            'min_percent': np.min(memory_values) if memory_values else 0,
+            'warnings_count': self.memory_warnings
+        }
 
 class DBNNCore:
     """
@@ -667,10 +967,8 @@ class DBNNCore:
     """
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
-        # Initialize logging FIRST, before any methods that use logging
+        # Existing initialization code...
         self.log_callback = None
-
-        # Then initialize other attributes
         self.visualizer = None
         self.is_trained = False
         self.memory_optimized = False
@@ -678,6 +976,9 @@ class DBNNCore:
         self.current_batch_index = 0
         self.total_batches = 0
         self.cache_manager = None
+
+        # Add memory monitor reference
+        self.memory_monitor = None
 
         # Default configuration
         self.config = config or {
@@ -1010,13 +1311,14 @@ class DBNNCore:
 
     def load_data_optimized(self, filename: str, target_column: Optional[str] = None,
                            feature_columns: Optional[List[str]] = None):
-        """
-        Optimized data loading with strict memory management.
-        """
+        """Optimized data loading with memory monitoring"""
         try:
             # Check memory before loading
-            if hasattr(self, 'memory_monitor'):
-                self.memory_monitor.check_memory_limit("data_loading_start")
+            if self.memory_monitor:
+                memory_bytes, memory_percent = self.memory_monitor.get_memory_usage()
+                if memory_percent > 0.5:  # If already at 50%, be cautious
+                    self.log("⚠️ High memory usage detected, using conservative loading")
+
 
             # First, analyze dataset size and characteristics
             dataset_info = self._analyze_dataset(filename, target_column, feature_columns)
@@ -3645,6 +3947,16 @@ class HybridDBNNCore(DBNNCore):
         # Initialize resource detection
         self._detect_system_capabilities()
 
+        # Start memory monitoring immediately
+        self.memory_monitor.start_monitoring()
+
+
+    def connect_memory_monitor_gui(self, memory_monitor):
+        """Connect GUI components to memory monitor for real-time updates"""
+        self.memory_monitor = memory_monitor
+        # Start monitoring when GUI is connected
+        self.memory_monitor.start_monitoring()
+
     def _detect_system_capabilities(self):
         """Detect system capabilities with strict memory limits."""
         try:
@@ -4132,10 +4444,50 @@ class EnhancedDBNNInterface:
         self.processing_indicator = None
         self.processing_frame = None
         self.processing_animation_id = None
+        self.memory_monitor = None
+
+        # Configure progress bar styles for memory monitor
+        self.setup_progressbar_styles()
         self.setup_ui()
 
+    def setup_progressbar_styles(self):
+        """Configure progress bar styles for memory monitoring"""
+        try:
+            style = ttk.Style()
+
+            # Normal (green)
+            style.configure("Normal.Horizontal.TProgressbar",
+                          troughcolor='lightgray',
+                          background='green',
+                          lightcolor='lightgreen',
+                          darkcolor='darkgreen')
+
+            # Caution (yellow/orange)
+            style.configure("Caution.Horizontal.TProgressbar",
+                          troughcolor='lightgray',
+                          background='orange',
+                          lightcolor='lightyellow',
+                          darkcolor='darkorange')
+
+            # Warning (red)
+            style.configure("Warning.Horizontal.TProgressbar",
+                          troughcolor='lightgray',
+                          background='red',
+                          lightcolor='lightcoral',
+                          darkcolor='darkred')
+
+            # Emergency (dark red)
+            style.configure("Emergency.Horizontal.TProgressbar",
+                          troughcolor='lightgray',
+                          background='darkred',
+                          lightcolor='red',
+                          darkcolor='maroon')
+
+        except Exception as e:
+            print(f"Progress bar style setup warning: {e}")
+
     def setup_ui(self):
-        """Setup enhanced UI with configuration tab system"""
+        """Setup enhanced UI with memory monitoring"""
         # Create notebook for tabs instead of paned window
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -4385,7 +4737,7 @@ class EnhancedDBNNInterface:
             self.log(f"Switched to {mode_text}")
 
     def setup_main_tab(self):
-        """Setup the main working tab with scrollable interface"""
+        """Setup the main working tab with memory monitor"""
         main_tab = ttk.Frame(self.notebook)
         self.notebook.add(main_tab, text="Main Interface")
 
@@ -4422,6 +4774,9 @@ class EnhancedDBNNInterface:
         # SINGLE MAIN FRAME - NO PANED WINDOW (FULL WIDTH)
         main_frame = ttk.Frame(scrollable_frame)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # MEMORY MONITOR SECTION - ADDED AT THE TOP
+        self.setup_memory_monitor_section(main_frame)
 
         # File selection
         file_frame = ttk.LabelFrame(main_frame, text="Data File", padding="5")
@@ -4626,6 +4981,52 @@ class EnhancedDBNNInterface:
             canvas.configure(scrollregion=canvas.bbox("all"))
 
         scrollable_frame.after(100, update_scroll_region)
+
+    def setup_memory_monitor_section(self, parent_frame):
+        """Setup the memory monitor section at the top of the main tab"""
+        # Memory monitor frame
+        monitor_frame = ttk.LabelFrame(parent_frame, text="🔍 Real-time Memory Monitor & Control", padding="10")
+        monitor_frame.pack(fill='x', pady=10)
+
+        # Memory usage display
+        usage_frame = ttk.Frame(monitor_frame)
+        usage_frame.pack(fill='x', pady=5)
+
+        self.memory_usage_label = ttk.Label(usage_frame, text="Memory: 0.0% (0.0 GB / 0.0 GB)",
+                                          font=('Arial', 10, 'bold'))
+        self.memory_usage_label.pack(anchor='w')
+
+        # Progress bar with color coding
+        self.memory_progress = ttk.Progressbar(monitor_frame, orient='horizontal',
+                                             length=500, mode='determinate',
+                                             style="Normal.Horizontal.TProgressbar")
+        self.memory_progress.pack(fill='x', pady=5)
+
+        # Threshold indicators
+        threshold_frame = ttk.Frame(monitor_frame)
+        threshold_frame.pack(fill='x')
+
+        ttk.Label(threshold_frame, text="60%", foreground="orange").pack(side='left', padx=20)
+        ttk.Label(threshold_frame, text="80%", foreground="red").pack(side='left', padx=20)
+        ttk.Label(threshold_frame, text="90%", foreground="darkred", font=('Arial', 9, 'bold')).pack(side='left', padx=20)
+        ttk.Label(threshold_frame, text="(EMERGENCY SHUTDOWN)", foreground="darkred").pack(side='right')
+
+        # Status and controls
+        control_frame = ttk.Frame(monitor_frame)
+        control_frame.pack(fill='x', pady=5)
+
+        self.memory_status_label = ttk.Label(control_frame, text="🟢 SYSTEM NORMAL",
+                                           foreground="green", font=('Arial', 9, 'bold'))
+        self.memory_status_label.pack(side='left')
+
+        # Control buttons
+        button_frame = ttk.Frame(control_frame)
+        button_frame.pack(side='right')
+
+        ttk.Button(button_frame, text="Force Cleanup",
+                  command=self.force_memory_cleanup).pack(side='left', padx=2)
+        ttk.Button(button_frame, text="Memory Info",
+                  command=self.show_memory_info).pack(side='left', padx=2)
 
     def setup_visualization_menu(self):
         """Setup visualization menu with file manager"""
@@ -5281,6 +5682,8 @@ class EnhancedDBNNInterface:
             return
 
         try:
+            # Start memory monitoring for prediction
+            self.start_memory_monitoring()
             self.show_processing_indicator("Analyzing system resources...")
 
             # Use the trained model's configuration
@@ -5417,6 +5820,8 @@ class EnhancedDBNNInterface:
             self.hide_processing_indicator()
             self.log(f"❌ Prediction error: {e}")
             self.log(traceback.format_exc())
+        finally:
+            self.stop_memory_monitoring()
 
     def _show_detailed_prediction_summary(self, output_df, expected_classes):
         """Show detailed prediction summary with class analysis - FIXED METHOD NAME"""
@@ -5471,38 +5876,19 @@ class EnhancedDBNNInterface:
         self.log(f"Model name auto-set to: {model_name}")
 
     def train_fresh(self):
-        """Train a fresh model from scratch with PROPER visualization enabling - UPDATED FOR MEMORY OPTIMIZATION"""
+        """Train a fresh model with memory monitoring"""
         if not self.core:
-            messagebox.showerror("Error", "Please initialize core first")
-            return
+            self.initialize_core()
 
         if not self.current_file:
             messagebox.showerror("Error", "Please select a training file first")
             return
 
-        # Show mode information with memory optimization details
-        mode = "TENSOR" if getattr(self.core, 'tensor_mode', False) else "STANDARD"
-        selected_features = self.get_selected_features()
-
-        memory_note = ""
-        if len(selected_features) > 100:
-            memory_note = f"\n\n⚠️ HIGH-DIMENSIONAL DATA: {len(selected_features)} features selected\n   Using memory-optimized sparse mode automatically"
-
-        result = messagebox.askyesno(
-            f"Train Fresh ({mode} Mode)",
-            f"This will train a fresh model using {mode} mode.\n\n"
-            f"Tensor Mode: Single-pass orthogonal projection\n"
-            f"Standard Mode: Iterative error-correction\n\n"
-            f"Features Selected: {len(selected_features)}\n"
-            f"Enhanced Visualization: {'ENABLED' if self.enhanced_viz_var.get() else 'DISABLED'}"
-            f"{memory_note}\n\n"
-            "Continue?"
-        )
-
-        if not result:
-            return
-
         try:
+            # Start memory monitoring
+            self.start_memory_monitoring()
+
+            # Rest of the existing train_fresh method...
             self.show_processing_indicator("Starting fresh training...")
             self.log("=== STARTING FRESH TRAINING ===")
 
@@ -5512,15 +5898,11 @@ class EnhancedDBNNInterface:
             # PROPERLY ENABLE ENHANCED VISUALIZATION
             viz_enabled = self.enhanced_viz_var.get()
             if viz_enabled:
-                # Initialize visualizer if not already done
                 if not hasattr(self.core, 'visualizer') or self.core.visualizer is None:
                     self.core.visualizer = DBNNVisualizer()
-                # Enable BOTH enhanced and interactive visualization
                 self.core.enable_enhanced_visualization(True, capture_interval=5)
                 self.core.enable_interactive_visualization(capture_interval=5)
                 self.log("✅ ENHANCED 3D VISUALIZATION ENABLED for this training session")
-                self.log("   - Capturing feature space snapshots every 5 iterations")
-                self.log("   - Will generate interactive 3D plots after training")
             else:
                 self.core.enable_enhanced_visualization(False)
                 self.log("✅ Enhanced visualization DISABLED for faster training")
@@ -5532,33 +5914,16 @@ class EnhancedDBNNInterface:
             success = self._train_model_internal(fresh_training=True)
 
             if success and viz_enabled:
-                # GENERATE ENHANCED VISUALIZATIONS AFTER TRAINING
                 self.log("=== GENERATING ENHANCED VISUALIZATIONS ===")
                 self.show_processing_indicator("Generating enhanced 3D visualizations...")
-
                 try:
                     outputs = self.core.generate_interactive_visualizations()
                     if outputs:
                         self.log("✅ ENHANCED VISUALIZATIONS GENERATED:")
                         for viz_type, file_path in outputs.items():
                             self.log(f"   {viz_type}: {file_path}")
-
-                        # Ask to open the main visualization
-                        if 'interactive_3d' in outputs:
-                            result = messagebox.askyesno(
-                                "Enhanced Visualization Ready",
-                                f"Interactive 3D visualization generated!\n\n"
-                                f"File: {outputs['interactive_3d']}\n\n"
-                                f"Open in web browser?"
-                            )
-                            if result:
-                                import webbrowser
-                                webbrowser.open(f'file://{os.path.abspath(outputs["interactive_3d"])}')
-                    else:
-                        self.log("❌ No enhanced visualizations could be generated")
                 except Exception as viz_error:
                     self.log(f"❌ Enhanced visualization generation failed: {viz_error}")
-
                 self.hide_processing_indicator()
 
             if success:
@@ -5571,6 +5936,10 @@ class EnhancedDBNNInterface:
             messagebox.showerror("Error", f"Fresh training failed: {e}")
             self.log(f"Error: {e}")
             self.log(traceback.format_exc())
+        finally:
+            # Stop memory monitoring
+            self.stop_memory_monitoring()
+
 
     def continue_training(self):
         """Continue training from existing model or start fresh if no model exists"""
@@ -6503,7 +6872,7 @@ class EnhancedDBNNInterface:
             self.log(traceback.format_exc())
 
     def initialize_core(self):
-        """Initialize DBNN core with memory optimization for high-dimensional data"""
+        """Initialize DBNN core with memory monitoring - FIXED to use HybridDBNNCore"""
         try:
             config = {
                 'resol': int(self.resol.get()),
@@ -6513,10 +6882,38 @@ class EnhancedDBNNInterface:
                 'patience': int(self.patience.get())
             }
 
-            # Use HybridDBNNCore for automatic memory optimization
+            # ✅ CORRECT: Use HybridDBNNCore for automatic memory optimization
             self.core = HybridDBNNCore(config)
             self.visualizer = DBNNVisualizer()
             self.core.attach_visualizer(self.visualizer)
+            self.core.set_log_callback(self.log)
+
+
+            # Initialize memory monitor and connect GUI
+            self.memory_monitor = MemoryMonitor(self.core, self.root)
+
+            # Connect GUI components to memory monitor
+            self.memory_monitor.memory_label = self.memory_usage_label
+            self.memory_monitor.progress_bar = self.memory_progress
+            self.memory_monitor.status_label = self.memory_status_label
+
+            # Connect memory monitor to core
+            self.core.connect_memory_monitor_gui(self.memory_monitor)
+
+
+            # Initialize memory monitor
+            self.core.memory_monitor = self.memory_monitor  # Make accessible to core
+
+            # Connect GUI components to core's memory monitor
+            if hasattr(self.core, 'memory_monitor') and self.core.memory_monitor:
+                self.memory_monitor = self.core.memory_monitor
+                # Connect GUI references
+                self.memory_monitor.gui_root = self.root
+                self.memory_monitor.memory_label = self.memory_usage_label
+                self.memory_monitor.progress_bar = self.memory_progress
+                self.memory_monitor.status_label = self.memory_status_label
+
+                self.log("✅ Memory monitor GUI connected")
 
             # Set tensor mode based on checkbox
             if hasattr(self, 'tensor_mode'):
@@ -6526,12 +6923,8 @@ class EnhancedDBNNInterface:
             else:
                 self.log("DBNN core initialized in Standard mode")
 
-            # Log memory optimization capabilities
-            self.log("✅ Memory-optimized HybridDBNNCore initialized")
-            self.log("   - Automatic sparse/dense mode selection")
-            self.log("   - JIT-optimized operations")
-            self.log("   - 60% memory limit enforcement")
-            self.log(f"   - Config: {config}")
+            self.log("✅ Memory-optimized HybridDBNNCore initialized with real-time monitoring")
+            self.log("🔒 Memory limits: 60% (warning), 80% (severe), 90% (emergency shutdown)")
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to initialize core: {e}")
@@ -7924,69 +8317,235 @@ class EnhancedDBNNInterface:
             self.log(f"✅ Smart selection: Selected all {total_features} features")
             self.log("⚠️ Warning: Training may be slow with many features")
 
+    def start_memory_monitoring(self):
+        """Start memory monitoring for intensive operations"""
+        if self.memory_monitor:
+            self.memory_monitor.start_monitoring()
+            self.log("🔍 Memory monitoring activated for this operation")
+
+    def stop_memory_monitoring(self):
+        """Stop memory monitoring"""
+        if self.memory_monitor:
+            self.memory_monitor.stop_monitoring()
+
+    def force_memory_cleanup(self):
+        """Force immediate memory cleanup"""
+        if self.memory_monitor:
+            self.memory_monitor.force_aggressive_cleanup()
+            memory_bytes, memory_percent = self.memory_monitor.get_memory_usage()
+            self.log(f"🧹 Forced memory cleanup - Now at {memory_percent*100:.1f}%")
+            self.update_memory_display(memory_bytes, memory_percent)
+
+    def show_memory_info(self):
+        """Show detailed memory information"""
+        try:
+            if not self.memory_monitor:
+                messagebox.showinfo("Memory Info", "Memory monitor not initialized")
+                return
+
+            memory_bytes, memory_percent = self.memory_monitor.get_memory_usage()
+            memory_gb = memory_bytes / (1024**3)
+            total_gb = self.memory_monitor.total_memory_bytes / (1024**3)
+
+            info_text = f"""
+    💾 MEMORY INFORMATION:
+
+    Current Usage: {memory_percent*100:.1f}% ({memory_gb:.2f} GB / {total_gb:.1f} GB)
+
+    🔒 SAFETY LIMITS:
+    • 60% Warning: {self.memory_monitor.limit_60_bytes/(1024**3):.1f} GB
+    • 80% Severe:  {self.memory_monitor.limit_60_bytes/(1024**3):.1f} GB
+    • 90% EMERGENCY: {self.memory_monitor.limit_90_bytes/(1024**3):.1f} GB
+
+    🛡️ PROTECTIONS:
+    • Real-time monitoring
+    • Automatic cleanup at 60%
+    • Aggressive cleanup at 70%
+    • Emergency shutdown at 90%
+
+    Warnings: {self.memory_monitor.memory_warnings}
+    Status: {'ACTIVE' if self.memory_monitor.monitoring_active else 'INACTIVE'}
+            """
+
+            messagebox.showinfo("Memory Monitor Details", info_text)
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not get memory info: {e}")
+
+    def update_memory_display(self, memory_bytes, memory_percent):
+        """Update the memory monitor display"""
+        try:
+            if not hasattr(self, 'memory_usage_label'):
+                return
+
+            memory_gb = memory_bytes / (1024**3)
+            total_gb = self.memory_monitor.total_memory_bytes / (1024**3) if self.memory_monitor else 0
+
+            self.memory_usage_label.config(
+                text=f"Memory: {memory_percent*100:.1f}% ({memory_gb:.2f} GB / {total_gb:.1f} GB)"
+            )
+
+            self.memory_progress['value'] = memory_percent * 100
+
+            # Update colors and status based on memory usage
+            if memory_percent > 0.9:
+                self.memory_progress.configure(style="Emergency.Horizontal.TProgressbar")
+                self.memory_status_label.config(text="🔴 CRITICAL - SHUTDOWN IMMINENT", foreground="darkred")
+            elif memory_percent > 0.8:
+                self.memory_progress.configure(style="Warning.Horizontal.TProgressbar")
+                self.memory_status_label.config(text="🟠 SEVERE - AGGRESSIVE CLEANUP", foreground="red")
+            elif memory_percent > 0.7:
+                self.memory_progress.configure(style="Warning.Horizontal.TProgressbar")
+                self.memory_status_label.config(text="🟡 HIGH - CLEANING", foreground="orange")
+            elif memory_percent > 0.6:
+                self.memory_progress.configure(style="Caution.Horizontal.TProgressbar")
+                self.memory_status_label.config(text="🟢 WARNING - MONITORING", foreground="orange")
+            else:
+                self.memory_progress.configure(style="Normal.Horizontal.TProgressbar")
+                self.memory_status_label.config(text="🟢 SYSTEM NORMAL", foreground="green")
+
+        except Exception as e:
+            # Silently fail for GUI updates
+            pass
 
 
 class DiskCacheManager:
-    """
-    Manager for disk-based caching of large arrays.
+    """Complete disk cache manager for memory optimization"""
 
-    This class provides:
-    - Transparent disk caching for large arrays
-    - Memory-mapped file operations
-    - Automatic cleanup of temporary files
-    - Efficient serialization/deserialization
-    """
-
-    def __init__(self, cache_dir: str = "dbnn_cache"):
-        """
-        Initialize disk cache manager.
-
-        Args:
-            cache_dir: Directory for cache files
-        """
-        import os
+    def __init__(self, cache_dir):
         self.cache_dir = cache_dir
         os.makedirs(cache_dir, exist_ok=True)
-        self.cache_files = []
+        self.cache_index = {}
+        self.load_cache_index()
 
-    def cache_array(self, array: np.ndarray, name: str):
-        """
-        Cache a numpy array to disk.
+    def load_cache_index(self):
+        """Load cache index from disk"""
+        index_file = os.path.join(self.cache_dir, "cache_index.json")
+        if os.path.exists(index_file):
+            try:
+                with open(index_file, 'r') as f:
+                    self.cache_index = json.load(f)
+            except:
+                self.cache_index = {}
 
-        Args:
-            array: Numpy array to cache
-            name: Identifier for the array
-
-        Returns:
-            DiskCachedArray object that can be loaded later
-        """
-        import os
-        import pickle
-        import gzip
-
-        filename = os.path.join(self.cache_dir, f"{name}.pkl.gz")
-
+    def save_cache_index(self):
+        """Save cache index to disk"""
+        index_file = os.path.join(self.cache_dir, "cache_index.json")
         try:
-            # Save array to disk
-            with gzip.open(filename, 'wb') as f:
-                pickle.dump(array, f, protocol=pickle.HIGHEST_PROTOCOL)
+            with open(index_file, 'w') as f:
+                json.dump(self.cache_index, f, indent=2)
+        except:
+            pass
 
-            self.cache_files.append(filename)
-            return DiskCachedArray(filename)
+    def cache_array(self, array, name):
+        """Cache array to disk and return a disk reference object"""
+        try:
+            # Generate unique filename
+            timestamp = int(time.time() * 1000)
+            filename = f"{name}_{timestamp}.npy"
+            filepath = os.path.join(self.cache_dir, filename)
+
+            # Save array to disk
+            np.save(filepath, array)
+
+            # Create disk reference object
+            cache_ref = DiskArrayReference(filepath, array.shape, array.dtype, name)
+
+            # Update cache index
+            self.cache_index[name] = {
+                'filepath': filepath,
+                'shape': array.shape,
+                'dtype': str(array.dtype),
+                'size': array.nbytes,
+                'timestamp': timestamp
+            }
+
+            self.save_cache_index()
+
+            return cache_ref
 
         except Exception as e:
-            raise Exception(f"Failed to cache array {name}: {e}")
+            print(f"Warning: Disk caching failed for {name}, using in-memory: {e}")
+            return array
+
+    def load_array(self, cache_ref):
+        """Load array from disk cache"""
+        if isinstance(cache_ref, DiskArrayReference):
+            return cache_ref.load()
+        return cache_ref
+
+    def get_cache_info(self):
+        """Get information about cached arrays"""
+        total_size = 0
+        cache_info = {}
+
+        for name, info in self.cache_index.items():
+            cache_info[name] = {
+                'filepath': info['filepath'],
+                'shape': info['shape'],
+                'size_bytes': info['size'],
+                'size_mb': info['size'] / (1024 * 1024),
+                'timestamp': info['timestamp']
+            }
+            total_size += info['size']
+
+        return {
+            'total_arrays': len(cache_info),
+            'total_size_bytes': total_size,
+            'total_size_mb': total_size / (1024 * 1024),
+            'arrays': cache_info
+        }
+
+    def cleanup_old_files(self, max_age_hours=24):
+        """Clean up cache files older than specified hours"""
+        try:
+            current_time = time.time()
+            removed_count = 0
+            removed_size = 0
+
+            for name, info in list(self.cache_index.items()):
+                file_age_hours = (current_time - info['timestamp']/1000) / 3600
+
+                if file_age_hours > max_age_hours:
+                    try:
+                        os.remove(info['filepath'])
+                        removed_size += info['size']
+                        removed_count += 1
+                        del self.cache_index[name]
+                    except:
+                        pass
+
+            if removed_count > 0:
+                self.save_cache_index()
+                return removed_count, removed_size / (1024 * 1024)
+
+            return 0, 0
+
+        except Exception as e:
+            print(f"Cache cleanup error: {e}")
+            return 0, 0
 
     def cleanup(self):
-        """Remove all cache files."""
-        import os
-        for filename in self.cache_files:
-            try:
-                if os.path.exists(filename):
-                    os.remove(filename)
-            except:
-                pass
-        self.cache_files = []
+        """Clean up all cache files"""
+        try:
+            # Remove all .npy files in cache directory
+            for filename in os.listdir(self.cache_dir):
+                if filename.endswith('.npy'):
+                    try:
+                        os.remove(os.path.join(self.cache_dir, filename))
+                    except:
+                        pass
+
+            # Remove index file
+            index_file = os.path.join(self.cache_dir, "cache_index.json")
+            if os.path.exists(index_file):
+                os.remove(index_file)
+
+            # Reset index
+            self.cache_index = {}
+
+        except Exception as e:
+            print(f"Cache cleanup error: {e}")
 
 class DiskCachedArray:
     """
@@ -14382,7 +14941,557 @@ class OptimizedSparseProcessor:
                 self.core.sparse_anti_net[key_total] += 1
                 self.core.sparse_anti_wts[key_class] = 1.0
 
-# Example usage
+# =========================================================================
+# ENHANCED MAIN FUNCTION WITH DUAL MODE SUPPORT
+# =========================================================================
+
+def main():
+    """
+    Main function with automatic GUI/headless detection and dual-mode operation.
+    GUI gets precedence if available, otherwise falls back to command line mode.
+    """
+    print("🚀 Starting DBNN System...")
+    print(f"🔍 GUI Available: {GUI_AVAILABLE}")
+
+    # Enhanced GUI detection with multiple checks
+    gui_actually_available = _check_gui_availability()
+
+    if gui_actually_available:
+        print("✅ GUI mode detected - starting graphical interface")
+        _run_gui_mode()
+    else:
+        print("🔧 Headless mode detected - starting command line interface")
+        _run_command_line_mode()
+
+def _check_gui_availability():
+    """
+    Enhanced GUI availability check with multiple verification methods
+    """
+    # Already have global GUI_AVAILABLE from top of file, but double-check
+    if not GUI_AVAILABLE:
+        return False
+
+    # Additional checks for headless systems that might report GUI available
+    try:
+        # Check for DISPLAY variable on Linux/Unix
+        if os.name == 'posix' and 'DISPLAY' not in os.environ:
+            print("⚠️  No DISPLAY environment variable - headless mode")
+            return False
+
+        # Check if we can actually create a window
+        test_root = tk.Tk()
+        test_root.withdraw()  # Don't show the test window
+        test_root.update()    # Force window system interaction
+        test_root.destroy()   # Clean up
+
+        # If we got here, GUI is actually available
+        return True
+
+    except Exception as e:
+        print(f"⚠️  GUI check failed: {e} - using headless mode")
+        return False
+
+def _run_gui_mode():
+    """
+    Run the application in GUI mode with enhanced error handling
+    """
+    max_retries = 2
+    retry_count = 0
+
+    while retry_count <= max_retries:
+        try:
+            print(f"🎨 Initializing GUI interface (attempt {retry_count + 1}/{max_retries + 1})...")
+
+            # Create main window
+            root = tk.Tk()
+            root.title("Difference Boosting Bayesian Neural Network")
+            root.geometry("1200x800")
+
+            # Set window icon if available
+            _set_window_icon(root)
+
+            # Initialize the enhanced interface
+            app = EnhancedDBNNInterface(root)
+
+            # Set up proper closing handler with resource cleanup
+            def on_closing():
+                print("🛑 Shutting down GUI application...")
+                try:
+                    # Stop memory monitoring
+                    if hasattr(app, 'core') and app.core:
+                        if hasattr(app.core, 'memory_monitor'):
+                            app.core.memory_monitor.stop_monitoring()
+
+                    # Clean up any temporary files
+                    if hasattr(app, 'cleanup_resources'):
+                        app.cleanup_resources()
+
+                    # Close any open files or connections
+                    import gc
+                    gc.collect()
+
+                except Exception as e:
+                    print(f"⚠️  Cleanup warning: {e}")
+
+                finally:
+                    root.destroy()
+                    print("✅ GUI application shut down successfully")
+
+            root.protocol("WM_DELETE_WINDOW", on_closing)
+
+            # Set up emergency signal handlers
+            _setup_signal_handlers(root, app)
+
+            # Start memory monitoring if core is initialized
+            if hasattr(app, 'core') and app.core:
+                app.start_memory_monitoring()
+
+            print("✅ GUI initialization successful - starting main loop")
+
+            # Start the main event loop
+            root.mainloop()
+
+            # If we get here, the application closed normally
+            break
+
+        except Exception as e:
+            retry_count += 1
+            print(f"❌ GUI initialization failed (attempt {retry_count}): {e}")
+
+            if retry_count <= max_retries:
+                print("🔄 Retrying GUI initialization...")
+                time.sleep(2)  # Wait before retry
+            else:
+                print("❌ All GUI attempts failed - falling back to command line mode")
+                _run_command_line_mode()
+                break
+
+def _run_command_line_mode():
+    """
+    Run the application in command line mode for headless systems
+    """
+    print("\n" + "="*60)
+    print("          DBNN COMMAND LINE INTERFACE")
+    print("="*60)
+    print("📋 Available Commands:")
+    print("  train <file> [target] [features...]  - Train a model")
+    print("  predict <model> <data>               - Make predictions")
+    print("  evaluate <model> <test_data>         - Evaluate model")
+    print("  visualize <model>                    - Generate visualizations")
+    print("  config                               - Show system configuration")
+    print("  monitor                              - Start memory monitoring")
+    print("  help                                 - Show this help")
+    print("  exit                                 - Exit the program")
+    print("="*60)
+
+    # Initialize core with memory monitoring
+    core = HybridDBNNCore()
+    core.log = lambda msg: print(f"[DBNN] {msg}")
+
+    # Start memory monitoring
+    core.memory_monitor.start_monitoring()
+    print("✅ Memory monitoring active")
+
+    # Main command loop
+    _command_loop(core)
+
+def _command_loop(core):
+    """
+    Main command processing loop for CLI mode
+    """
+    while True:
+        try:
+            command = input("\n🔧 DBNN> ").strip().split()
+
+            if not command:
+                continue
+
+            cmd = command[0].lower()
+
+            if cmd == 'exit' or cmd == 'quit':
+                print("🛑 Shutting down...")
+                core.memory_monitor.stop_monitoring()
+                print("✅ DBNN system stopped")
+                break
+
+            elif cmd == 'help':
+                _show_help()
+
+            elif cmd == 'train':
+                _handle_train_command(core, command[1:])
+
+            elif cmd == 'predict':
+                _handle_predict_command(core, command[1:])
+
+            elif cmd == 'evaluate':
+                _handle_evaluate_command(core, command[1:])
+
+            elif cmd == 'visualize':
+                _handle_visualize_command(core, command[1:])
+
+            elif cmd == 'config':
+                _show_system_config(core)
+
+            elif cmd == 'monitor':
+                _handle_monitor_command(core, command[1:])
+
+            else:
+                print(f"❌ Unknown command: {cmd}")
+                print("💡 Type 'help' for available commands")
+
+        except KeyboardInterrupt:
+            print("\n\n🛑 Received interrupt signal - shutting down gracefully...")
+            core.memory_monitor.stop_monitoring()
+            print("✅ DBNN system stopped")
+            break
+
+        except Exception as e:
+            print(f"❌ Command error: {e}")
+
+def _handle_train_command(core, args):
+    """Handle train command in CLI mode"""
+    if len(args) < 1:
+        print("❌ Usage: train <data_file> [target_column] [feature1 feature2 ...]")
+        return
+
+    data_file = args[0]
+    target_column = args[1] if len(args) > 1 else None
+    feature_columns = args[2:] if len(args) > 2 else None
+
+    if not os.path.exists(data_file):
+        print(f"❌ Data file not found: {data_file}")
+        return
+
+    print(f"🚀 Training model with: {data_file}")
+    print(f"   Target: {target_column or 'auto-detect'}")
+    print(f"   Features: {feature_columns or 'all columns'}")
+
+    try:
+        # Use the memory-optimized training
+        success = core.train_with_memory_optimization(
+            data_file,
+            target_column=target_column,
+            feature_columns=feature_columns
+        )
+
+        if success:
+            print(f"✅ Training completed successfully!")
+            print(f"   Best accuracy: {core.best_accuracy:.2f}%")
+            print(f"   Model: {core.innodes} inputs, {core.outnodes} outputs")
+
+            # Auto-save the model
+            saved_path = core.save_model_auto(
+                model_dir="Model",
+                data_filename=data_file,
+                feature_columns=feature_columns,
+                target_column=target_column
+            )
+
+            if saved_path:
+                print(f"💾 Model saved: {saved_path}")
+        else:
+            print("❌ Training failed")
+
+    except Exception as e:
+        print(f"❌ Training error: {e}")
+
+def _handle_predict_command(core, args):
+    """Handle predict command in CLI mode"""
+    if len(args) < 2:
+        print("❌ Usage: predict <model_file> <data_file> [output_file]")
+        return
+
+    model_file = args[0]
+    data_file = args[1]
+    output_file = args[2] if len(args) > 2 else "predictions.csv"
+
+    if not os.path.exists(model_file):
+        print(f"❌ Model file not found: {model_file}")
+        return
+
+    if not os.path.exists(data_file):
+        print(f"❌ Data file not found: {data_file}")
+        return
+
+    print(f"🔮 Making predictions...")
+    print(f"   Model: {model_file}")
+    print(f"   Data: {data_file}")
+    print(f"   Output: {output_file}")
+
+    try:
+        # Load the model
+        if core.load_model(model_file):
+            print(f"✅ Model loaded: {core.innodes} inputs, {core.outnodes} outputs")
+
+            # Make predictions (implementation depends on your core's predict method)
+            # This is a placeholder - you'll need to implement the actual prediction
+            print("⏳ Prediction functionality needs implementation")
+
+        else:
+            print("❌ Failed to load model")
+
+    except Exception as e:
+        print(f"❌ Prediction error: {e}")
+
+def _handle_evaluate_command(core, args):
+    """Handle evaluate command in CLI mode"""
+    if len(args) < 2:
+        print("❌ Usage: evaluate <model_file> <test_data_file>")
+        return
+
+    model_file = args[0]
+    test_data_file = args[1]
+
+    if not os.path.exists(model_file):
+        print(f"❌ Model file not found: {model_file}")
+        return
+
+    if not os.path.exists(test_data_file):
+        print(f"❌ Test data file not found: {test_data_file}")
+        return
+
+    print(f"📊 Evaluating model...")
+    print(f"   Model: {model_file}")
+    print(f"   Test data: {test_data_file}")
+
+    try:
+        # Load the model
+        if core.load_model(model_file):
+            print(f"✅ Model loaded: {core.innodes} inputs, {core.outnodes} outputs")
+
+            # Evaluate the model (implementation depends on your core's evaluate method)
+            # This is a placeholder
+            print("⏳ Evaluation functionality needs implementation")
+
+        else:
+            print("❌ Failed to load model")
+
+    except Exception as e:
+        print(f"❌ Evaluation error: {e}")
+
+def _handle_visualize_command(core, args):
+    """Handle visualize command in CLI mode"""
+    if len(args) < 1:
+        print("❌ Usage: visualize <model_file>")
+        return
+
+    model_file = args[0]
+
+    if not os.path.exists(model_file):
+        print(f"❌ Model file not found: {model_file}")
+        return
+
+    print(f"📈 Generating visualizations...")
+    print(f"   Model: {model_file}")
+
+    try:
+        # Load the model
+        if core.load_model(model_file):
+            print(f"✅ Model loaded: {core.innodes} inputs, {core.outnodes} outputs")
+
+            # Generate visualizations
+            outputs = core.generate_interactive_visualizations()
+
+            if outputs:
+                print("✅ Visualizations generated:")
+                for viz_type, file_path in outputs.items():
+                    print(f"   {viz_type}: {file_path}")
+            else:
+                print("❌ No visualizations could be generated")
+
+        else:
+            print("❌ Failed to load model")
+
+    except Exception as e:
+        print(f"❌ Visualization error: {e}")
+
+def _handle_monitor_command(core, args):
+    """Handle memory monitor commands"""
+    if not args:
+        # Show current memory status
+        memory_info = core.memory_monitor.get_memory_info()
+        if memory_info:
+            print("💾 Memory Status:")
+            print(f"   Process: {memory_info['process_memory_gb']:.2f} GB ({memory_info['process_memory_percent']:.1f}%)")
+            print(f"   System: {memory_info['system_used_gb']:.2f} / {memory_info['system_total_gb']:.2f} GB ({memory_info['system_used_percent']:.1f}%)")
+            print(f"   Warnings: {memory_info['memory_warnings']}")
+        return
+
+    subcmd = args[0].lower()
+
+    if subcmd == 'stats':
+        stats = core.memory_monitor.get_memory_stats()
+        if stats:
+            print("📊 Memory Statistics:")
+            print(f"   Samples: {stats['samples']}")
+            print(f"   Current: {stats['current_percent']:.1f}%")
+            print(f"   Average: {stats['average_percent']:.1f}%")
+            print(f"   Max: {stats['max_percent']:.1f}%")
+            print(f"   Min: {stats['min_percent']:.1f}%")
+
+    elif subcmd == 'cleanup':
+        print("🧹 Forcing memory cleanup...")
+        core.memory_monitor.force_emergency_cleanup()
+        print("✅ Cleanup completed")
+
+    elif subcmd == 'history':
+        history = core.memory_monitor.get_memory_history()
+        if history:
+            print("📈 Memory History (last 10 samples):")
+            for timestamp, bytes_val, percent in history[-10:]:
+                time_str = time.strftime("%H:%M:%S", time.localtime(timestamp))
+                print(f"   {time_str}: {percent*100:.1f}% ({bytes_val/(1024**3):.2f} GB)")
+        else:
+            print("No memory history available")
+
+    else:
+        print("❌ Unknown monitor command")
+        print("💡 Available: stats, cleanup, history")
+
+def _show_help():
+    """Show help information for CLI mode"""
+    help_text = """
+DBNN Command Line Interface - Available Commands:
+
+TRAINING:
+  train <data_file> [target] [features...]
+    - Train a model on the specified data file
+    - target: target column name (optional)
+    - features: list of feature columns (optional, uses all if not specified)
+
+PREDICTION:
+  predict <model_file> <data_file> [output_file]
+    - Make predictions using a trained model
+    - output_file: where to save predictions (default: predictions.csv)
+
+EVALUATION:
+  evaluate <model_file> <test_data_file>
+    - Evaluate model performance on test data
+
+VISUALIZATION:
+  visualize <model_file>
+    - Generate interactive visualizations for a trained model
+
+SYSTEM:
+  config          - Show system configuration and resources
+  monitor         - Show current memory status
+  monitor stats   - Show memory statistics
+  monitor cleanup - Force memory cleanup
+  monitor history - Show memory usage history
+  help            - Show this help message
+  exit            - Exit the program
+
+Examples:
+  train data.csv target_col feature1 feature2
+  predict model.bin new_data.csv results.csv
+  evaluate model.bin test_data.csv
+  visualize model.bin
+    """
+    print(help_text)
+
+def _show_system_config(core):
+    """Show system configuration and resources"""
+    print("🖥️  System Configuration:")
+
+    # Memory information
+    memory_info = core.memory_monitor.get_memory_info()
+    if memory_info:
+        print("💾 Memory:")
+        print(f"   Total: {memory_info['system_total_gb']:.1f} GB")
+        print(f"   Available: {memory_info['system_available_gb']:.1f} GB")
+        print(f"   Process using: {memory_info['process_memory_gb']:.2f} GB")
+        print(f"   Limits: {memory_info['monitor_60_limit_gb']:.1f} GB (60%), {memory_info['monitor_90_limit_gb']:.1f} GB (90%)")
+
+    # CPU information
+    try:
+        import psutil
+        cpu_count = psutil.cpu_count()
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+        print(f"⚡ CPU: {cpu_count} cores, {cpu_percent:.1f}% usage")
+    except:
+        print("⚡ CPU: Information not available")
+
+    # Disk information
+    try:
+        disk_usage = psutil.disk_usage('.')
+        print(f"💽 Disk: {disk_usage.free/(1024**3):.1f} GB free of {disk_usage.total/(1024**3):.1f} GB")
+    except:
+        print("💽 Disk: Information not available")
+
+    # GPU information
+    try:
+        import torch
+        if torch.cuda.is_available():
+            gpu_count = torch.cuda.device_count()
+            gpu_name = torch.cuda.get_device_name(0)
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            print(f"🎮 GPU: {gpu_count} device(s), {gpu_name}, {gpu_memory:.1f} GB")
+        else:
+            print("🎮 GPU: Not available")
+    except:
+        print("🎮 GPU: Information not available")
+
+def _set_window_icon(root):
+    """Set window icon if available"""
+    try:
+        # Try to set a custom icon - you can add your own icon file
+        icon_paths = [
+            "icon.ico",
+            "icon.png",
+            "dbnn_icon.ico"
+        ]
+
+        for icon_path in icon_paths:
+            if os.path.exists(icon_path):
+                root.iconbitmap(icon_path)
+                print(f"✅ Set window icon: {icon_path}")
+                break
+    except:
+        pass  # Icon setting is optional
+
+def _setup_signal_handlers(root, app):
+    """Set up signal handlers for graceful shutdown"""
+    try:
+        import signal
+
+        def signal_handler(signum, frame):
+            print(f"🛑 Received signal {signum} - shutting down gracefully...")
+            root.after(0, root.quit)  # Schedule quit in main thread
+
+        # Register signal handlers
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+
+    except Exception as e:
+        print(f"⚠️  Signal handler setup failed: {e}")
+
+# =========================================================================
+# ENHANCED DBNNCore METHODS FOR DUAL MODE
+# =========================================================================
+
+def _enhanced_log(self, message):
+    """
+    Enhanced logging that works in both GUI and CLI modes
+    """
+    # Try GUI log first
+    if hasattr(self, 'log_callback') and self.log_callback:
+        try:
+            self.log_callback(message)
+            return
+        except:
+            pass
+
+    # Fall back to print for CLI mode
+    print(f"[DBNN] {message}")
+
+# Add enhanced logging to DBNNCore
+DBNNCore.log = _enhanced_log
+
+# =========================================================================
+# MAIN EXECUTION GUARD
+# =========================================================================
+
+
 if __name__ == "__main__":
     print("""
     ╔═════════════════════════════════════════════════════════════╗
@@ -14407,7 +15516,17 @@ if __name__ == "__main__":
 
     # Create workflow
     workflow = DBNNWorkflow(config)
-
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n🛑 Program interrupted by user")
+    except Exception as e:
+        print(f"❌ Fatal error: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        print("👋 DBNN system terminated")
+# Example usage
     # Example usage (uncomment to run)
     # workflow.run_complete_workflow(
     #     train_file="data/train.csv",
