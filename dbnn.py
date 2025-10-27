@@ -22,7 +22,7 @@ from functools import lru_cache
 import pandas as pd
 import traceback
 import multiprocessing as mp
-import plotly.express as px
+
 
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import threading
@@ -39,9 +39,6 @@ from typing import List, Tuple, Dict, Any, Optional, Union
 import psutil
 import threading
 import time
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-import matplotlib.animation as animation
 
 # Global constants
 max_resol = 1600
@@ -69,6 +66,11 @@ try:
         test_root.withdraw()
         test_root.destroy()
         GUI_AVAILABLE = True
+        import plotly.express as px
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        import matplotlib.animation as animation
+
 except (ImportError, Exception):
     GUI_AVAILABLE = False
     # Create dummy objects to avoid NameErrors
@@ -82,6 +84,10 @@ except (ImportError, Exception):
     filedialog = None
     ttk = None
     scrolledtext = None
+    plt = None
+    FigureCanvasTkAgg = None
+    animation = None
+    px = None
 
 
 @jit(nopython=True, fastmath=True, cache=True)
