@@ -4115,223 +4115,6 @@ class HybridDBNNCore(DBNNCore):
         self.log(f"✅ Ultra-optimized sparse mode enabled for {innodes} features")
         return self.ultra_sparse_core
 
-class DiskCacheManager:
-    """
-    Manager for disk-based caching of large arrays.
-
-    This class provides:
-    - Transparent disk caching for large arrays
-    - Memory-mapped file operations
-    - Automatic cleanup of temporary files
-    - Efficient serialization/deserialization
-    """
-
-    def __init__(self, cache_dir: str = "dbnn_cache"):
-        """
-        Initialize disk cache manager.
-
-        Args:
-            cache_dir: Directory for cache files
-        """
-        import os
-        self.cache_dir = cache_dir
-        os.makedirs(cache_dir, exist_ok=True)
-        self.cache_files = []
-
-    def cache_array(self, array: np.ndarray, name: str):
-        """
-        Cache a numpy array to disk.
-
-        Args:
-            array: Numpy array to cache
-            name: Identifier for the array
-
-        Returns:
-            DiskCachedArray object that can be loaded later
-        """
-        import os
-        import pickle
-        import gzip
-
-        filename = os.path.join(self.cache_dir, f"{name}.pkl.gz")
-
-        try:
-            # Save array to disk
-            with gzip.open(filename, 'wb') as f:
-                pickle.dump(array, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-            self.cache_files.append(filename)
-            return DiskCachedArray(filename)
-
-        except Exception as e:
-            raise Exception(f"Failed to cache array {name}: {e}")
-
-    def cleanup(self):
-        """Remove all cache files."""
-        import os
-        for filename in self.cache_files:
-            try:
-                if os.path.exists(filename):
-                    os.remove(filename)
-            except:
-                pass
-        self.cache_files = []
-
-class DiskCachedArray:
-    """
-    Represents an array cached on disk.
-
-    This provides a transparent interface for loading arrays from disk
-    when needed, while keeping them on disk otherwise.
-    """
-
-    def __init__(self, filename: str):
-        """
-        Initialize with cache file.
-
-        Args:
-            filename: Path to cached array file
-        """
-        self.filename = filename
-        self._array = None
-
-    def load(self) -> np.ndarray:
-        """
-        Load array from disk.
-
-        Returns:
-            Loaded numpy array
-        """
-        if self._array is None:
-            import pickle
-            import gzip
-
-            with gzip.open(self.filename, 'rb') as f:
-                self._array = pickle.load(f)
-
-        return self._array
-
-    def unload(self):
-        """Unload array from memory (keep on disk)."""
-        self._array = None
-
-    def __del__(self):
-        """Cleanup on deletion."""
-        self.unload()
-
-class DBNNWorkflow:
-    """
-    Complete workflow manager that uses DBNNCore and DBNNVisualizer
-    """
-
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
-        #self.core = DBNNCore(config)
-        self.core = HybridDBNNCore(config)
-        self.visualizer = DBNNVisualizer()
-        self.core.attach_visualizer(self.visualizer)
-
-    def run_complete_workflow(self, train_file: str, test_file: Optional[str] = None,
-                             predict_file: Optional[str] = None, use_csv: bool = True,
-                             target_column: Optional[str] = None,
-                             feature_columns: Optional[List[str]] = None):
-        """Run complete training and evaluation workflow"""
-
-        print("Starting complete DBNN workflow...")
-
-        # Training
-        success = self.core.train_with_early_stopping(
-            train_file,
-            test_file,
-            use_csv,
-            target_column,
-            feature_columns,
-            enable_interactive_viz=True,      # Enable 3D visualization
-            viz_capture_interval=5            # Capture every 5 iterations
-        )
-
-        if not success:
-            print("Training failed")
-            return False
-
-        # Generate visualizations
-        if len(self.visualizer.training_history) > 0:
-            self.visualizer.create_training_dashboard("training_results.html")
-            print("Visualizations generated")
-
-        # Test if test file provided
-        if test_file and os.path.exists(test_file):
-            self.test_model(test_file, use_csv)
-
-        # Predict if predict file provided
-        if predict_file and os.path.exists(predict_file):
-            self.predict(predict_file, use_csv)
-
-        print("Workflow completed successfully!")
-        return True
-
-    def test_model(self, test_file: str, use_csv: bool = True):
-        """Test model on test data"""
-        print(f"Testing model on: {test_file}")
-
-        # Load test data
-        features_batches, targets_batches, _, original_targets_batches = self.core.load_data(test_file)
-
-        if not features_batches:
-            print("No test data loaded")
-            return
-
-        # Encode targets
-        encoded_targets_batches = []
-        for batch in original_targets_batches:
-            encoded_batch = self.core.class_encoder.transform(batch)
-            encoded_targets_batches.append(encoded_batch)
-
-        # Evaluate
-        accuracy, correct_predictions, predictions = self.core.evaluate(features_batches, encoded_targets_batches)
-        total_samples = sum(len(batch) for batch in features_batches)
-
-        print(f"Test Results: Accuracy = {accuracy:.2f}% ({correct_predictions}/{total_samples})")
-
-    def predict(self, data_file: str, use_csv: bool = True, output_file: Optional[str] = None):
-        """Generate predictions on new data"""
-        print(f"Generating predictions for: {data_file}")
-
-        features_batches, _, _, _ = self.core.load_data(data_file)
-
-        if not features_batches:
-            print("No prediction data loaded")
-            return
-
-        all_predictions = []
-        all_probabilities = []
-
-        for features_batch in features_batches:
-            predictions, probabilities = self.core.predict_batch(features_batch)
-            all_predictions.extend(predictions)
-            all_probabilities.extend(probabilities)
-
-        # Decode predictions
-        decoded_predictions = self.core.class_encoder.inverse_transform(all_predictions)
-
-        # Save results
-        if output_file is None:
-            output_file = data_file.replace('.csv', '_predictions.csv').replace('.dat', '_predictions.csv')
-
-        results_df = pd.DataFrame({
-            'prediction_encoded': all_predictions,
-            'prediction': decoded_predictions
-        })
-
-        # Add probability columns
-        for i, class_name in enumerate(self.core.class_encoder.encoded_to_class.values()):
-            probs = [prob.get(class_name, 0.0) for prob in all_probabilities]
-            results_df[f'prob_{class_name}'] = probs
-
-        results_df.to_csv(output_file, index=False)
-        print(f"Predictions saved to: {output_file}")
-
-        return decoded_predictions, all_probabilities
-
 class EnhancedDBNNInterface:
     """
     Enhanced interface with fixed early stopping and better feature selection
@@ -4339,7 +4122,7 @@ class EnhancedDBNNInterface:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("DBNN Enhanced Interface")
+        self.root.title("Difference Boosting Bayesian Neural Network")
         self.root.geometry("1200x800")
 
         self.core = None
@@ -4739,6 +4522,9 @@ class EnhancedDBNNInterface:
         self.target_combo = ttk.Combobox(self.feature_frame, textvariable=self.target_col, width=30)
         self.target_combo.grid(row=0, column=1, padx=5, pady=2, sticky='w')
 
+        # Bind target selection change to automatically update features
+        self.target_combo.bind('<<ComboboxSelected>>', self._on_target_selection_change)
+
         # Feature selection with checkboxes
         ttk.Label(self.feature_frame, text="Feature Columns:").grid(row=1, column=0, sticky='nw')
 
@@ -4772,6 +4558,9 @@ class EnhancedDBNNInterface:
         ttk.Button(selection_frame, text="Deselect All", command=self.deselect_all_features).pack(side='left', padx=2)
         ttk.Button(selection_frame, text="Invert Selection", command=self.invert_feature_selection).pack(side='left', padx=2)
 
+        # NEW: Smart selection for high-dimensional data
+        ttk.Button(selection_frame, text="Smart Select", command=self.smart_feature_selection).pack(side='left', padx=2)
+
         # Control buttons
         button_frame = ttk.Frame(main_frame)
         button_frame.pack(fill='x', pady=10)
@@ -4801,11 +4590,6 @@ class EnhancedDBNNInterface:
         # Tensor Visualization button - UPDATED DESCRIPTION
         ttk.Button(row3_frame, text="Visualize Complex Space",
                   command=self.visualize_tensor_space).pack(side='left', padx=2)
-
-        # Updated tooltip for the tensor visualization button
-        #self.create_tooltip(row3_frame,
-         #   ""
-        #)
 
         # Row 4 buttons - Configuration management
         row4_frame = ttk.Frame(button_frame)
@@ -5448,8 +5232,16 @@ class EnhancedDBNNInterface:
             var.set(not var.get())
 
     def get_selected_features(self):
-        """Get list of selected feature columns"""
-        return [col for col, var in self.feature_vars.items() if var.get()]
+        """Get list of selected feature columns with target column automatically excluded"""
+        selected_features = [col for col, var in self.feature_vars.items() if var.get()]
+
+        # Automatically exclude target column if it's selected
+        target_column = self.target_col.get()
+        if target_column and target_column != 'None' and target_column in selected_features:
+            selected_features.remove(target_column)
+            self.log(f"⚠️ Automatically excluded target column '{target_column}' from features")
+
+        return selected_features
 
     def log(self, message):
         """Add message to console"""
@@ -5678,9 +5470,8 @@ class EnhancedDBNNInterface:
         self.model_name.set(model_name)
         self.log(f"Model name auto-set to: {model_name}")
 
-
     def train_fresh(self):
-        """Train a fresh model from scratch with PROPER visualization enabling"""
+        """Train a fresh model from scratch with PROPER visualization enabling - UPDATED FOR MEMORY OPTIMIZATION"""
         if not self.core:
             messagebox.showerror("Error", "Please initialize core first")
             return
@@ -5689,14 +5480,22 @@ class EnhancedDBNNInterface:
             messagebox.showerror("Error", "Please select a training file first")
             return
 
-        # Show mode information
+        # Show mode information with memory optimization details
         mode = "TENSOR" if getattr(self.core, 'tensor_mode', False) else "STANDARD"
+        selected_features = self.get_selected_features()
+
+        memory_note = ""
+        if len(selected_features) > 100:
+            memory_note = f"\n\n⚠️ HIGH-DIMENSIONAL DATA: {len(selected_features)} features selected\n   Using memory-optimized sparse mode automatically"
+
         result = messagebox.askyesno(
             f"Train Fresh ({mode} Mode)",
             f"This will train a fresh model using {mode} mode.\n\n"
             f"Tensor Mode: Single-pass orthogonal projection\n"
             f"Standard Mode: Iterative error-correction\n\n"
-            f"Enhanced Visualization: {'ENABLED' if self.enhanced_viz_var.get() else 'DISABLED'}\n\n"
+            f"Features Selected: {len(selected_features)}\n"
+            f"Enhanced Visualization: {'ENABLED' if self.enhanced_viz_var.get() else 'DISABLED'}"
+            f"{memory_note}\n\n"
             "Continue?"
         )
 
@@ -5819,7 +5618,6 @@ class EnhancedDBNNInterface:
             messagebox.showerror("Error", f"Continued training failed: {e}")
             self.log(f"Error: {e}")
             self.log(traceback.format_exc())
-
 
     def _train_model_internal(self, fresh_training=False):
         """Internal training method that handles both fresh and continued training with tensor mode support"""
@@ -6268,7 +6066,7 @@ class EnhancedDBNNInterface:
             self.log("ℹ️ No existing model found for auto-loading")
 
     def analyze_file(self):
-        """Analyze the selected file and auto-load configuration and model"""
+        """Analyze the selected file and auto-load configuration and model - UPDATED FOR HIGH-DIMENSIONAL DATA"""
         filename = self.file_path.get()
         if not filename:
             messagebox.showerror("Error", "Please select a file first")
@@ -6280,14 +6078,20 @@ class EnhancedDBNNInterface:
 
             if filename.endswith('.csv'):
                 self.file_type = 'csv'
-                df = pd.read_csv(filename, nrows=100)
+                # Use optimized CSV reading for large files
+                df = pd.read_csv(filename, nrows=1000)  # Increased sample size for better analysis
                 columns = df.columns.tolist()
 
                 self.file_info.delete(1.0, tk.END)
                 self.file_info.insert(tk.END, f"CSV File: {filename}\n")
-                self.file_info.insert(tk.END, f"Columns ({len(columns)}): {', '.join(columns)}\n")
-                self.file_info.insert(tk.END, f"Sample data: {len(df)} rows\n")
-                self.file_info.insert(tk.END, f"First row sample: {df.iloc[0].tolist()}\n")
+                self.file_info.insert(tk.END, f"Columns ({len(columns)}): {', '.join(columns[:10])}{'...' if len(columns) > 10 else ''}\n")
+                self.file_info.insert(tk.END, f"Sample data: {len(df)} rows analyzed\n")
+
+                # Show data types for better understanding
+                if len(df) > 0:
+                    dtypes_info = df.dtypes.astype(str).value_counts().to_dict()
+                    dtype_str = ", ".join([f"{count} {dtype}" for dtype, count in dtypes_info.items()])
+                    self.file_info.insert(tk.END, f"Data types: {dtype_str}\n")
 
                 # Setup target selection - ADD "None" OPTION FOR PREDICTION
                 target_options = ['None'] + columns  # Add "None" as first option
@@ -6304,14 +6108,38 @@ class EnhancedDBNNInterface:
                 for i, col in enumerate(columns):
                     var = tk.BooleanVar(value=True)  # Default all to selected
                     self.feature_vars[col] = var
-                    cb = ttk.Checkbutton(self.feature_scroll_frame, text=col, variable=var)
-                    cb.grid(row=i, column=0, sticky='w', padx=2, pady=1)
+
+                    # Use more compact display for high-dimensional data
+                    if len(columns) > 50:
+                        # For high-dimensional data, use shorter labels and grid layout
+                        cb = ttk.Checkbutton(self.feature_scroll_frame, text=col[:20] + ("..." if len(col) > 20 else ""),
+                                           variable=var, width=25)
+                        cb.grid(row=i//3, column=i%3, sticky='w', padx=2, pady=1)
+                        # Add tooltip with full column name
+                        self.create_tooltip(cb, f"Full name: {col}")
+                    else:
+                        # For normal datasets, use standard layout
+                        cb = ttk.Checkbutton(self.feature_scroll_frame, text=col, variable=var)
+                        cb.grid(row=i, column=0, sticky='w', padx=2, pady=1)
+
+                # Adjust canvas height based on number of features
+                if len(columns) > 50:
+                    self.feature_canvas.configure(height=150)  # Taller for high-dimensional data
+                else:
+                    self.feature_canvas.configure(height=120)
 
                 # Update canvas scrollregion
                 self.feature_scroll_frame.update_idletasks()
                 self.feature_canvas.configure(scrollregion=self.feature_canvas.bbox("all"))
 
                 self.feature_frame.pack(fill='x', pady=5)
+
+                # Log feature count information
+                if len(columns) > 100:
+                    self.log(f"⚠️ High-dimensional dataset detected: {len(columns)} features")
+                    self.log("💡 Consider using 'Smart Select' for initial testing")
+                else:
+                    self.log(f"✅ Dataset analyzed: {len(columns)} features")
 
             elif filename.endswith('.dat'):
                 self.file_type = 'dat'
@@ -6323,7 +6151,13 @@ class EnhancedDBNNInterface:
                 self.file_info.insert(tk.END, f"Total lines: {len(lines)}\n")
                 if lines:
                     values = lines[0].split()
-                    self.file_info.insert(tk.END, f"Columns: {len(values)} (assuming all are features for prediction)\n")
+                    feature_count = len(values) - 1  # Last column is typically target
+                    self.file_info.insert(tk.END, f"Features: {feature_count} (assuming last column is target)\n")
+
+                    if feature_count > 100:
+                        self.log(f"⚠️ High-dimensional DAT file: {feature_count} features")
+                    else:
+                        self.log(f"✅ DAT file analyzed: {feature_count} features")
 
                 # Don't show feature selection for DAT files in prediction mode
                 if self.feature_frame.winfo_ismapped():
@@ -6669,7 +6503,7 @@ class EnhancedDBNNInterface:
             self.log(traceback.format_exc())
 
     def initialize_core(self):
-        """Initialize DBNN core"""
+        """Initialize DBNN core with memory optimization for high-dimensional data"""
         try:
             config = {
                 'resol': int(self.resol.get()),
@@ -6679,7 +6513,7 @@ class EnhancedDBNNInterface:
                 'patience': int(self.patience.get())
             }
 
-            #self.core = DBNNCore(config)
+            # Use HybridDBNNCore for automatic memory optimization
             self.core = HybridDBNNCore(config)
             self.visualizer = DBNNVisualizer()
             self.core.attach_visualizer(self.visualizer)
@@ -6692,11 +6526,12 @@ class EnhancedDBNNInterface:
             else:
                 self.log("DBNN core initialized in Standard mode")
 
-            self.log(f"Config: {config}")
-
-
-            self.log("DBNN core initialized successfully")
-            self.log(f"Config: {config}")
+            # Log memory optimization capabilities
+            self.log("✅ Memory-optimized HybridDBNNCore initialized")
+            self.log("   - Automatic sparse/dense mode selection")
+            self.log("   - JIT-optimized operations")
+            self.log("   - 60% memory limit enforcement")
+            self.log(f"   - Config: {config}")
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to initialize core: {e}")
@@ -8030,6 +7865,283 @@ class EnhancedDBNNInterface:
         # Instructions
         ttk.Label(dialog, text="Choose an option to view your visualizations:",
                   font=('Arial', 9)).pack(pady=5)
+
+    def _on_target_selection_change(self, event=None):
+        """Automatically remove target column from feature selection when target is selected"""
+        target_column = self.target_col.get()
+
+        if target_column and target_column != 'None':
+            # Deselect the target column in feature checkboxes
+            if target_column in self.feature_vars:
+                self.feature_vars[target_column].set(False)
+                self.log(f"⚠️ Automatically deselected target column '{target_column}' from features")
+
+            # Also update the tooltip to inform the user
+            self.create_tooltip(self.target_combo,
+                               f"Target column selected: {target_column}\n"
+                               f"This column has been automatically removed from feature selection.")
+
+    def smart_feature_selection(self):
+        """Smart feature selection for high-dimensional data"""
+        if not self.feature_vars:
+            messagebox.showinfo("Information", "Please analyze a data file first")
+            return
+
+        total_features = len(self.feature_vars)
+
+        if total_features <= 50:
+            # For small datasets, select all features
+            self.select_all_features()
+            self.log("✅ Smart selection: Selected all features (small dataset)")
+            return
+
+        # For high-dimensional data, use intelligent selection
+        response = messagebox.askyesno(
+            "Smart Feature Selection",
+            f"Dataset has {total_features} features (high-dimensional).\n\n"
+            f"Choose selection strategy:\n"
+            f"• Yes: Select first 100 features (recommended for initial testing)\n"
+            f"• No: Select all features (may be slow for large datasets)\n\n"
+            f"Recommended: Start with 100 features for testing, then expand if needed."
+        )
+
+        if response:
+            # Select first 100 features
+            selected_count = 0
+            feature_list = list(self.feature_vars.keys())
+            for i, col in enumerate(feature_list):
+                if i < 100:
+                    self.feature_vars[col].set(True)
+                    selected_count += 1
+                else:
+                    self.feature_vars[col].set(False)
+
+            self.log(f"✅ Smart selection: Selected first {selected_count} features for testing")
+            self.log("💡 Tip: You can manually adjust feature selection after testing")
+        else:
+            # Select all features
+            self.select_all_features()
+            self.log(f"✅ Smart selection: Selected all {total_features} features")
+            self.log("⚠️ Warning: Training may be slow with many features")
+
+
+
+class DiskCacheManager:
+    """
+    Manager for disk-based caching of large arrays.
+
+    This class provides:
+    - Transparent disk caching for large arrays
+    - Memory-mapped file operations
+    - Automatic cleanup of temporary files
+    - Efficient serialization/deserialization
+    """
+
+    def __init__(self, cache_dir: str = "dbnn_cache"):
+        """
+        Initialize disk cache manager.
+
+        Args:
+            cache_dir: Directory for cache files
+        """
+        import os
+        self.cache_dir = cache_dir
+        os.makedirs(cache_dir, exist_ok=True)
+        self.cache_files = []
+
+    def cache_array(self, array: np.ndarray, name: str):
+        """
+        Cache a numpy array to disk.
+
+        Args:
+            array: Numpy array to cache
+            name: Identifier for the array
+
+        Returns:
+            DiskCachedArray object that can be loaded later
+        """
+        import os
+        import pickle
+        import gzip
+
+        filename = os.path.join(self.cache_dir, f"{name}.pkl.gz")
+
+        try:
+            # Save array to disk
+            with gzip.open(filename, 'wb') as f:
+                pickle.dump(array, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+            self.cache_files.append(filename)
+            return DiskCachedArray(filename)
+
+        except Exception as e:
+            raise Exception(f"Failed to cache array {name}: {e}")
+
+    def cleanup(self):
+        """Remove all cache files."""
+        import os
+        for filename in self.cache_files:
+            try:
+                if os.path.exists(filename):
+                    os.remove(filename)
+            except:
+                pass
+        self.cache_files = []
+
+class DiskCachedArray:
+    """
+    Represents an array cached on disk.
+
+    This provides a transparent interface for loading arrays from disk
+    when needed, while keeping them on disk otherwise.
+    """
+
+    def __init__(self, filename: str):
+        """
+        Initialize with cache file.
+
+        Args:
+            filename: Path to cached array file
+        """
+        self.filename = filename
+        self._array = None
+
+    def load(self) -> np.ndarray:
+        """
+        Load array from disk.
+
+        Returns:
+            Loaded numpy array
+        """
+        if self._array is None:
+            import pickle
+            import gzip
+
+            with gzip.open(self.filename, 'rb') as f:
+                self._array = pickle.load(f)
+
+        return self._array
+
+    def unload(self):
+        """Unload array from memory (keep on disk)."""
+        self._array = None
+
+    def __del__(self):
+        """Cleanup on deletion."""
+        self.unload()
+
+class DBNNWorkflow:
+    """
+    Complete workflow manager that uses DBNNCore and DBNNVisualizer
+    """
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        #self.core = DBNNCore(config)
+        self.core = HybridDBNNCore(config)
+        self.visualizer = DBNNVisualizer()
+        self.core.attach_visualizer(self.visualizer)
+
+    def run_complete_workflow(self, train_file: str, test_file: Optional[str] = None,
+                             predict_file: Optional[str] = None, use_csv: bool = True,
+                             target_column: Optional[str] = None,
+                             feature_columns: Optional[List[str]] = None):
+        """Run complete training and evaluation workflow"""
+
+        print("Starting complete DBNN workflow...")
+
+        # Training
+        success = self.core.train_with_early_stopping(
+            train_file,
+            test_file,
+            use_csv,
+            target_column,
+            feature_columns,
+            enable_interactive_viz=True,      # Enable 3D visualization
+            viz_capture_interval=5            # Capture every 5 iterations
+        )
+
+        if not success:
+            print("Training failed")
+            return False
+
+        # Generate visualizations
+        if len(self.visualizer.training_history) > 0:
+            self.visualizer.create_training_dashboard("training_results.html")
+            print("Visualizations generated")
+
+        # Test if test file provided
+        if test_file and os.path.exists(test_file):
+            self.test_model(test_file, use_csv)
+
+        # Predict if predict file provided
+        if predict_file and os.path.exists(predict_file):
+            self.predict(predict_file, use_csv)
+
+        print("Workflow completed successfully!")
+        return True
+
+    def test_model(self, test_file: str, use_csv: bool = True):
+        """Test model on test data"""
+        print(f"Testing model on: {test_file}")
+
+        # Load test data
+        features_batches, targets_batches, _, original_targets_batches = self.core.load_data(test_file)
+
+        if not features_batches:
+            print("No test data loaded")
+            return
+
+        # Encode targets
+        encoded_targets_batches = []
+        for batch in original_targets_batches:
+            encoded_batch = self.core.class_encoder.transform(batch)
+            encoded_targets_batches.append(encoded_batch)
+
+        # Evaluate
+        accuracy, correct_predictions, predictions = self.core.evaluate(features_batches, encoded_targets_batches)
+        total_samples = sum(len(batch) for batch in features_batches)
+
+        print(f"Test Results: Accuracy = {accuracy:.2f}% ({correct_predictions}/{total_samples})")
+
+    def predict(self, data_file: str, use_csv: bool = True, output_file: Optional[str] = None):
+        """Generate predictions on new data"""
+        print(f"Generating predictions for: {data_file}")
+
+        features_batches, _, _, _ = self.core.load_data(data_file)
+
+        if not features_batches:
+            print("No prediction data loaded")
+            return
+
+        all_predictions = []
+        all_probabilities = []
+
+        for features_batch in features_batches:
+            predictions, probabilities = self.core.predict_batch(features_batch)
+            all_predictions.extend(predictions)
+            all_probabilities.extend(probabilities)
+
+        # Decode predictions
+        decoded_predictions = self.core.class_encoder.inverse_transform(all_predictions)
+
+        # Save results
+        if output_file is None:
+            output_file = data_file.replace('.csv', '_predictions.csv').replace('.dat', '_predictions.csv')
+
+        results_df = pd.DataFrame({
+            'prediction_encoded': all_predictions,
+            'prediction': decoded_predictions
+        })
+
+        # Add probability columns
+        for i, class_name in enumerate(self.core.class_encoder.encoded_to_class.values()):
+            probs = [prob.get(class_name, 0.0) for prob in all_probabilities]
+            results_df[f'prob_{class_name}'] = probs
+
+        results_df.to_csv(output_file, index=False)
+        print(f"Predictions saved to: {output_file}")
+
+        return decoded_predictions, all_probabilities
 
 class DBNNCommandLine:
     """Command Line Interface for DBNN with binary format support"""
@@ -14306,5 +14418,3 @@ if __name__ == "__main__":
     # )
 
     print("DBNN class structure ready for use!")
-
-
