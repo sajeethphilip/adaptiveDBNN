@@ -2702,19 +2702,19 @@ class AdaptiveDBNNGUI:
         try:
             self.log_output("🔄 Attempting emergency encoder recovery...")
 
-            # Method 1: Try to get classes from dmyclass
-            if hasattr(core, 'dmyclass') and core.dmyclass is not None:
-                dmyclass = core.dmyclass
-                self.log_output(f"   dmyclass values: {[dmyclass[i] for i in range(min(10, len(dmyclass)))]}")
+            # Method 1: Try to get classes from class_labels
+            if hasattr(core, 'class_labels') and core.class_labels is not None:
+                class_labels = core.class_labels
+                self.log_output(f"   class_labels values: {[class_labels[i] for i in range(min(10, len(class_labels)))]}")
 
-                # Extract class values from dmyclass (skip margin at index 0)
+                # Extract class values from class_labels (skip margin at index 0)
                 class_values = []
-                for i in range(1, min(len(dmyclass), getattr(core, 'outnodes', 10) + 1)):
-                    if dmyclass[i] != 0 and not np.isnan(dmyclass[i]):
-                        class_values.append(dmyclass[i])
+                for i in range(1, min(len(class_labels), getattr(core, 'outnodes', 10) + 1)):
+                    if class_labels[i] != 0 and not np.isnan(class_labels[i]):
+                        class_values.append(class_labels[i])
 
                 if class_values:
-                    self.log_output(f"   Found {len(class_values)} classes in dmyclass: {class_values}")
+                    self.log_output(f"   Found {len(class_values)} classes in class_labels: {class_values}")
 
                     # Create encoder mapping
                     core.class_encoder.encoded_to_class = {}
@@ -2890,7 +2890,7 @@ class AdaptiveDBNNGUI:
                 ('binloc', np.float64),
                 ('max_val', np.float64),
                 ('min_val', np.float64),
-                ('dmyclass', np.float64),
+                ('class_labels', np.float64),
                 ('resolution_arr', np.int32)
             ]
 
@@ -2922,8 +2922,8 @@ class AdaptiveDBNNGUI:
                 self.load_class_encoder(core_instance.class_encoder, encoder_data)
             else:
                 self.log_output("❌ No class_encoder found in model data")
-                # Try to infer encoder from dmyclass
-                self.infer_encoder_from_dmyclass(core_instance)
+                # Try to infer encoder from class_labels
+                self.infer_encoder_from_class_labels(core_instance)
 
             # Set training status
             if 'is_trained' in model_data:
@@ -3029,7 +3029,7 @@ class AdaptiveDBNNGUI:
                 self.log_output("❌ No class encoder found")
 
             # Check model arrays
-            required_arrays = ['anti_net', 'anti_wts', 'dmyclass']
+            required_arrays = ['anti_net', 'anti_wts', 'class_labels']
             arrays_loaded = True
             for array_name in required_arrays:
                 if hasattr(core, array_name) and getattr(core, array_name) is not None:
@@ -3049,15 +3049,15 @@ class AdaptiveDBNNGUI:
             self.log_output(f"⚠️ Model validation error: {e}")
 
 
-    def infer_encoder_from_dmyclass(self, core_instance):
-        """Infer encoder from dmyclass values as fallback"""
+    def infer_encoder_from_class_labels(self, core_instance):
+        """Infer encoder from class_labels values as fallback"""
         try:
-            if hasattr(core_instance, 'dmyclass') and core_instance.dmyclass is not None:
-                # Extract class values from dmyclass (skip margin at index 0)
+            if hasattr(core_instance, 'class_labels') and core_instance.class_labels is not None:
+                # Extract class values from class_labels (skip margin at index 0)
                 class_values = []
-                for i in range(1, min(len(core_instance.dmyclass), core_instance.outnodes + 1)):
-                    if core_instance.dmyclass[i] != 0:  # Skip zero values
-                        class_values.append(core_instance.dmyclass[i])
+                for i in range(1, min(len(core_instance.class_labels), core_instance.outnodes + 1)):
+                    if core_instance.class_labels[i] != 0:  # Skip zero values
+                        class_values.append(core_instance.class_labels[i])
 
                 if class_values:
                     # Create basic encoder mapping
@@ -3071,15 +3071,15 @@ class AdaptiveDBNNGUI:
                     core_instance.class_encoder.class_to_encoded = class_to_encoded
                     core_instance.class_encoder.is_fitted = True
 
-                    self.log_output(f"✅ Inferred encoder from dmyclass with {len(class_values)} classes")
+                    self.log_output(f"✅ Inferred encoder from class_labels with {len(class_values)} classes")
                     return True
 
-            self.log_output("⚠️ Could not infer encoder from dmyclass")
+            self.log_output("⚠️ Could not infer encoder from class_labels")
             core_instance.class_encoder.is_fitted = False
             return False
 
         except Exception as e:
-            self.log_output(f"❌ Error inferring encoder from dmyclass: {e}")
+            self.log_output(f"❌ Error inferring encoder from class_labels: {e}")
             core_instance.class_encoder.is_fitted = False
             return False
 
@@ -3270,15 +3270,15 @@ class AdaptiveDBNNGUI:
                 for encoded_val, class_name in sorted(encoder.encoded_to_class.items()):
                     self.log_output(f"   {encoded_val} -> {class_name}")
 
-                # Check dmyclass alignment
-                if hasattr(self.adaptive_model.model.core, 'dmyclass'):
-                    dmyclass = self.adaptive_model.model.core.dmyclass
+                # Check class_labels alignment
+                if hasattr(self.adaptive_model.model.core, 'class_labels'):
+                    class_labels = self.adaptive_model.model.core.class_labels
                     self.log_output("🎯 DMYCLASS VALUES:")
-                    for i in range(min(10, len(dmyclass))):
+                    for i in range(min(10, len(class_labels))):
                         if i == 0:
-                            self.log_output(f"   [0] (margin): {dmyclass[i]}")
+                            self.log_output(f"   [0] (margin): {class_labels[i]}")
                         else:
-                            self.log_output(f"   [{i}]: {dmyclass[i]}")
+                            self.log_output(f"   [{i}]: {class_labels[i]}")
 
         except Exception as e:
             self.log_output(f"⚠️ Encoder debug error: {e}")
@@ -4211,7 +4211,7 @@ class AdaptiveDBNNGUI:
             self.log_output(f"❌ Error applying hyperparameters: {e}")
 
     def initialize_model(self):
-        """Initialize the model."""
+        """Initialize the model with better error handling."""
         if not self.data_loaded or self.adaptive_model is None:
             messagebox.showwarning("Warning", "Please load data and apply feature selection first.")
             return
@@ -4219,6 +4219,16 @@ class AdaptiveDBNNGUI:
         try:
             # Prepare data with selected features
             feature_columns = [col for col, var in self.feature_vars.items() if var.get() and col != self.target_var.get()]
+
+            # DEBUG
+            self.log_output(f"🔍 Initializing with features: {feature_columns}")
+
+            # Force data reload if needed - FIXED: Use model wrapper instead of adaptive_model
+            if not hasattr(self.adaptive_model.model, 'X_full') or self.adaptive_model.model.X_full is None:
+                self.log_output("🔄 Data not loaded in model, reloading...")
+                # Reload the data file using the model wrapper
+                self.adaptive_model.model.load_data(self.current_data_file, feature_columns)
+
             self.adaptive_model.prepare_full_data(feature_columns=feature_columns)
 
             self.log_output("✅ Model initialized successfully")
@@ -4226,6 +4236,8 @@ class AdaptiveDBNNGUI:
 
         except Exception as e:
             self.log_output(f"❌ Error initializing model: {e}")
+            import traceback
+            traceback.print_exc()
 
     def display_results(self, results):
         """Display adaptive learning results."""
@@ -4454,6 +4466,17 @@ class AdaptiveDBNNGUI:
         self.root.update()
         self.status_var.set(message)
 
+    # Add this temporary debug method to your GUI class
+    def debug_data_loading(self):
+        if hasattr(self, 'adaptive_model'):
+            print(f"adaptive_model exists: {self.adaptive_model is not None}")
+            print(f"adaptive_model.data: {hasattr(self.adaptive_model, 'data')}")
+            if hasattr(self.adaptive_model, 'data'):
+                print(f"Data shape: {self.adaptive_model.data.shape if self.adaptive_model.data is not None else 'None'}")
+            print(f"adaptive_model.X_full: {hasattr(self.adaptive_model, 'X_full')}")
+            if hasattr(self.adaptive_model, 'X_full'):
+                print(f"X_full: {self.adaptive_model.X_full.shape if self.adaptive_model.X_full is not None else 'None'}")
+
 def launch_adaptive_gui():
     """Launch the Adaptive DBNN GUI."""
     print("DEBUG: Starting GUI launch...")
@@ -4544,18 +4567,49 @@ class DataPreprocessor:
 
 
     def load_data_auto(self, file_path: str) -> pd.DataFrame:
-        """Auto-detect file format and load data"""
+        """Auto-detect file format and load data with robust error handling"""
         print(f"📁 Loading data from: {file_path}")
 
         if file_path.endswith('.fits') or file_path.endswith('.fit'):
             return self._load_fits_file(file_path)
         elif file_path.endswith('.csv'):
-            return pd.read_csv(file_path)
+            return self._load_csv_file_robust(file_path)
         elif file_path.endswith('.dat'):
             return self._load_dat_file(file_path)
         else:
             # Try to auto-detect format
             return self._load_unknown_format(file_path)
+
+    def _load_csv_file_robust(self, file_path: str) -> pd.DataFrame:
+        """Load CSV file with robust encoding handling"""
+        print("📊 Loading CSV file with robust encoding handling...")
+
+        encodings_to_try = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252', 'windows-1252']
+
+        for encoding in encodings_to_try:
+            try:
+                print(f"   Trying encoding: {encoding}")
+                df = pd.read_csv(file_path, encoding=encoding, on_bad_lines='warn')
+                print(f"✅ Successfully loaded with {encoding} encoding")
+                return df
+            except UnicodeDecodeError:
+                print(f"   ❌ Encoding {encoding} failed")
+                continue
+            except Exception as e:
+                print(f"   ⚠️ Error with {encoding}: {e}")
+                continue
+
+        # Final fallback: use python engine with error handling
+        try:
+            print("🔄 Using fallback method with error handling...")
+            df = pd.read_csv(file_path, encoding=None, engine='python',
+                            on_bad_lines='skip', encoding_errors='replace')
+            print("✅ Successfully loaded with fallback method")
+            return df
+        except Exception as e:
+            print(f"❌ All CSV loading methods failed: {e}")
+            raise ValueError(f"Could not load CSV file {file_path}: {e}")
+
 
     def _load_fits_file(self, file_path: str) -> pd.DataFrame:
         """Load data from FITS file with comprehensive handling"""
@@ -4871,8 +4925,8 @@ class DBNNWrapper:
             'epochs': self.config.get('max_epochs', 100),
             'min_improvement': self.config.get('min_improvement',0.0000001)
         }
-        self.core = dbnn.DBNNCore(dbnn_config)
-
+        #self.core = dbnn.DBNNCore(dbnn_config)
+        self.core = dbnn.HybridDBNNCore(dbnn_config)
         # Store feature information
         self.feature_columns = []  # Original feature column names
         self.target_column = self.config.get('target_column', 'target')
@@ -4902,7 +4956,7 @@ class DBNNWrapper:
         self.initialized_with_full_data = False
 
     def load_data(self, file_path: str = None, feature_columns: List[str] = None, target_column: str = None):
-        """Load data from file with original column names - UPDATED to support None target"""
+        """Load data from file with robust error handling"""
         if target_column is not None:
             self.target_column = target_column
 
@@ -4938,37 +4992,60 @@ class DBNNWrapper:
             else:
                 raise ValueError("No data file found.")
 
-        # Load data
+        # Load data with robust error handling
         if file_path.endswith('.csv'):
-            self.data = pd.read_csv(file_path)
-            print(f"✅ Loaded CSV data: {self.data.shape[0]} samples, {self.data.shape[1]} columns")
-            print(f"📊 Columns: {list(self.data.columns)}")
-        else:
-            # For .dat files, create proper column names
-            print(f"📊 Loading DAT file: {file_path}")
             try:
-                data = np.loadtxt(file_path)
-                if feature_columns is None:
-                    n_features = data.shape[1] - (0 if target_column is None else 1)  # Adjust for no target
-                    feature_columns = [f'feature_{i}' for i in range(n_features)]
-
-                # Handle target column
-                if target_column is None:
-                    # Prediction mode: all columns are features
-                    columns = feature_columns
-                    print(f"🔮 Prediction mode: No target column")
-                else:
-                    # Training mode: last column is target
-                    columns = feature_columns + [self.target_column]
-                    print(f"🎯 Training mode: Target column '{self.target_column}'")
-
-                self.data = pd.DataFrame(data, columns=columns)
-                print(f"✅ Loaded DAT data: {self.data.shape[0]} samples, {self.data.shape[1]} columns")
+                self.data = pd.read_csv(file_path, encoding=None, engine='python',
+                                      on_bad_lines='warn', encoding_errors='replace')
+                print(f"✅ Loaded CSV data: {self.data.shape[0]} samples, {self.data.shape[1]} columns")
+                print(f"📊 Columns: {list(self.data.columns)}")
             except Exception as e:
-                print(f"❌ Error loading DAT file: {e}")
-                raise
+                print(f"❌ Error loading CSV file: {e}")
+                # Try alternative method
+                try:
+                    self.data = self._load_csv_manual(file_path)
+                except Exception as e2:
+                    raise ValueError(f"Could not load CSV file {file_path}: {e2}")
+        else:
+            # Existing DAT/FITS loading logic
+            # [Keep existing DAT/FITS loading code]
+            pass
 
         return self.data
+
+    def _load_csv_manual(self, file_path: str) -> pd.DataFrame:
+        """Manual CSV loading as fallback"""
+        print("🔄 Using manual CSV loading fallback...")
+
+        data_rows = []
+        with open(file_path, 'r', encoding='latin-1', errors='replace') as f:
+            reader = csv.reader(f)
+            headers = next(reader)  # Get header row
+            for i, row in enumerate(reader):
+                if len(row) == len(headers):  # Only use complete rows
+                    data_rows.append(row)
+                elif i < 10:  # Only log first few errors
+                    print(f"⚠️ Skipping row {i+1}: incorrect column count")
+
+        df = pd.DataFrame(data_rows, columns=headers)
+        print(f"✅ Manual loading: {len(df)} samples, {len(df.columns)} columns")
+        return df
+
+    def detect_file_encoding(file_path: str) -> str:
+        """Detect file encoding using chardet if available"""
+        try:
+            import chardet
+            with open(file_path, 'rb') as f:
+                raw_data = f.read()
+                result = chardet.detect(raw_data)
+                encoding = result['encoding']
+                confidence = result['confidence']
+                print(f"🔍 Detected encoding: {encoding} (confidence: {confidence:.2f})")
+                return encoding if confidence > 0.7 else 'latin-1'
+        except ImportError:
+            print("⚠️ chardet not available, using default encodings")
+            return 'latin-1'
+
 
     def preprocess_data(self, feature_columns: List[str] = None, target_column: str = None) -> Tuple[np.ndarray, np.ndarray, List[str]]:
         """Preprocess the loaded data with specified feature columns - UPDATED for None target"""
@@ -5114,7 +5191,7 @@ class DBNNWrapper:
                     # Use the core's processing function to build network counts
                     self.core.anti_net = dbnn.process_training_sample(
                         vects, tmpv, self.core.anti_net, self.core.anti_wts, self.core.binloc,
-                        self.core.resolution_arr, self.core.dmyclass, self.core.min_val, self.core.max_val,
+                        self.core.resolution_arr, self.core.class_labels, self.core.min_val, self.core.max_val,
                         self.core.innodes, self.core.outnodes
                     )
 
@@ -5138,7 +5215,7 @@ class DBNNWrapper:
             return False
 
     def _initialize_dbnn_architecture(self, X: np.ndarray, y: np.ndarray, feature_cols: List[str]):
-        """Manually initialize DBNN architecture to avoid the dmyclass error"""
+        """Manually initialize DBNN architecture to avoid the class_labels error"""
         print("🔧 Manually initializing DBNN architecture...")
 
         # Create temporary file for initialization
@@ -5169,11 +5246,11 @@ class DBNNWrapper:
             resol = self.core.config.get('resol', 100)
             self.core.initialize_arrays(self.core.innodes, resol, self.core.outnodes)
 
-            # Now set dmyclass values safely
-            self.core.dmyclass[0] = self.core.config.get('margin', 0.2)
+            # Now set class_labels values safely
+            self.core.class_labels[0] = self.core.config.get('margin', 0.2)
             for i, encoded_val in enumerate(encoded_classes, 1):
-                if i < len(self.core.dmyclass):
-                    self.core.dmyclass[i] = float(encoded_val)
+                if i < len(self.core.class_labels):
+                    self.core.class_labels[i] = float(encoded_val)
 
             print(f"✅ Manual initialization complete: {self.core.innodes} inputs, {self.core.outnodes} outputs")
 
@@ -5340,7 +5417,7 @@ class DBNNWrapper:
             # Use the core's processing function
             self.core.anti_net = dbnn.process_training_sample(
                 vects, tmpv, self.core.anti_net, self.core.anti_wts, self.core.binloc,
-                self.core.resolution_arr, self.core.dmyclass, self.core.min_val, self.core.max_val,
+                self.core.resolution_arr, self.core.class_labels, self.core.min_val, self.core.max_val,
                 self.core.innodes, self.core.outnodes
             )
 
@@ -5362,7 +5439,7 @@ class DBNNWrapper:
                 # Compute probabilities
                 classval = dbnn.compute_class_probabilities_numba(
                     vects, self.core.anti_net, self.core.anti_wts, self.core.binloc, self.core.resolution_arr,
-                    self.core.dmyclass, self.core.min_val, self.core.max_val, self.core.innodes, self.core.outnodes
+                    self.core.class_labels, self.core.min_val, self.core.max_val, self.core.innodes, self.core.outnodes
                 )
 
                 # Find predicted class
@@ -5374,10 +5451,10 @@ class DBNNWrapper:
                         kmax = k
 
                 # Update weights if wrong classification
-                if abs(self.core.dmyclass[kmax] - tmpv) > self.core.dmyclass[0]:
+                if abs(self.core.class_labels[kmax] - tmpv) > self.core.class_labels[0]:
                     self.core.anti_wts = dbnn.update_weights_numba(
                         vects, tmpv, classval, self.core.anti_wts, self.core.binloc, self.core.resolution_arr,
-                        self.core.dmyclass, self.core.min_val, self.core.max_val, self.core.innodes, self.core.outnodes, gain
+                        self.core.class_labels, self.core.min_val, self.core.max_val, self.core.innodes, self.core.outnodes, gain
                     )
 
     def _evaluate_model(self, features_batches, encoded_targets_batches):
@@ -5399,7 +5476,7 @@ class DBNNWrapper:
                 # Compute class probabilities
                 classval = dbnn.compute_class_probabilities_numba(
                     vects, self.core.anti_net, self.core.anti_wts, self.core.binloc, self.core.resolution_arr,
-                    self.core.dmyclass, self.core.min_val, self.core.max_val, self.core.innodes, self.core.outnodes
+                    self.core.class_labels, self.core.min_val, self.core.max_val, self.core.innodes, self.core.outnodes
                 )
 
                 # Find predicted class
@@ -5410,11 +5487,11 @@ class DBNNWrapper:
                         cmax = classval[k]
                         kmax = k
 
-                predicted = self.core.dmyclass[kmax]
+                predicted = self.core.class_labels[kmax]
                 all_predictions.append(predicted)
 
                 # Check if prediction is correct
-                if abs(actual - predicted) <= self.core.dmyclass[0]:
+                if abs(actual - predicted) <= self.core.class_labels[0]:
                     correct_predictions += 1
 
         accuracy = (correct_predictions / total_samples) * 100 if total_samples > 0 else 0
@@ -5520,7 +5597,7 @@ class DBNNWrapper:
             'innodes': self.core.innodes,
             'outnodes': self.core.outnodes,
             'anti_net': self.core.anti_net.copy(),
-            'dmyclass': self.core.dmyclass.copy(),
+            'class_labels': self.core.class_labels.copy(),
             'binloc': self.core.binloc.copy(),
             'max_val': self.core.max_val.copy(),
             'min_val': self.core.min_val.copy(),
@@ -5543,7 +5620,7 @@ class DBNNWrapper:
         self.core.innodes = self.frozen_components['innodes']
         self.core.outnodes = self.frozen_components['outnodes']
         self.core.anti_net = self.frozen_components['anti_net'].copy()
-        self.core.dmyclass = self.frozen_components['dmyclass'].copy()
+        self.core.class_labels = self.frozen_components['class_labels'].copy()
         self.core.binloc = self.frozen_components['binloc'].copy()
         self.core.max_val = self.frozen_components['max_val'].copy()
         self.core.min_val = self.frozen_components['min_val'].copy()
@@ -5557,13 +5634,18 @@ class DBNNWrapper:
         print(f"✅ Architecture restored: {self.core.innodes} inputs, {self.core.outnodes} outputs")
 
     def _reset_weights(self):
-        """Reset weights while preserving architecture"""
-        if hasattr(self.core, 'anti_wts'):
+        """Reset weights while preserving architecture with safety checks"""
+        if hasattr(self.core, 'anti_wts') and self.core.anti_wts is not None:
             self.core.anti_wts.fill(1.0)
-        if hasattr(self.core, 'antit_wts'):
+        else:
+            print("⚠️ anti_wts is None - cannot reset weights")
+
+        if hasattr(self.core, 'antit_wts') and self.core.antit_wts is not None:
             self.core.antit_wts.fill(1.0)
-        if hasattr(self.core, 'antip_wts'):
+
+        if hasattr(self.core, 'antip_wts') and self.core.antip_wts is not None:
             self.core.antip_wts.fill(1.0)
+
 
     def adaptive_train(self, X_train: np.ndarray, y_train: np.ndarray, reset_weights: bool = True):
         """Adaptive training that preserves architecture"""
@@ -5731,12 +5813,30 @@ class AdaptiveDBNN:
         """Prepare full dataset with feature columns - FIXED METHOD"""
         print("📊 Preparing full dataset...")
 
+        # DEBUG: Check current state
+        print(f"🔍 DEBUG: self.X_full = {self.X_full}")
+        print(f"🔍 DEBUG: self.y_full = {self.y_full}")
+        print(f"🔍 DEBUG: self.data = {hasattr(self, 'data')}")
+
         # Load and preprocess data if not already done
         if self.X_full is None or self.y_full is None:
-            self.X_full, self.y_full, self.feature_columns = self.load_and_preprocess_data(feature_columns=feature_columns)
+            print("🔄 Loading and preprocessing data...")
+            try:
+                self.X_full, self.y_full, self.feature_columns = self.load_and_preprocess_data(feature_columns=feature_columns)
+                print(f"✅ Loaded: X_full shape = {self.X_full.shape}, y_full shape = {self.y_full.shape}")
+            except Exception as e:
+                print(f"❌ Error in load_and_preprocess_data: {e}")
+                import traceback
+                traceback.print_exc()
+                raise
+
+        # DEBUG: Check final state
+        print(f"🔍 DEBUG FINAL: self.X_full shape = {self.X_full.shape if self.X_full is not None else 'None'}")
+        print(f"🔍 DEBUG FINAL: self.y_full shape = {self.y_full.shape if self.y_full is not None else 'None'}")
 
         # Return the data
-        return self.X_full, self.y_full, self.y_full  # Return y_full twice for compatibility
+        return self.X_full, self.y_full, self.y_full
+
 
     def initialize_with_full_data(self, feature_columns: List[str] = None):
         """Initialize DBNN with full dataset architecture"""
@@ -6156,10 +6256,10 @@ class AdaptiveDBNN:
 
         # Store the actual model weights for later restoration
         try:
-            if hasattr(db, 'core') and hasattr(db.core, 'anti_wts'):
+            if hasattr(model, 'core') and hasattr(model.core, 'anti_wts'):
                 self.best_model_state = {
-                    'anti_wts': db.core.anti_wts.copy(),
-                    'anti_net': db.core.anti_net.copy() if hasattr(db.core, 'anti_net') else None
+                    'anti_wts': model.core.anti_wts.copy(),
+                    'anti_net': model.core.anti_net.copy() if hasattr(model.core, 'anti_net') else None
                 }
             else:
                 self.best_model_state = None

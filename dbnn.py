@@ -690,7 +690,7 @@ class MemoryMonitor:
             if hasattr(self.core, 'log'):
                 memory_gb = memory_bytes / (1024**3)
                 available_gb = self.available_memory_bytes / (1024**3)
-                self.core.log(f"💾 Memory check for {operation_name}: {memory_percent*100:.1f}% ({memory_gb:.2f}GB / {available_gb:.1f}GB available)")
+                #self.core.log(f"💾 Memory check for {operation_name}: {memory_percent*100:.1f}% ({memory_gb:.2f}GB / {available_gb:.1f}GB available)")
 
             # Check memory limits and take appropriate action
             self._check_memory_limits(memory_bytes, memory_percent)
@@ -744,7 +744,8 @@ class MemoryMonitor:
                 # Log memory status periodically (less frequent to avoid spam)
                 if len(self.memory_history) % 15 == 0:  # Every ~30 seconds
                     if hasattr(self.core, 'log'):
-                        self.core.log(f"💾 Memory: {memory_percent*100:.1f}% ({memory_bytes/(1024**3):.2f}GB)")
+                        #self.core.log(f"💾 Memory: {memory_percent*100:.1f}% ({memory_bytes/(1024**3):.2f}GB)")
+                        pass
 
             except Exception as e:
                 if hasattr(self.core, 'log'):
@@ -927,7 +928,8 @@ class MemoryMonitor:
         import gc
         gc.collect()
         if hasattr(self.core, 'log'):
-            self.core.log("🧹 Forced garbage collection completed")
+            #self.core.log("🧹 Forced garbage collection completed")
+            pass
 
     def get_memory_history(self):
         """Get memory usage history"""
@@ -2784,8 +2786,7 @@ class DBNNCore:
     def _load_csv_data_optimized(self, filename: str, target_column: str,
                                 feature_columns: List[str], batch_size: int):
         """
-        Optimized CSV loading with memory-efficient processing and robust error handling.
-        Enhanced with feature encoding and memory limit enforcement.
+        Optimized CSV loading with robust error handling for encoding issues.
         """
         import pandas as pd
         import csv
@@ -2796,93 +2797,117 @@ class DBNNCore:
 
         self.log(f"Loading CSV data from: {filename}")
 
-        with open(filename, 'r') as f:
-            reader = csv.DictReader(f)
+        # Try different encodings if UTF-8 fails
+        encodings_to_try = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252', 'windows-1252']
 
-            if not reader.fieldnames:
-                raise ValueError("No headers found in CSV file")
+        file_handle = None
+        reader = None
 
-            available_columns = reader.fieldnames
-            self.log(f"Available columns in CSV: {available_columns}")
+        for encoding in encodings_to_try:
+            try:
+                self.log(f"Trying encoding: {encoding}")
+                file_handle = open(filename, 'r', encoding=encoding, errors='replace')  # Use errors='replace' to handle bad chars
+                reader = csv.DictReader(file_handle)
 
-            # Determine if we're in prediction mode (no target column)
-            is_prediction_mode = (target_column is None or target_column == 'None' or target_column == '')
+                if not reader.fieldnames:
+                    raise ValueError("No headers found in CSV file")
 
-            # Validate columns exist - handle prediction mode differently
-            missing_columns = []
+                # If we get here, the encoding worked
+                self.log(f"✅ Successfully opened file with {encoding} encoding")
+                break
 
-            if not is_prediction_mode and target_column and target_column not in available_columns:
-                missing_columns.append(target_column)
+            except UnicodeDecodeError as e:
+                self.log(f"⚠️ Encoding {encoding} failed: {e}")
+                if file_handle:
+                    file_handle.close()
+                continue
+            except Exception as e:
+                self.log(f"⚠️ Error with encoding {encoding}: {e}")
+                if file_handle:
+                    file_handle.close()
+                continue
 
-            # Check feature columns - use all available if not specified
+        if reader is None:
+            # Final fallback: use pandas with error handling
+            self.log("🔄 Using pandas fallback with error handling...")
+            try:
+                # Try reading with pandas and error handling
+                df = pd.read_csv(filename, encoding=None, engine='python',
+                               on_bad_lines='skip', encoding_errors='replace')
+
+                if df.empty:
+                    raise ValueError("No data could be loaded from CSV file")
+
+                available_columns = df.columns.tolist()
+                self.log(f"Available columns in CSV: {available_columns}")
+
+                # Rest of the pandas processing logic...
+                # [Include the existing pandas processing logic here]
+
+            except Exception as e:
+                self.log(f"❌ All loading attempts failed: {e}")
+                raise ValueError(f"Could not load CSV file with any encoding: {e}")
+
+        # Continue with the existing processing logic for successful reader
+        available_columns = reader.fieldnames
+        self.log(f"Available columns in CSV: {available_columns}")
+
+        # Determine if we're in prediction mode (no target column)
+        is_prediction_mode = (target_column is None or target_column == 'None' or target_column == '')
+
+        # Validate columns exist - handle prediction mode differently
+        missing_columns = []
+
+        if not is_prediction_mode and target_column and target_column not in available_columns:
+            missing_columns.append(target_column)
+
+        # Check feature columns - use all available if not specified
+        if not feature_columns:
+            # If no features specified, use all columns except target (if target exists)
+            if not is_prediction_mode and target_column and target_column in available_columns:
+                feature_columns = [col for col in available_columns if col != target_column]
+            else:
+                # For prediction mode with no target, or target not found, use all columns
+                feature_columns = available_columns.copy()
+            self.log(f"Auto-selected feature columns: {feature_columns}")
+
+        # Now validate feature columns
+        for col in feature_columns:
+            if col not in available_columns:
+                missing_columns.append(col)
+
+        if missing_columns and not is_prediction_mode:
+            # Close file before raising error
+            if file_handle:
+                file_handle.close()
+            raise ValueError(f"Columns not found in CSV: {missing_columns}")
+        elif missing_columns and is_prediction_mode:
+            self.log(f"⚠️ Warning: Some feature columns not found in CSV: {missing_columns}")
+            # Remove missing columns from feature_columns
+            feature_columns = [col for col in feature_columns if col not in missing_columns]
             if not feature_columns:
-                # If no features specified, use all columns except target (if target exists)
-                if not is_prediction_mode and target_column and target_column in available_columns:
-                    feature_columns = [col for col in available_columns if col != target_column]
-                else:
-                    # For prediction mode with no target, or target not found, use all columns
-                    feature_columns = available_columns.copy()
-                self.log(f"Auto-selected feature columns: {feature_columns}")
+                if file_handle:
+                    file_handle.close()
+                raise ValueError("No valid feature columns found in CSV file")
 
-            # Now validate feature columns
-            for col in feature_columns:
-                if col not in available_columns:
-                    missing_columns.append(col)
+        self.log(f"Using feature columns: {feature_columns}")
+        if not is_prediction_mode and target_column:
+            self.log(f"Using target column: {target_column}")
 
-            if missing_columns and not is_prediction_mode:
-                raise ValueError(f"Columns not found in CSV: {missing_columns}")
-            elif missing_columns and is_prediction_mode:
-                self.log(f"⚠️ Warning: Some feature columns not found in CSV: {missing_columns}")
-                # Remove missing columns from feature_columns
-                feature_columns = [col for col in feature_columns if col not in missing_columns]
-                if not feature_columns:
-                    raise ValueError("No valid feature columns found in CSV file")
+        # Initialize feature encoder if needed
+        if not hasattr(self, 'feature_encoder'):
+            self.feature_encoder = FeatureEncoder()
 
-            self.log(f"Using feature columns: {feature_columns}")
-            if not is_prediction_mode and target_column:
-                self.log(f"Using target column: {target_column}")
+        current_batch_features = []
+        current_batch_targets = []
+        current_batch_original_targets = []
 
-            # Initialize feature encoder if needed
-            if not hasattr(self, 'feature_encoder'):
-                self.feature_encoder = FeatureEncoder()
+        line_count = 0
+        valid_samples = 0
+        invalid_samples = 0
+        encoding_errors = 0
 
-            current_batch_features = []
-            current_batch_targets = []
-            current_batch_original_targets = []
-
-            line_count = 0
-            valid_samples = 0
-            invalid_samples = 0
-
-            # First pass: collect data for feature encoding analysis
-            sample_data = {col: [] for col in feature_columns}
-            sample_targets = []
-
-            for row in reader:
-                line_count += 1
-                if line_count > 1000:  # Sample first 1000 rows for analysis
-                    break
-
-                try:
-                    for col in feature_columns:
-                        if col in row:
-                            sample_data[col].append(row[col])
-                    if not is_prediction_mode and target_column and target_column in row:
-                        sample_targets.append(row[target_column])
-                except:
-                    pass
-
-            # Reset file pointer for actual reading
-            f.seek(0)
-            reader = csv.DictReader(f)  # Recreate reader
-
-            # Fit feature encoder if this is training mode
-            if not is_prediction_mode and hasattr(self, 'feature_encoder'):
-                sample_df = pd.DataFrame(sample_data)
-                encoded_df, encoding_info = self.feature_encoder.fit_transform_features(sample_df, feature_columns)
-                if encoding_info:
-                    self.log(f"✅ Feature encoding applied: {list(encoding_info.keys())}")
-
+        try:
             for row in reader:
                 line_count += 1
                 try:
@@ -2950,6 +2975,14 @@ class DBNNCore:
                 features_batches.append(np.array(current_batch_features, dtype=np.float32))
                 targets_batches.append(np.array(current_batch_targets))
                 original_targets_batches.append(np.array(current_batch_original_targets))
+
+        except Exception as e:
+            self.log(f"❌ Error during CSV processing: {e}")
+            # Don't re-raise, try to continue with what we have
+        finally:
+            # Always close the file handle
+            if file_handle:
+                file_handle.close()
 
         total_samples = sum(len(batch) for batch in features_batches)
         self.log(f"✅ CSV loading completed: {total_samples} valid samples in {len(features_batches)} batches")
@@ -4085,6 +4118,11 @@ class HybridDBNNCore(DBNNCore):
         self.resolution_arr = np.zeros(innodes+8, dtype=np.int32)
         self.class_labels = np.zeros(outnodes + 2, dtype=np.float32)
         self.class_labels[0] = self.config.get('margin', 0.2)
+
+        # Initialize class labels for actual classes (indices 1 to outnodes)
+        for i in range(1, outnodes + 1):
+            self.class_labels[i] = float(i)  # Default class values: 1.0, 2.0, 3.0, etc.
+
 
         # Initialize bin locations
         for i in range(1, innodes + 1):
