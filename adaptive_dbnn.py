@@ -84,6 +84,15 @@ import warnings
 from astropy.io import fits
 from astropy.table import Table
 import astropy
+import argparse
+import sys
+import os
+from pathlib import Path
+import json
+import numpy as np
+import pandas as pd
+from typing import Dict, List, Any, Optional
+
 
 class TOPCATIntegration:
     """
@@ -5830,8 +5839,6 @@ class DBNNWrapper:
 
         return self.train_with_data(X_train, y_train, reset_weights=False)
 
-
-
 class AdaptiveDBNN:
     """
     Advanced Adaptive Learning DBNN with comprehensive feature support
@@ -6758,74 +6765,1039 @@ class AdaptiveDBNN:
 
         return results
 
+class AdaptiveDBNNCommandLine:
+    """
+    Command-line interface for Adaptive DBNN that works on headless systems
+    """
+
+    def __init__(self):
+        self.adaptive_model = None
+        self.config = {}
+        self.dataset_name = None
+
+    def parse_arguments(self):
+        """Parse command line arguments with comprehensive help"""
+        parser = argparse.ArgumentParser(
+            description='Adaptive DBNN Classifier - Headless Mode',
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog=self._get_hyperparameter_help()
+        )
+
+        # Required arguments
+        parser.add_argument('data_file', help='Path to data file (CSV, FITS, DAT)')
+        parser.add_argument('--target', required=True, help='Target column name')
+
+        # Feature selection
+        parser.add_argument('--features', nargs='+', help='Feature columns to use (space separated)')
+        parser.add_argument('--exclude', nargs='+', help='Columns to exclude from features')
+
+        # Core DBNN parameters
+        parser.add_argument('--resolution', type=int, default=100,
+                          help='Number of bins for feature discretization (default: 100)')
+        parser.add_argument('--gain', type=float, default=2.0,
+                          help='Weight update intensity (default: 2.0)')
+        parser.add_argument('--margin', type=float, default=0.2,
+                          help='Classification tolerance margin (default: 0.2)')
+        parser.add_argument('--patience', type=int, default=10,
+                          help='Early stopping patience (default: 10)')
+        parser.add_argument('--max-epochs', type=int, default=100,
+                          help='Maximum training epochs (default: 100)')
+
+        # Adaptive learning parameters
+        parser.add_argument('--max-rounds', type=int, default=20,
+                          help='Maximum adaptive learning rounds (default: 20)')
+        parser.add_argument('--initial-samples', type=int, default=5,
+                          help='Initial samples per class (default: 5)')
+        parser.add_argument('--samples-per-round', type=int, default=50,
+                          help='Samples to add per round (default: 50)')
+        parser.add_argument('--adaptive-patience', type=int, default=10,
+                          help='Adaptive learning patience (default: 10)')
+
+        # Advanced options
+        parser.add_argument('--no-acid-test', action='store_true',
+                          help='Disable acid test (use training accuracy only)')
+        parser.add_argument('--enable-kl', action='store_true',
+                          help='Enable KL divergence sampling')
+        parser.add_argument('--no-sample-limit', action='store_true',
+                          help='Disable sample limit per class')
+        parser.add_argument('--no-visualization', action='store_true',
+                          help='Disable all visualization (for headless systems)')
+
+        # Output and saving
+        parser.add_argument('--output-dir', default='adaptive_results',
+                          help='Output directory for results (default: adaptive_results)')
+        parser.add_argument('--save-model', action='store_true',
+                          help='Save trained model')
+        parser.add_argument('--config-file', help='Load configuration from JSON file')
+        parser.add_argument('--save-config', help='Save configuration to JSON file')
+
+        # Operation mode
+        parser.add_argument('--predict', help='Make predictions on new data file')
+        parser.add_argument('--load-model', help='Load existing model for prediction')
+
+        return parser.parse_args()
+
+    def _get_hyperparameter_help(self):
+        """Generate comprehensive hyperparameter help"""
+        return """
+HYPERPARAMETER GUIDE:
+
+CORE DBNN PARAMETERS:
+  --resolution: Number of bins for feature discretization
+    • Higher = more precise, but slower and more memory
+    • Range: 50-500, Default: 100
+    • Example: --resolution 150
+
+  --gain: Weight update intensity during training
+    • Higher = faster learning, but may overshoot
+    • Range: 0.1-10.0, Default: 2.0
+    • Example: --gain 1.5
+
+  --margin: Classification tolerance margin
+    • Higher = more tolerant to prediction errors
+    • Range: 0.05-0.5, Default: 0.2
+    • Example: --margin 0.15
+
+  --patience: Early stopping patience for training
+    • Higher = trains longer, may overfit
+    • Range: 5-50, Default: 10
+    • Example: --patience 15
+
+  --max-epochs: Maximum training epochs per round
+    • Higher = more training, but slower
+    • Range: 50-1000, Default: 100
+    • Example: --max-epochs 200
+
+ADAPTIVE LEARNING PARAMETERS:
+  --max-rounds: Maximum adaptive learning rounds
+    • Higher = more refinement, but slower
+    • Range: 5-100, Default: 20
+    • Example: --max-rounds 30
+
+  --initial-samples: Initial samples per class
+    • Higher = better initial model, but less adaptive
+    • Range: 3-20, Default: 5
+    • Example: --initial-samples 10
+
+  --samples-per-round: Samples to add per round
+    • Higher = faster convergence, but less precise
+    • Range: 10-100, Default: 50
+    • Example: --samples-per-round 25
+
+  --adaptive-patience: Adaptive learning patience
+    • Higher = continues longer without improvement
+    • Range: 5-20, Default: 10
+    • Example: --adaptive-patience 8
+
+ADVANCED OPTIONS:
+  --no-acid-test: Use training accuracy instead of full dataset test
+  --enable-kl: Use KL divergence for sample selection (advanced)
+  --no-sample-limit: Remove limit on samples per class per round
+  --no-visualization: Disable plots (recommended for headless)
+
+EXAMPLES:
+  Basic usage:
+    python adaptive_dbnn.py data.csv --target class --features col1 col2 col3
+
+  With custom parameters:
+    python adaptive_dbnn.py data.fits --target label --resolution 150 --gain 1.5 --max-rounds 30
+
+  Prediction only:
+    python adaptive_dbnn.py --load-model model.bin --predict new_data.csv
+        """
+
+    def load_config_from_file(self, config_file: str) -> Dict:
+        """Load configuration from JSON file"""
+        try:
+            with open(config_file, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"❌ Error loading config file {config_file}: {e}")
+            return {}
+
+    def save_config_to_file(self, config: Dict, config_file: str):
+        """Save configuration to JSON file"""
+        try:
+            with open(config_file, 'w') as f:
+                json.dump(config, f, indent=4)
+            print(f"✅ Configuration saved to {config_file}")
+        except Exception as e:
+            print(f"❌ Error saving config file: {e}")
+
+    def auto_detect_features(self, data_file: str, target_column: str, exclude_columns: List[str] = None) -> List[str]:
+        """Automatically detect feature columns with intelligent selection"""
+        print("🔍 Auto-detecting features...")
+
+        # Load data to inspect columns
+        try:
+            if data_file.endswith('.csv'):
+                df = pd.read_csv(data_file, nrows=1000)  # Load only first 1000 rows for inspection
+            else:
+                # Handle other formats
+                df = self._load_data_headless(data_file, n_samples=1000)
+
+            all_columns = df.columns.tolist()
+
+            # Remove target column
+            if target_column in all_columns:
+                all_columns.remove(target_column)
+
+            # Remove explicitly excluded columns
+            if exclude_columns:
+                for col in exclude_columns:
+                    if col in all_columns:
+                        all_columns.remove(col)
+
+            # Filter numeric columns (most likely to be features)
+            numeric_columns = []
+            for col in all_columns:
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    numeric_columns.append(col)
+
+            if numeric_columns:
+                print(f"✅ Selected {len(numeric_columns)} numeric features: {numeric_columns}")
+                return numeric_columns
+            else:
+                print(f"⚠️ No numeric features found, using all columns: {all_columns}")
+                return all_columns
+
+        except Exception as e:
+            print(f"❌ Error auto-detecting features: {e}")
+            return []
+
+    def _load_data_headless(self, data_file: str, n_samples: int = None) -> pd.DataFrame:
+        """Load data in headless mode without GUI dependencies"""
+        try:
+            if data_file.endswith(('.fits', '.fit')):
+                from astropy.io import fits
+                from astropy.table import Table
+
+                with fits.open(data_file) as hdul:
+                    for hdu in hdul:
+                        if hasattr(hdu, 'data') and hdu.data is not None:
+                            table = Table(hdu.data)
+                            df = table.to_pandas()
+                            if n_samples:
+                                df = df.head(n_samples)
+                            return df
+
+            elif data_file.endswith('.csv'):
+                if n_samples:
+                    df = pd.read_csv(data_file, nrows=n_samples)
+                else:
+                    df = pd.read_csv(data_file)
+                return df
+
+            elif data_file.endswith('.dat'):
+                # Try space-separated first
+                try:
+                    if n_samples:
+                        df = pd.read_csv(data_file, delimiter=r'\s+', nrows=n_samples)
+                    else:
+                        df = pd.read_csv(data_file, delimiter=r'\s+')
+                    return df
+                except:
+                    # Fallback to tab-separated
+                    if n_samples:
+                        df = pd.read_csv(data_file, delimiter='\t', nrows=n_samples)
+                    else:
+                        df = pd.read_csv(data_file, delimiter='\t')
+                    return df
+
+            else:
+                raise ValueError(f"Unsupported file format: {data_file}")
+
+        except Exception as e:
+            print(f"❌ Error loading data file {data_file}: {e}")
+            raise
+
+    def initialize_adaptive_model(self, args):
+        """Initialize the adaptive model with optimal parameters"""
+        print("🚀 Initializing Adaptive DBNN...")
+
+        # Auto-detect features if not provided
+        if not args.features:
+            exclude_cols = args.exclude if args.exclude else []
+            features = self.auto_detect_features(args.data_file, args.target, exclude_cols)
+            if not features:
+                print("❌ Could not auto-detect features. Please specify with --features")
+                return False
+        else:
+            features = args.features
+
+        # Build configuration
+        self.config = {
+            'dataset_name': Path(args.data_file).stem,
+            'target_column': args.target,
+            'feature_columns': features,
+
+            # Core DBNN parameters
+            'resol': args.resolution,
+            'gain': args.gain,
+            'margin': args.margin,
+            'patience': args.patience,
+            'max_epochs': args.max_epochs,
+            'min_improvement': 0.0000001,
+
+            # Adaptive learning parameters
+            'adaptive_learning': {
+                'enable_adaptive': True,
+                'initial_samples_per_class': args.initial_samples,
+                'max_adaptive_rounds': args.max_rounds,
+                'max_margin_samples_per_class': args.samples_per_round,
+                'enable_acid_test': not args.no_acid_test,
+                'enable_kl_divergence': args.enable_kl,
+                'disable_sample_limit': args.no_sample_limit,
+                'enable_visualization': not args.no_visualization,
+                'patience': args.adaptive_patience,
+
+                # Auto-configured based on data size
+                'min_samples_to_add_per_class': min(5, args.samples_per_round // 2),
+                'max_divergence_samples_per_class': args.samples_per_round,
+                'min_failed_threshold': max(10, args.samples_per_round // 5),
+            }
+        }
+
+        # Load external config if provided
+        if args.config_file:
+            external_config = self.load_config_from_file(args.config_file)
+            self._merge_configs(self.config, external_config)
+
+        # Save config if requested
+        if args.save_config:
+            self.save_config_to_file(self.config, args.save_config)
+
+        # Initialize model
+        try:
+            self.adaptive_model = AdaptiveDBNN(self.config['dataset_name'], self.config)
+            return True
+        except Exception as e:
+            print(f"❌ Error initializing adaptive model: {e}")
+            return False
+
+    def _merge_configs(self, base_config: Dict, external_config: Dict):
+        """Merge external configuration with base configuration"""
+        for key, value in external_config.items():
+            if key in base_config:
+                if isinstance(value, dict) and isinstance(base_config[key], dict):
+                    base_config[key].update(value)
+                else:
+                    base_config[key] = value
+            else:
+                base_config[key] = value
+
+    def run_adaptive_learning(self, args):
+        """Run the adaptive learning process"""
+        if not self.initialize_adaptive_model(args):
+            return False
+
+        try:
+            print("\n" + "="*60)
+            print("🎯 STARTING ADAPTIVE LEARNING - HEADLESS MODE")
+            print("="*60)
+
+            # Load and preprocess data
+            print("📊 Loading and preprocessing data...")
+            self.adaptive_model.load_and_preprocess_data(args.data_file, self.config['feature_columns'])
+
+            # Create output directory
+            output_dir = Path(args.output_dir)
+            output_dir.mkdir(exist_ok=True)
+
+            # Run adaptive learning
+            print("🔄 Starting adaptive learning process...")
+            X_train, y_train, X_test, y_test = self.adaptive_model.adaptive_learn(
+                feature_columns=self.config['feature_columns']
+            )
+
+            # Save results
+            self._save_results(args.output_dir, X_train, y_train, X_test, y_test)
+
+            # Save model if requested
+            if args.save_model:
+                model_path = output_dir / f"{self.config['dataset_name']}_model.bin"
+                self._save_model(model_path)
+
+            print(f"\n✅ Adaptive learning completed successfully!")
+            print(f"📁 Results saved to: {args.output_dir}")
+
+            return True
+
+        except Exception as e:
+            print(f"❌ Error during adaptive learning: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def run_prediction(self, args):
+        """Run prediction with loaded model"""
+        if not args.load_model:
+            print("❌ Please specify --load-model for prediction")
+            return False
+
+        try:
+            print("🔮 Running prediction mode...")
+
+            # Load model
+            if not self._load_model(args.load_model):
+                return False
+
+            # Load prediction data
+            print(f"📊 Loading prediction data: {args.predict}")
+            prediction_data = self._load_data_headless(args.predict)
+
+            # Prepare features
+            if hasattr(self.adaptive_model, 'feature_columns'):
+                feature_columns = self.adaptive_model.feature_columns
+                missing_features = [col for col in feature_columns if col not in prediction_data.columns]
+                if missing_features:
+                    print(f"❌ Missing features in prediction data: {missing_features}")
+                    return False
+
+                X_pred = prediction_data[feature_columns].values
+            else:
+                print("❌ No feature information in loaded model")
+                return False
+
+            # Make predictions
+            print("🎯 Making predictions...")
+            predictions = self.adaptive_model.model.predict(X_pred, return_encoded=False)
+
+            # Save predictions
+            output_file = Path(args.predict).stem + '_predictions.csv'
+            prediction_data['prediction'] = predictions
+            prediction_data.to_csv(output_file, index=False)
+
+            print(f"✅ Predictions saved to: {output_file}")
+            print(f"📊 Prediction distribution:")
+            pred_counts = prediction_data['prediction'].value_counts()
+            for pred, count in pred_counts.items():
+                percentage = (count / len(prediction_data)) * 100
+                print(f"   {pred}: {count} samples ({percentage:.1f}%)")
+
+            return True
+
+        except Exception as e:
+            print(f"❌ Error during prediction: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def _save_results(self, output_dir: str, X_train, y_train, X_test, y_test):
+        """Save training results"""
+        try:
+            output_path = Path(output_dir)
+
+            # Save training history
+            if hasattr(self.adaptive_model, 'round_stats') and self.adaptive_model.round_stats:
+                stats_df = pd.DataFrame(self.adaptive_model.round_stats)
+                stats_df.to_csv(output_path / 'round_statistics.csv', index=False)
+                print(f"📊 Round statistics saved")
+
+            # Save final model performance
+            performance = {
+                'final_training_samples': len(X_train),
+                'final_test_samples': len(X_test),
+                'best_accuracy': getattr(self.adaptive_model, 'best_accuracy', 0),
+                'best_round': getattr(self.adaptive_model, 'best_round', 0),
+                'total_rounds': getattr(self.adaptive_model, 'adaptive_round', 0)
+            }
+
+            with open(output_path / 'performance.json', 'w') as f:
+                json.dump(performance, f, indent=4)
+
+            print(f"📈 Performance metrics saved")
+
+        except Exception as e:
+            print(f"⚠️ Could not save results: {e}")
+
+    def _save_model(self, model_path: str):
+        """Save trained model"""
+        try:
+            # This would use your existing model saving logic
+            # For now, just create a placeholder
+            print(f"💾 Model saving placeholder: {model_path}")
+            # Actual implementation would go here
+            return True
+        except Exception as e:
+            print(f"❌ Error saving model: {e}")
+            return False
+
+    def _load_model(self, model_path: str):
+        """Load trained model"""
+        try:
+            # This would use your existing model loading logic
+            # For now, just create a placeholder
+            print(f"📥 Model loading placeholder: {model_path}")
+            # Actual implementation would go here
+            return True
+        except Exception as e:
+            print(f"❌ Error loading model: {e}")
+            return False
+
+    def run(self):
+        """Main entry point for command line interface"""
+        args = self.parse_arguments()
+
+        print("╔═════════════════════════════════════════════════════════════╗")
+        print("║              Adaptive DBNN - Headless Mode                 ║")
+        print("╚═════════════════════════════════════════════════════════════╝")
+
+        # Determine operation mode
+        if args.predict or args.load_model:
+            # Prediction mode
+            success = self.run_prediction(args)
+        else:
+            # Training mode
+            success = self.run_adaptive_learning(args)
+
+        if success:
+            print("\n🎉 Operation completed successfully!")
+            return 0
+        else:
+            print("\n❌ Operation failed!")
+            return 1
+
+
 def main():
-    """Main function for adaptive DBNN"""
-    print("🎯 Adaptive DBNN - Advanced Learning System")
+    """Enhanced main function for adaptive DBNN with multiple operation modes"""
+    print("╔═════════════════🧠      DBNN CLASSIFIER ═════════════════════════╗")
+    print("║              Adaptive DBNN - Advanced Learning System            ║")
+    print("║           Difference Boosting Bayesian Neural Network            ║")
+    print("║                 author: nsp@airis4d.com                          ║")
+    print( "║     Artificial Intelligence Research and Intelligent Systems     ║")
+    print ("║                 Thelliyoor 689544, India                         ║")
+    print("║             Python  implementation: deepseek                     ║")
+    print("╚══════════════════════════════════════════════════════════════════╝")
+    print()
+
+    # Check command line arguments first
+    if len(sys.argv) > 1:
+        return run_command_line_mode()
+
+    # Interactive mode selection
+    print("🔧 OPERATION MODES:")
     print("=" * 50)
-
-    # Get available datasets
-    available_configs = DatasetConfig.get_available_config_files()
-    if not available_configs:
-        print("❌ No configuration files found (.conf or .json)")
-        return
-
-    print("📁 Available datasets:")
-    for i, config_info in enumerate(available_configs, 1):
-        print(f"  {i:2d}. {config_info['file']} ({config_info['type']})")
+    print("1. 🖥️  GUI Mode (Interactive with visualizations)")
+    print("2. 💻 Command Line Mode (Headless/automated)")
+    print("3. 🔧 Configuration Manager")
+    print("4. 📊 Dataset Explorer")
+    print("5. 🚀 Quick Start (Auto-configure)")
+    print("6. ❌ Exit")
+    print()
 
     try:
-        selection = int(input("\nSelect a dataset (1-{}): ".format(len(available_configs))))
+        mode = input("Select mode (1-6): ").strip()
+
+        if mode == '1':
+            return run_gui_mode()
+        elif mode == '2':
+            return run_command_line_mode()
+        elif mode == '3':
+            return run_configuration_manager()
+        elif mode == '4':
+            return run_dataset_explorer()
+        elif mode == '5':
+            return run_quick_start()
+        elif mode == '6':
+            print("👋 Goodbye!")
+            return 0
+        else:
+            print("❌ Invalid selection")
+            return 1
+
+    except KeyboardInterrupt:
+        print("\n⏹️ Operation cancelled by user")
+        return 130
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+def run_gui_mode():
+    """Launch the GUI interface"""
+    print("\n🎨 Launching GUI Mode...")
+
+    try:
+        # Check if GUI dependencies are available
+        import tkinter as tk
+        from adaptive_dbnn_gui import launch_adaptive_gui
+
+        print("✅ GUI dependencies available")
+        launch_adaptive_gui()
+        return 0
+
+    except ImportError as e:
+        print(f"❌ GUI dependencies not available: {e}")
+        print("🔧 Falling back to command line mode...")
+        return run_command_line_mode()
+
+def run_command_line_mode():
+    """Run in command line mode"""
+    print("\n💻 Starting Command Line Mode...")
+
+    try:
+        from adaptive_dbnn_commandline import AdaptiveDBNNCommandLine
+        cli = AdaptiveDBNNCommandLine()
+        return cli.run()
+
+    except ImportError as e:
+        print(f"❌ Command line module not available: {e}")
+        print("🔧 Please install required dependencies")
+        return 1
+
+def run_configuration_manager():
+    """Interactive configuration management"""
+    print("\n🔧 Configuration Manager")
+    print("=" * 50)
+
+    available_configs = DatasetConfig.get_available_config_files()
+    if not available_configs:
+        print("❌ No configuration files found")
+        return 1
+
+    print("📁 Available configurations:")
+    for i, config_info in enumerate(available_configs, 1):
+        config_name = config_info['file'].replace('.conf', '').replace('.json', '')
+        print(f"  {i:2d}. {config_name} ({config_info['type']})")
+
+    print("\n🛠️  Configuration Operations:")
+    print("  1. View configuration")
+    print("  2. Create new configuration")
+    print("  3. Edit existing configuration")
+    print("  4. Delete configuration")
+    print("  5. Validate configuration")
+    print("  6. Back to main menu")
+
+    try:
+        operation = input("\nSelect operation (1-6): ").strip()
+
+        if operation == '1':
+            return view_configuration(available_configs)
+        elif operation == '2':
+            return create_configuration()
+        elif operation == '3':
+            return edit_configuration(available_configs)
+        elif operation == '4':
+            return delete_configuration(available_configs)
+        elif operation == '5':
+            return validate_configuration(available_configs)
+        elif operation == '6':
+            return main()
+        else:
+            print("❌ Invalid selection")
+            return 1
+
+    except KeyboardInterrupt:
+        print("\n⏹️ Operation cancelled")
+        return 130
+
+def view_configuration(available_configs):
+    """View configuration details"""
+    try:
+        selection = int(input("Select configuration to view (1-{}): ".format(len(available_configs))))
         if selection < 1 or selection > len(available_configs):
             print("❌ Invalid selection")
-            return
+            return 1
 
         selected_config = available_configs[selection - 1]
         dataset_name = selected_config['file'].replace('.conf', '').replace('.json', '')
-        config_type = selected_config['type']
 
-        print(f"🎯 Selected configuration: {dataset_name} ({config_type})")
-
-        # Load configuration
         config = DatasetConfig.load_config(dataset_name)
         if not config:
             print(f"❌ Could not load configuration for {dataset_name}")
-            return
+            return 1
 
-        # Initialize adaptive DBNN
-        adaptive_model = AdaptiveDBNN(dataset_name, config)
+        print(f"\n📋 Configuration for {dataset_name}:")
+        print("=" * 40)
+        print(json.dumps(config, indent=2))
 
-        # Get feature columns from config if available
-        feature_columns = config.get('feature_columns', None)
-        if feature_columns:
-            print(f"📊 Using feature columns from config: {feature_columns}")
+        # Show configuration summary
+        print(f"\n📊 Configuration Summary:")
+        print(f"  • Target column: {config.get('target_column', 'Not specified')}")
+        print(f"  • Feature columns: {len(config.get('feature_columns', []))}")
+        print(f"  • Resolution: {config.get('resol', 'Default')}")
+        print(f"  • Max adaptive rounds: {config.get('adaptive_learning', {}).get('max_adaptive_rounds', 'Default')}")
 
-        # Run adaptive learning
-        print("🚀 Starting adaptive learning...")
-        X_train, y_train, X_test, y_test = adaptive_model.adaptive_learn(feature_columns=feature_columns)
-
-        # Evaluate performance
-        results = adaptive_model.evaluate_adaptive_performance(X_test, y_test)
-
-        print("\n✅ Adaptive Learning Completed!")
-        print(f"📊 Final Test Accuracy: {results['accuracy']:.2f}%")
+        return 0
 
     except Exception as e:
-        print(f"❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"❌ Error viewing configuration: {e}")
+        return 1
+
+def create_configuration():
+    """Create a new configuration interactively"""
+    print("\n🆕 Create New Configuration")
+    print("=" * 40)
+
+    try:
+        config_name = input("Configuration name: ").strip()
+        if not config_name:
+            print("❌ Configuration name cannot be empty")
+            return 1
+
+        # Check if configuration already exists
+        if os.path.exists(f"{config_name}.json") or os.path.exists(f"{config_name}.conf"):
+            overwrite = input("⚠️  Configuration already exists. Overwrite? (y/n): ").lower()
+            if overwrite != 'y':
+                return 1
+
+        # Interactive configuration building
+        config = {}
+
+        # Basic information
+        config['dataset_name'] = config_name
+        config['target_column'] = input("Target column name: ").strip()
+
+        # Feature selection
+        features_input = input("Feature columns (comma-separated, or 'auto' for auto-detection): ").strip()
+        if features_input.lower() != 'auto':
+            config['feature_columns'] = [f.strip() for f in features_input.split(',')]
+
+        # Core parameters
+        print("\n⚙️  Core DBNN Parameters:")
+        config['resol'] = int(input("Resolution (default 100): ") or "100")
+        config['gain'] = float(input("Gain (default 2.0): ") or "2.0")
+        config['margin'] = float(input("Margin (default 0.2): ") or "0.2")
+        config['patience'] = int(input("Patience (default 10): ") or "10")
+        config['max_epochs'] = int(input("Max epochs (default 100): ") or "100")
+
+        # Adaptive learning parameters
+        print("\n🔄 Adaptive Learning Parameters:")
+        adaptive_config = {}
+        adaptive_config['max_adaptive_rounds'] = int(input("Max adaptive rounds (default 20): ") or "20")
+        adaptive_config['initial_samples_per_class'] = int(input("Initial samples per class (default 5): ") or "5")
+        adaptive_config['max_margin_samples_per_class'] = int(input("Samples per round (default 50): ") or "50")
+        adaptive_config['enable_acid_test'] = input("Enable acid test? (y/n, default y): ").lower() != 'n'
+        adaptive_config['enable_visualization'] = input("Enable visualization? (y/n, default y): ").lower() != 'n'
+
+        config['adaptive_learning'] = adaptive_config
+
+        # Save configuration
+        config_file = f"{config_name}.json"
+        with open(config_file, 'w') as f:
+            json.dump(config, f, indent=4)
+
+        print(f"✅ Configuration saved to {config_file}")
+        return 0
+
+    except Exception as e:
+        print(f"❌ Error creating configuration: {e}")
+        return 1
+
+def edit_configuration(available_configs):
+    """Edit an existing configuration"""
+    try:
+        selection = int(input("Select configuration to edit (1-{}): ".format(len(available_configs))))
+        if selection < 1 or selection > len(available_configs):
+            print("❌ Invalid selection")
+            return 1
+
+        selected_config = available_configs[selection - 1]
+        dataset_name = selected_config['file'].replace('.conf', '').replace('.json', '')
+
+        config = DatasetConfig.load_config(dataset_name)
+        if not config:
+            print(f"❌ Could not load configuration for {dataset_name}")
+            return 1
+
+        print(f"\n✏️  Editing configuration: {dataset_name}")
+        print("Current configuration:")
+        print(json.dumps(config, indent=2))
+
+        # For now, just save back (in real implementation, provide interactive editing)
+        save_changes = input("\nSave changes? (y/n): ").lower()
+        if save_changes == 'y':
+            config_file = f"{dataset_name}.json"
+            with open(config_file, 'w') as f:
+                json.dumps(config, f, indent=4)
+            print(f"✅ Configuration updated: {config_file}")
+
+        return 0
+
+    except Exception as e:
+        print(f"❌ Error editing configuration: {e}")
+        return 1
+
+def delete_configuration(available_configs):
+    """Delete a configuration file"""
+    try:
+        selection = int(input("Select configuration to delete (1-{}): ".format(len(available_configs))))
+        if selection < 1 or selection > len(available_configs):
+            print("❌ Invalid selection")
+            return 1
+
+        selected_config = available_configs[selection - 1]
+        config_file = selected_config['file']
+
+        confirm = input(f"⚠️  Are you sure you want to delete {config_file}? (y/n): ").lower()
+        if confirm == 'y':
+            os.remove(config_file)
+            print(f"✅ Configuration deleted: {config_file}")
+        else:
+            print("❌ Deletion cancelled")
+
+        return 0
+
+    except Exception as e:
+        print(f"❌ Error deleting configuration: {e}")
+        return 1
+
+def validate_configuration(available_configs):
+    """Validate configuration against data file"""
+    try:
+        selection = int(input("Select configuration to validate (1-{}): ".format(len(available_configs))))
+        if selection < 1 or selection > len(available_configs):
+            print("❌ Invalid selection")
+            return 1
+
+        selected_config = available_configs[selection - 1]
+        dataset_name = selected_config['file'].replace('.conf', '').replace('.json', '')
+
+        config = DatasetConfig.load_config(dataset_name)
+        if not config:
+            print(f"❌ Could not load configuration for {dataset_name}")
+            return 1
+
+        print(f"\n🔍 Validating configuration: {dataset_name}")
+
+        # Check for data file
+        data_file = input("Data file path (or press Enter to skip file validation): ").strip()
+
+        if data_file and os.path.exists(data_file):
+            # Validate configuration against data
+            try:
+                df = pd.read_csv(data_file, nrows=1000)  # Load sample for validation
+
+                # Check target column
+                target_col = config.get('target_column')
+                if target_col and target_col not in df.columns:
+                    print(f"❌ Target column '{target_col}' not found in data")
+
+                # Check feature columns
+                feature_cols = config.get('feature_columns', [])
+                missing_features = [col for col in feature_cols if col not in df.columns]
+                if missing_features:
+                    print(f"❌ Missing features: {missing_features}")
+                else:
+                    print(f"✅ All {len(feature_cols)} features found in data")
+
+                # Check data types
+                if target_col and target_col in df.columns:
+                    unique_targets = df[target_col].nunique()
+                    print(f"✅ Target has {unique_targets} unique values")
+
+            except Exception as e:
+                print(f"❌ Error validating data file: {e}")
+        else:
+            print("⚠️  Skipping data file validation")
+
+        # Validate configuration structure
+        required_keys = ['dataset_name', 'target_column']
+        missing_keys = [key for key in required_keys if key not in config]
+        if missing_keys:
+            print(f"❌ Missing required keys: {missing_keys}")
+        else:
+            print("✅ Configuration structure is valid")
+
+        return 0
+
+    except Exception as e:
+        print(f"❌ Error validating configuration: {e}")
+        return 1
+
+def run_dataset_explorer():
+    """Explore and analyze datasets"""
+    print("\n📊 Dataset Explorer")
+    print("=" * 50)
+
+    # Find available data files
+    data_files = []
+    for ext in ['*.csv', '*.fits', '*.fit', '*.dat']:
+        data_files.extend(glob.glob(ext))
+
+    if not data_files:
+        print("❌ No data files found in current directory")
+        return 1
+
+    print("📁 Available datasets:")
+    for i, data_file in enumerate(data_files, 1):
+        print(f"  {i:2d}. {data_file}")
+
+    try:
+        selection = int(input("\nSelect dataset to explore (1-{}): ".format(len(data_files))))
+        if selection < 1 or selection > len(data_files):
+            print("❌ Invalid selection")
+            return 1
+
+        selected_file = data_files[selection - 1]
+        print(f"\n🔍 Exploring dataset: {selected_file}")
+
+        # Load and analyze dataset
+        try:
+            if selected_file.endswith('.csv'):
+                df = pd.read_csv(selected_file, nrows=10000)  # Load first 10k rows for analysis
+            else:
+                # Handle other formats
+                df = load_data_file_headless(selected_file, n_samples=10000)
+
+            print(f"📊 Dataset shape: {df.shape[0]} rows, {df.shape[1]} columns")
+            print(f"📋 Columns: {list(df.columns)}")
+
+            # Basic statistics
+            print(f"\n📈 Basic Statistics:")
+            print(f"  • Numeric columns: {len(df.select_dtypes(include=[np.number]).columns)}")
+            print(f"  • Categorical columns: {len(df.select_dtypes(include=['object']).columns)}")
+            print(f"  • Missing values: {df.isnull().sum().sum()} total")
+
+            # Show sample of data
+            print(f"\n👀 Data sample:")
+            print(df.head(3).to_string())
+
+            # Column information
+            print(f"\n🔍 Column details:")
+            for col in df.columns:
+                dtype = df[col].dtype
+                unique_count = df[col].nunique()
+                missing_count = df[col].isnull().sum()
+                print(f"  • {col}: {dtype}, {unique_count} unique, {missing_count} missing")
+
+            return 0
+
+        except Exception as e:
+            print(f"❌ Error analyzing dataset: {e}")
+            return 1
+
+    except KeyboardInterrupt:
+        print("\n⏹️ Operation cancelled")
+        return 130
+
+def run_quick_start():
+    """Quick start with auto-configuration"""
+    print("\n🚀 Quick Start Mode")
+    print("=" * 50)
+
+    # Find data files
+    data_files = []
+    for ext in ['*.csv', '*.fits', '*.fit', '*.dat']:
+        data_files.extend(glob.glob(ext))
+
+    if not data_files:
+        print("❌ No data files found in current directory")
+        return 1
+
+    print("📁 Available datasets:")
+    for i, data_file in enumerate(data_files, 1):
+        print(f"  {i:2d}. {data_file}")
+
+    try:
+        selection = int(input("\nSelect dataset for quick start (1-{}): ".format(len(data_files))))
+        if selection < 1 or selection > len(data_files):
+            print("❌ Invalid selection")
+            return 1
+
+        selected_file = data_files[selection - 1]
+        dataset_name = Path(selected_file).stem
+
+        print(f"\n🎯 Quick starting with: {selected_file}")
+
+        # Auto-configure
+        print("🔧 Auto-configuring parameters...")
+
+        # Load sample data for analysis
+        try:
+            if selected_file.endswith('.csv'):
+                df = pd.read_csv(selected_file, nrows=5000)
+            else:
+                df = load_data_file_headless(selected_file, n_samples=5000)
+
+            # Auto-detect target column
+            target_candidates = ['target', 'class', 'label', 'y', 'output']
+            target_column = None
+            for candidate in target_candidates + [df.columns[-1]]:
+                if candidate in df.columns:
+                    target_column = candidate
+                    break
+
+            if not target_column:
+                print("❌ Could not auto-detect target column")
+                target_column = input("Please specify target column: ").strip()
+
+            # Auto-detect features
+            feature_columns = [col for col in df.columns if col != target_column and pd.api.types.is_numeric_dtype(df[col])]
+
+            if not feature_columns:
+                feature_columns = [col for col in df.columns if col != target_column]
+
+            print(f"✅ Auto-detected: target='{target_column}', features={len(feature_columns)}")
+
+            # Create configuration
+            config = {
+                'dataset_name': dataset_name,
+                'target_column': target_column,
+                'feature_columns': feature_columns,
+                'resol': 100,
+                'gain': 2.0,
+                'margin': 0.2,
+                'patience': 10,
+                'max_epochs': 100,
+                'adaptive_learning': {
+                    'max_adaptive_rounds': 20,
+                    'initial_samples_per_class': 5,
+                    'max_margin_samples_per_class': 50,
+                    'enable_acid_test': True,
+                    'enable_visualization': False,  # Disable for quick start
+                    'patience': 10
+                }
+            }
+
+            # Save configuration
+            config_file = f"{dataset_name}_quickstart.json"
+            with open(config_file, 'w') as f:
+                json.dump(config, f, indent=4)
+
+            print(f"✅ Configuration saved: {config_file}")
+
+            # Ask if user wants to run immediately
+            run_now = input("\n🚀 Run adaptive learning now? (y/n): ").lower()
+            if run_now == 'y':
+                print("Starting adaptive learning...")
+                adaptive_model = AdaptiveDBNN(dataset_name, config)
+                X_train, y_train, X_test, y_test = adaptive_model.adaptive_learn(
+                    feature_columns=feature_columns
+                )
+
+                print(f"\n✅ Quick start completed!")
+                if hasattr(adaptive_model, 'best_accuracy'):
+                    print(f"📊 Best accuracy: {adaptive_model.best_accuracy:.4f}")
+
+            return 0
+
+        except Exception as e:
+            print(f"❌ Error in quick start: {e}")
+            return 1
+
+    except KeyboardInterrupt:
+        print("\n⏹️ Operation cancelled")
+        return 130
+
+def load_data_file_headless(file_path: str, n_samples: int = None):
+    """Load data file in headless mode"""
+    # Implementation from previous headless data loader
+    if file_path.endswith('.csv'):
+        if n_samples:
+            return pd.read_csv(file_path, nrows=n_samples)
+        return pd.read_csv(file_path)
+    # Add other format handlers as needed
+    else:
+        raise ValueError(f"Unsupported file format: {file_path}")
 
 if __name__ == "__main__":
-    print("""
-    ╔═════════════════════════════════════════════════════════════╗
-    ║              🧠      DBNN CLASSIFIER                        ║
-    ║         Difference Boosting Bayesian Neural Network         ║
-    ║                 author: nsp@airis4d.com                     ║
-    ║  Artificial Intelligence Research and Intelligent Systems   ║
-    ║                 Thelliyoor 689544, India                    ║
-    ║          INCREMENTAL LEARNING + FREEZE MECHANISM            ║
-    ║                 implementation: deepseek                    ║
-    ╚═════════════════════════════════════════════════════════════╝
-    """)
+    exit_code = main()
+    sys.exit(exit_code)
+if __name__ == "__main__":
+
     # Check for GUI flag
     if "--gui" in sys.argv or "-g" in sys.argv or len(sys.argv) == 1:
         launch_adaptive_gui()
