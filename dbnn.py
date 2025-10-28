@@ -67,10 +67,11 @@ try:
         test_root.withdraw()
         test_root.destroy()
         GUI_AVAILABLE = True
-        import plotly.express as px
-        import matplotlib.pyplot as plt
-        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-        import matplotlib.animation as animation
+
+    import plotly.express as px
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    import matplotlib.animation as animation
 
 except (ImportError, Exception):
     GUI_AVAILABLE = False
@@ -1339,8 +1340,9 @@ class DBNNCore:
         }
 
         # Initialize GPU if available
-        if self.gpu_enabled and (self.system_resources['cuda_available'] or
-                                self.system_resources['numba_cuda_available']):
+        if self.gpu_enabled and (self.system_resources.get('has_gpu', False) or
+                                self.system_resources.get('cuda_available', False) or
+                                self.system_resources.get('numba_cuda_available', False)):
             try:
                 self._initialize_gpu_arrays()
                 self._initialize_cuda_streams()
@@ -3930,30 +3932,9 @@ class DBNNCore:
         return len(features_batch)
 
     def _process_training_batch_cpu_parallel(self, features_batch, targets_batch):
-        """True CPU parallel processing"""
+        """True CPU parallel processing - FIXED VERSION"""
         batch_size = len(features_batch)
         chunk_size = max(1, batch_size // self.num_workers)
-
-        def process_chunk(chunk_data):
-            """Process a chunk of data"""
-            chunk_features, chunk_targets = chunk_data
-            chunk_processed = 0
-
-            for i in range(len(chunk_features)):
-                vects = np.zeros(self.innodes + self.outnodes + 2)
-                for j in range(1, self.innodes + 1):
-                    vects[j] = chunk_features[i, j-1]
-                tmpv = chunk_targets[i]
-
-                # Use optimized single-sample CPU function
-                self.anti_net = _process_single_sample_cpu(
-                    vects, tmpv, self.anti_net, self.anti_wts, self.binloc,
-                    self.resolution_arr, self.class_labels, self.min_val,
-                    self.max_val, self.innodes, self.outnodes
-                )
-                chunk_processed += 1
-
-            return chunk_processed
 
         # Split into chunks
         chunks = []
@@ -3964,12 +3945,32 @@ class DBNNCore:
                 targets_batch[i:chunk_end]
             ))
 
-        # Process in parallel
-        with ProcessPoolExecutor(max_workers=self.num_workers) as executor:
-            futures = [executor.submit(process_chunk, chunk) for chunk in chunks]
+        # Process in parallel using ThreadPoolExecutor instead
+        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+            futures = [executor.submit(self._process_chunk, chunk[0], chunk[1]) for chunk in chunks]
             results = [f.result() for f in futures]
 
         return sum(results)
+
+    def _process_chunk(self, chunk_features, chunk_targets):
+        """Process a chunk of data - class method version"""
+        chunk_processed = 0
+
+        for i in range(len(chunk_features)):
+            vects = np.zeros(self.innodes + self.outnodes + 2)
+            for j in range(1, self.innodes + 1):
+                vects[j] = chunk_features[i, j-1]
+            tmpv = chunk_targets[i]
+
+            # Use optimized single-sample CPU function
+            self.anti_net = _process_single_sample_cpu(
+                vects, tmpv, self.anti_net, self.anti_wts, self.binloc,
+                self.resolution_arr, self.class_labels, self.min_val,
+                self.max_val, self.innodes, self.outnodes
+            )
+            chunk_processed += 1
+
+        return chunk_processed
 
     def _process_training_batch_sequential_optimized(self, features_batch, targets_batch):
         """Optimized sequential processing with JIT compilation"""
@@ -5361,33 +5362,13 @@ class HybridDBNNCore(DBNNCore):
             return "CPU_SEQUENTIAL"
 
     def _process_training_batch_cpu_parallel_balanced(self, features_batch, targets_batch):
-        """Load-balanced CPU parallel processing"""
+        """Load-balanced CPU parallel processing - FIXED VERSION"""
         batch_size = len(features_batch)
 
         # Dynamic chunk sizing based on batch size and worker count
         min_chunk_size = 50
         max_chunks = self.num_workers * 2  # Allow for better load balancing
         chunk_size = max(min_chunk_size, batch_size // max_chunks)
-
-        def process_chunk_balanced(chunk_data):
-            chunk_features, chunk_targets, chunk_start_idx = chunk_data
-            chunk_processed = 0
-
-            for i in range(len(chunk_features)):
-                vects = np.zeros(self.innodes + self.outnodes + 2)
-                for j in range(1, self.innodes + 1):
-                    vects[j] = chunk_features[i, j-1]
-                tmpv = chunk_targets[i]
-
-                # Use optimized single-sample CPU function
-                self.anti_net = _process_single_sample_cpu(
-                    vects, tmpv, self.anti_net, self.anti_wts, self.binloc,
-                    self.resolution_arr, self.class_labels, self.min_val,
-                    self.max_val, self.innodes, self.outnodes
-                )
-                chunk_processed += 1
-
-            return chunk_processed
 
         # Create balanced chunks
         chunks = []
@@ -5401,11 +5382,43 @@ class HybridDBNNCore(DBNNCore):
 
         # Process with dynamic worker allocation
         actual_workers = min(len(chunks), self.num_workers)
-        with ProcessPoolExecutor(max_workers=actual_workers) as executor:
-            futures = [executor.submit(process_chunk_balanced, chunk) for chunk in chunks]
+
+        # Use ThreadPoolExecutor instead of ProcessPoolExecutor to avoid pickling issues
+        # This is safer for complex objects and local functions
+        with ThreadPoolExecutor(max_workers=actual_workers) as executor:
+            futures = []
+            for chunk_features, chunk_targets, chunk_start_idx in chunks:
+                future = executor.submit(
+                    self._process_chunk_balanced,  # Use class method instead of local function
+                    chunk_features,
+                    chunk_targets,
+                    chunk_start_idx
+                )
+                futures.append(future)
+
             results = [f.result() for f in futures]
 
         return sum(results)
+
+    def _process_chunk_balanced(self, chunk_features, chunk_targets, chunk_start_idx):
+        """Process a single chunk - moved from local function to class method"""
+        chunk_processed = 0
+
+        for i in range(len(chunk_features)):
+            vects = np.zeros(self.innodes + self.outnodes + 2)
+            for j in range(1, self.innodes + 1):
+                vects[j] = chunk_features[i, j-1]
+            tmpv = chunk_targets[i]
+
+            # Use optimized single-sample CPU function
+            self.anti_net = _process_single_sample_cpu(
+                vects, tmpv, self.anti_net, self.anti_wts, self.binloc,
+                self.resolution_arr, self.class_labels, self.min_val,
+                self.max_val, self.innodes, self.outnodes
+            )
+            chunk_processed += 1
+
+        return chunk_processed
 
     def _update_weights_batch_cpu_optimized(self, features_batch, targets_batch, gain):
         """
