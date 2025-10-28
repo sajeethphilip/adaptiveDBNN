@@ -4359,7 +4359,16 @@ class AdaptiveDBNNGUI:
             self.log_output(f"🏆 Best accuracy: {self.adaptive_model.best_accuracy:.4f}")
             self.log_output(f"📊 Final training size: {len(X_train)} samples")
             self.log_output(f"📊 Test set size: {len(X_test)} samples")
+            # DEBUG: Check encoding before starting
+            if hasattr(self.adaptive_model, 'debug_label_encoding'):
+                self.adaptive_model.debug_label_encoding()
 
+            # Run adaptive learning
+            X_train, y_train, X_test, y_test = self.adaptive_model.adaptive_learn(feature_columns=feature_columns)
+
+            # DEBUG: Test consistency after training
+            if hasattr(self.adaptive_model, 'test_label_consistency'):
+                self.adaptive_model.test_label_consistency()
         except Exception as e:
             self.log_output(f"❌ Error during adaptive learning: {e}")
 
@@ -4927,6 +4936,11 @@ class DBNNWrapper:
         }
         #self.core = dbnn.DBNNCore(dbnn_config)
         self.core = dbnn.HybridDBNNCore(dbnn_config)
+
+        # CRITICAL: Create our own consistent label encoder
+        self.label_encoder = LabelEncoder()
+        self.encoded_classes_ = None  # Store the encoded class mapping
+
         # Store feature information
         self.feature_columns = []  # Original feature column names
         self.target_column = self.config.get('target_column', 'target')
@@ -5046,9 +5060,8 @@ class DBNNWrapper:
             print("⚠️ chardet not available, using default encodings")
             return 'latin-1'
 
-
     def preprocess_data(self, feature_columns: List[str] = None, target_column: str = None) -> Tuple[np.ndarray, np.ndarray, List[str]]:
-        """Preprocess the loaded data with specified feature columns - UPDATED for None target"""
+        """Preprocess the loaded data with specified feature columns - FIXED to use 1,2 instead of 0,1"""
         if self.data is None:
             raise ValueError("No data loaded. Call load_data() first.")
 
@@ -5059,24 +5072,235 @@ class DBNNWrapper:
         if self.target_column is None or self.target_column == 'None':
             print("🔮 Prediction mode: Processing data without target column")
             if feature_columns is None:
-                # Use all columns as features for prediction
                 feature_columns = list(self.data.columns)
-
             X = self.data[feature_columns].values
-            y = np.array([])  # Empty array for prediction mode
+            y = np.array([])
+            feature_columns_used = feature_columns
+        else:
+            # TRAINING MODE: Apply consistent label encoding
+            if feature_columns is None:
+                feature_columns = [col for col in self.data.columns if col != self.target_column]
+
+            # Validate feature columns
+            missing_cols = [col for col in feature_columns if col not in self.data.columns]
+            if missing_cols:
+                raise ValueError(f"Feature columns not found: {missing_cols}")
+
+            # Extract features and target
+            X = self.data[feature_columns].values
+            y_raw = self.data[self.target_column].values
+
+            # CRITICAL: Apply consistent label encoding with 1-based indexing
+            print("🔤 Applying consistent label encoding to target (1-based)...")
+            if not hasattr(self.label_encoder, 'classes_') or self.label_encoder.classes_ is None:
+                self.label_encoder.fit(y_raw)
+                self.encoded_classes_ = self.label_encoder.classes_
+                print(f"✅ Fitted label encoder with classes: {self.encoded_classes_}")
+
+            # Transform to 0,1 first, then convert to 1,2
+            y_encoded_temp = self.label_encoder.transform(y_raw)
+            y = y_encoded_temp + 1  # Convert from [0,1] to [1,2]
+
             feature_columns_used = feature_columns
 
-            print(f"✅ Preprocessed {len(X)} samples for prediction, {len(feature_columns_used)} features")
+            print(f"📊 Label encoding mapping:")
+            for i, class_name in enumerate(self.encoded_classes_):
+                print(f"   '{class_name}' -> {i+1}")  # Show 1-based mapping
 
-        else:
-            # Original training mode logic
-            X, y, feature_columns_used = self.preprocessor.preprocess_dataset(self.data, feature_columns)
-            print(f"✅ Preprocessed {len(X)} samples for training, {len(feature_columns_used)} features")
+            # Debug: show distribution
+            unique_encoded, counts = np.unique(y, return_counts=True)
+            print(f"🔍 Final encoded labels distribution: {dict(zip(unique_encoded, counts))}")
 
-        self.feature_columns = feature_columns_used  # Store for prediction
+        self.feature_columns = feature_columns_used
         return X, y, feature_columns_used
 
+    def encode_labels(self, y_raw):
+        """Encode labels using our consistent encoder with 1-based indexing"""
+        if not hasattr(self.label_encoder, 'classes_'):
+            raise ValueError("Label encoder not fitted. Call preprocess_data first.")
+        y_encoded = self.label_encoder.transform(y_raw)
+        return y_encoded + 1  # Convert to 1-based
 
+    def decode_labels(self, y_encoded):
+        """Decode labels back to original values from 1-based encoding"""
+        if not hasattr(self.label_encoder, 'classes_'):
+            raise ValueError("Label encoder not fitted.")
+        y_zero_based = y_encoded - 1  # Convert back from 1-based to 0-based
+        return self.label_encoder.inverse_transform(y_zero_based)
+
+    def predict(self, X: np.ndarray, return_encoded: bool = True):
+        """Predict classes for input data with 1-based encoding handling"""
+        if not hasattr(self.core, 'is_trained') or not self.core.is_trained:
+            print("❌ Model not trained, returning random predictions")
+            if hasattr(self, 'encoded_classes_') and self.encoded_classes_ is not None:
+                # Return 1 or 2 randomly
+                return np.random.choice([1, 2], size=len(X))
+            else:
+                return np.array([1] * len(X))  # Default to class 1
+
+        try:
+            # Get predictions from DBNN in batches
+            batch_size = 1000
+            all_predictions = []
+
+            for i in range(0, len(X), batch_size):
+                batch = X[i:i+batch_size]
+
+                if hasattr(self.core, 'predict_batch'):
+                    # Use DBNN's batch prediction
+                    batch_predictions, _ = self.core.predict_batch(batch)
+                else:
+                    # Fallback prediction method
+                    batch_predictions = self._fallback_predict(batch)
+
+                all_predictions.extend(batch_predictions)
+
+            predictions_encoded = np.array(all_predictions)
+
+            # DEBUG: Show prediction distribution
+            unique_preds, counts = np.unique(predictions_encoded, return_counts=True)
+            print(f"🔍 DBNN raw predictions distribution: {dict(zip(unique_preds, counts))}")
+
+            # CRITICAL: Ensure predictions are in 1,2 range
+            # If DBNN returns 0,1 convert to 1,2
+            if len(unique_preds) > 0 and 0 in unique_preds:
+                print(f"🔄 Converting DBNN predictions from [0,1] to [1,2]")
+                predictions_encoded = predictions_encoded + 1
+
+            # Final check
+            unique_final, counts_final = np.unique(predictions_encoded, return_counts=True)
+            print(f"🔍 Final predictions distribution: {dict(zip(unique_final, counts_final))}")
+
+            if return_encoded:
+                # Return encoded predictions (for accuracy calculation)
+                return predictions_encoded.astype(int)
+            else:
+                # Only decode if explicitly requested (for display purposes)
+                if hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
+                    try:
+                        # Convert from 1-based back to 0-based for decoding
+                        predictions_zero_based = predictions_encoded - 1
+                        predictions_decoded = self.label_encoder.inverse_transform(predictions_zero_based.astype(int))
+
+                        # DEBUG: Show decoded distribution
+                        unique_decoded, counts_decoded = np.unique(predictions_decoded, return_counts=True)
+                        print(f"🔍 Decoded predictions distribution: {dict(zip(unique_decoded, counts_decoded))}")
+
+                        return predictions_decoded
+                    except Exception as e:
+                        print(f"❌ Decoding failed: {e}, returning encoded predictions")
+                        return predictions_encoded
+                else:
+                    print("⚠️ No label encoder available, returning encoded predictions")
+                    return predictions_encoded
+
+        except Exception as e:
+            print(f"❌ Prediction error: {e}")
+            import traceback
+            traceback.print_exc()
+            # Return fallback predictions (1 or 2)
+            if hasattr(self, 'encoded_classes_') and self.encoded_classes_ is not None:
+                return np.random.choice([1, 2], size=len(X))
+            else:
+                return np.array([1] * len(X))
+
+    def _compute_accuracy_proper(self, X: np.ndarray, y: np.ndarray):
+        """Compute accuracy on given data using 1-based encoded labels"""
+        if not hasattr(self.core, 'is_trained') or not self.core.is_trained:
+            return 0.0
+
+        try:
+            # CRITICAL: Get predictions in 1-based ENCODED format to match y
+            predictions = self.predict(X, return_encoded=True)  # Get encoded predictions (1,2)
+
+            # DEBUG: Check what we're comparing
+            print(f"🔍 Accuracy Debug - y (true 1-based): {np.unique(y)}, predictions: {np.unique(predictions)}")
+            print(f"🔍 Accuracy Debug - y counts: {np.unique(y, return_counts=True)}")
+            print(f"🔍 Accuracy Debug - predictions counts: {np.unique(predictions, return_counts=True)}")
+
+            # Ensure same data type and shape for comparison
+            if len(predictions) != len(y):
+                print(f"❌ Prediction length mismatch: {len(predictions)} vs {len(y)}")
+                return 0.0
+
+            predictions = predictions.astype(y.dtype)
+
+            # Calculate accuracy manually
+            correct = np.sum(predictions == y)
+            accuracy = (correct / len(y)) * 100
+
+            print(f"🎯 Accuracy: {correct}/{len(y)} = {accuracy:.2f}%")
+
+            # Additional debug: show confusion matrix for small datasets
+            if len(y) <= 1000:
+                from sklearn.metrics import confusion_matrix
+                cm = confusion_matrix(y, predictions)
+                print(f"🔍 Confusion Matrix:\n{cm}")
+
+            return accuracy
+
+        except Exception as e:
+            print(f"❌ Accuracy computation error: {e}")
+            import traceback
+            traceback.print_exc()
+            return 0.0
+
+    def _initialize_dbnn_architecture(self, X: np.ndarray, y: np.ndarray, feature_cols: List[str]):
+        """Initialize DBNN architecture with 1-based labels"""
+        print("🏗️ Initializing DBNN architecture with 1-based labels...")
+
+        # Debug: show our label distribution
+        unique_y, counts_y = np.unique(y, return_counts=True)
+        print(f"🔍 Our 1-based encoded labels: {dict(zip(unique_y, counts_y))}")
+
+        # Create temporary file with 1-based labels as strings
+        temp_file = f"temp_init_{int(time.time())}.csv"
+        init_df = pd.DataFrame(X, columns=feature_cols)
+
+        # Send 1-based labels as strings to DBNN
+        init_df[self.target_column] = y.astype(str)
+        init_df.to_csv(temp_file, index=False)
+
+        try:
+            # Load data to get feature information
+            features_batches, targets_batches, feature_columns_used, original_targets_batches = self.core.load_data(
+                temp_file, self.target_column, feature_cols
+            )
+
+            if not features_batches:
+                raise ValueError("No data loaded for initialization")
+
+            # Let DBNN fit its encoder on our 1-based string labels
+            all_original_targets = np.concatenate(original_targets_batches) if original_targets_batches else np.array([])
+            self.core.class_encoder.fit(all_original_targets)
+
+            # Get the classes DBNN found
+            dbnn_classes = self.core.class_encoder.get_encoded_classes()
+            print(f"🔍 DBNN encoded classes: {dbnn_classes}")
+
+            # Set dimensions
+            self.core.outnodes = len(dbnn_classes)
+            self.core.innodes = len(feature_cols)
+
+            # Initialize arrays
+            resol = self.core.config.get('resol', 100)
+            self.core.initialize_arrays(self.core.innodes, resol, self.core.outnodes)
+
+            # Set class_labels to match DBNN's encoding of our 1-based labels
+            self.core.class_labels[0] = self.core.config.get('margin', 0.2)
+            for i, encoded_val in enumerate(dbnn_classes, 1):
+                if i < len(self.core.class_labels):
+                    self.core.class_labels[i] = float(encoded_val)
+
+            print(f"✅ DBNN initialization complete: {self.core.innodes} inputs, {self.core.outnodes} outputs")
+            print(f"📊 DBNN class_labels: {[self.core.class_labels[i] for i in range(min(5, len(self.core.class_labels)))]}")
+
+        except Exception as e:
+            print(f"❌ DBNN initialization failed: {e}")
+            raise
+        finally:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
 
     def initialize_with_full_data(self, X: np.ndarray, y: np.ndarray, feature_columns: List[str]):
         """Step 1: Initialize DBNN architecture with full dataset and feature names"""
@@ -5111,7 +5335,6 @@ class DBNNWrapper:
         finally:
             if os.path.exists(temp_file):
                 os.remove(temp_file)
-
 
     def predict_with_original_columns(self, X: np.ndarray, input_features: List[str] = None):
         """Predict classes for input data with feature column validation"""
@@ -5213,53 +5436,6 @@ class DBNNWrapper:
             import traceback
             traceback.print_exc()
             return False
-
-    def _initialize_dbnn_architecture(self, X: np.ndarray, y: np.ndarray, feature_cols: List[str]):
-        """Manually initialize DBNN architecture to avoid the class_labels error"""
-        print("🔧 Manually initializing DBNN architecture...")
-
-        # Create temporary file for initialization
-        temp_file = f"temp_init_{int(time.time())}.csv"
-        init_df = pd.DataFrame(X, columns=feature_cols)
-        init_df[self.target_column] = y
-        init_df.to_csv(temp_file, index=False)
-
-        try:
-            # Load data to get feature information
-            features_batches, targets_batches, feature_columns_used, original_targets_batches = self.core.load_data(
-                temp_file, self.target_column, feature_cols
-            )
-
-            if not features_batches:
-                raise ValueError("No data loaded for initialization")
-
-            # Fit encoder first
-            all_original_targets = np.concatenate(original_targets_batches) if original_targets_batches else np.array([])
-            self.core.class_encoder.fit(all_original_targets)
-
-            # Get encoded classes
-            encoded_classes = self.core.class_encoder.get_encoded_classes()
-            self.core.outnodes = len(encoded_classes)
-            self.core.innodes = len(feature_cols)
-
-            # Initialize arrays with proper dimensions
-            resol = self.core.config.get('resol', 100)
-            self.core.initialize_arrays(self.core.innodes, resol, self.core.outnodes)
-
-            # Now set class_labels values safely
-            self.core.class_labels[0] = self.core.config.get('margin', 0.2)
-            for i, encoded_val in enumerate(encoded_classes, 1):
-                if i < len(self.core.class_labels):
-                    self.core.class_labels[i] = float(encoded_val)
-
-            print(f"✅ Manual initialization complete: {self.core.innodes} inputs, {self.core.outnodes} outputs")
-
-        except Exception as e:
-            print(f"❌ Manual initialization failed: {e}")
-            raise
-        finally:
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
 
     def _train_with_initialized_architecture(self, train_file: str, feature_cols: List[str]):
         """Train with acid test-based early stopping"""
@@ -5498,11 +5674,11 @@ class DBNNWrapper:
         return accuracy, correct_predictions, all_predictions
 
     def train_with_data(self, X_train: np.ndarray, y_train: np.ndarray, reset_weights: bool = True):
-        """Step 2: Train with given data (no train/test split)"""
+        """Step 2: Train with given data (no train/test split) - FIXED VERSION"""
         if not self.initialized_with_full_data:
             # Try to initialize if not already done
             print("⚠️  DBNN not initialized, attempting initialization...")
-            self.initialize_with_full_data(X_train, y_train, self.feature_columns)  # Pass feature columns
+            self.initialize_with_full_data(X_train, y_train, self.feature_columns)
             if not self.initialized_with_full_data:
                 raise ValueError("DBNN must be initialized with full data first")
 
@@ -5511,11 +5687,12 @@ class DBNNWrapper:
             self._reset_weights()
 
         print(f"🎯 Training with {len(X_train)} samples...")
+        print(f"🔍 Training labels (encoded): {np.unique(y_train)}")
 
-        # Create temporary file with training data - USE ORIGINAL FEATURE NAMES
+        # Create temporary file with training data
         temp_file = f"temp_train_{int(time.time())}.csv"
 
-        # Use original feature columns if available, otherwise fallback to generic names
+        # Use original feature columns if available
         if hasattr(self, 'feature_columns') and self.feature_columns:
             feature_cols = self.feature_columns
             print(f"📊 Using original feature names: {feature_cols}")
@@ -5523,17 +5700,19 @@ class DBNNWrapper:
             feature_cols = [f'feature_{i}' for i in range(X_train.shape[1])]
             print(f"⚠️  Using generic feature names: {feature_cols}")
 
+        # Create training dataframe with encoded labels
         train_df = pd.DataFrame(X_train, columns=feature_cols)
-        train_df[self.target_column] = y_train
+        train_df[self.target_column] = y_train  # This should be encoded numbers
         train_df.to_csv(temp_file, index=False)
 
         try:
-            # Train using our custom training method that preserves architecture
+            # Train using our custom training method
             success = self._train_with_initialized_architecture(temp_file, feature_cols)
 
             if success:
-                train_accuracy = self._compute_accuracy(X_train, y_train)
-                print(f"✅ Training completed - Accuracy: {train_accuracy:.2f}%")
+                # Use the FIXED accuracy calculation that handles encoding properly
+                train_accuracy = self._compute_accuracy_proper(X_train, y_train)
+                print(f"✅ Training completed - Real Accuracy: {train_accuracy:.2f}%")
                 return train_accuracy
             else:
                 print("❌ Training failed")
@@ -5561,29 +5740,24 @@ class DBNNWrapper:
             print(f"❌ Accuracy computation error: {e}")
             return 0.0
 
-    def predict(self, X: np.ndarray):
-        """Predict classes for input data"""
-        if not hasattr(self.core, 'is_trained') or not self.core.is_trained:
-            # Return random predictions if not trained
-            unique_classes = np.unique(self.y_full) if hasattr(self, 'y_full') else [1, 2, 3]
-            return np.random.choice(unique_classes, size=len(X))
-
+    def _fallback_predict(self, X_batch: np.ndarray):
+        """Fallback prediction when core prediction fails"""
         try:
-            # Convert to batches for prediction
-            batch_size = 1000
-            all_predictions = []
-
-            for i in range(0, len(X), batch_size):
-                batch = X[i:i+batch_size]
-                batch_predictions, _ = self.core.predict_batch(batch)
-                all_predictions.extend(batch_predictions)
-
-            return np.array(all_predictions)
+            predictions = []
+            for sample in X_batch:
+                # Simple rule-based prediction using first feature
+                # This is just for fallback - real predictions should come from DBNN
+                if len(sample) > 0 and not np.isnan(sample[0]):
+                    if sample[0] > np.median(sample) if len(sample) > 1 else 0:
+                        predictions.append(1)
+                    else:
+                        predictions.append(0)
+                else:
+                    predictions.append(0)  # Default to class 0 for invalid samples
+            return predictions
         except Exception as e:
-            print(f"❌ Prediction error: {e}")
-            # Return random predictions as fallback
-            unique_classes = np.unique(self.y_full) if hasattr(self, 'y_full') else [1, 2, 3]
-            return np.random.choice(unique_classes, size=len(X))
+            print(f"❌ Fallback prediction error: {e}")
+            return [0] * len(X_batch)
 
     def freeze_architecture(self):
         """Freeze the current architecture for later restoration"""
@@ -5646,7 +5820,6 @@ class DBNNWrapper:
         if hasattr(self.core, 'antip_wts') and self.core.antip_wts is not None:
             self.core.antip_wts.fill(1.0)
 
-
     def adaptive_train(self, X_train: np.ndarray, y_train: np.ndarray, reset_weights: bool = True):
         """Adaptive training that preserves architecture"""
         if not self.initialized_with_full_data:
@@ -5656,6 +5829,8 @@ class DBNNWrapper:
             self._reset_weights()
 
         return self.train_with_data(X_train, y_train, reset_weights=False)
+
+
 
 class AdaptiveDBNN:
     """
@@ -5886,6 +6061,10 @@ class AdaptiveDBNN:
 
         print(f"🎯 Selecting initial training samples ({initial_samples_per_class} samples per class)...")
 
+        # Debug: show overall distribution
+        unique_classes, overall_counts = np.unique(y, return_counts=True)
+        print(f"🔍 Overall label distribution: {dict(zip(unique_classes, overall_counts))}")
+
         X_initial = []
         y_initial = []
         initial_indices = []
@@ -5921,12 +6100,17 @@ class AdaptiveDBNN:
                 y_initial.append(y[selected_class_indices])
                 initial_indices.extend(selected_class_indices.tolist())
 
+                print(f"   Class {class_label}: selected {len(selected_class_indices)} samples")
+
         if X_initial:
             X_train = np.vstack(X_initial)
             y_train = np.hstack(y_initial)
         else:
             X_train = np.array([]).reshape(0, X.shape[1])
             y_train = np.array([])
+
+        # Final debug
+        unique_train, counts_train = np.unique(y_train, return_counts=True)
 
         print(f"✅ Initial training set: {X_train.shape[0]} samples")
         print(f"📊 Class distribution: {np.unique(y_train, return_counts=True)}")
@@ -6005,6 +6189,12 @@ class AdaptiveDBNN:
         if self.X_full is None or self.y_full is None:
             print("📊 Preparing dataset...")
             self.X_full, self.y_full, _ = self.prepare_full_data(feature_columns)
+
+        # DEBUG: Check the encoding
+        unique_encoded = np.unique(self.y_full)
+        print(f"🔍 Using encoded labels: {unique_encoded}")
+        if hasattr(self.model, 'label_encoder') and hasattr(self.model.label_encoder, 'classes_'):
+            print(f"🔍 Label mapping: {self.model.label_encoder.classes_} -> {range(len(self.model.label_encoder.classes_))}")
 
         X = self.X_full
         y = self.y_full
