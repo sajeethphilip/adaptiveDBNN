@@ -2597,15 +2597,6 @@ class DBNNCore:
     def save_model(self, model_path: str, feature_columns=None, target_column=None, use_json=False):
         """
         Save complete model to file in binary format (default) or JSON format.
-
-        Args:
-            model_path: Path where to save the model
-            feature_columns: List of feature column names
-            target_column: Name of target column
-            use_json: Whether to use JSON format (default: False for binary)
-
-        Returns:
-            bool: Success status
         """
         try:
             # Ensure all required fields are set
@@ -2616,6 +2607,19 @@ class DBNNCore:
                 else:
                     self.innodes = 0
 
+            # CRITICAL FIX: Ensure feature configuration is ALWAYS saved
+            # Determine feature_columns with priority: parameter > instance > generated
+            if feature_columns is None:
+                feature_columns = getattr(self, 'feature_columns', None)
+            if feature_columns is None and hasattr(self, 'innodes') and self.innodes > 0:
+                # Generate generic feature names as last resort
+                feature_columns = [f'feature_{i+1}' for i in range(self.innodes)]
+                self.log(f"🔧 Generated generic feature names for saving: {feature_columns}")
+
+            # Determine target_column with priority: parameter > instance > default
+            if target_column is None:
+                target_column = getattr(self, 'target_column', 'target')
+
             # Create model data dictionary
             model_data = {
                 'config': self.config,
@@ -2625,20 +2629,13 @@ class DBNNCore:
                 'memory_optimized': self.memory_optimized,
                 'disk_backed_training': self.disk_backed_training,
                 'training_mode': 'tensor' if self.tensor_mode else 'standard',
-                'arrays_format': 'numpy'
+                'arrays_format': 'numpy',
+                # CRITICAL: ALWAYS include feature configuration
+                'feature_columns': feature_columns,
+                'target_column': target_column
             }
 
-            # Add feature configuration if available
-            if feature_columns is not None:
-                model_data['feature_columns'] = feature_columns
-            elif hasattr(self, 'feature_columns'):
-                model_data['feature_columns'] = self.feature_columns
-
-            if target_column is not None:
-                model_data['target_column'] = target_column
-            elif hasattr(self, 'target_column'):
-                model_data['target_column'] = self.target_column
-
+            # Remove the conditional sections that were here before
             # Add performance metrics if available
             if hasattr(self, 'best_accuracy'):
                 model_data['best_accuracy'] = self.best_accuracy
@@ -2684,6 +2681,7 @@ class DBNNCore:
 
             self.log(f"Model saved to: {model_path}")
             self.log(f"Model info: {self.innodes} inputs, {self.outnodes} outputs")
+            self.log(f"Feature configuration: {len(feature_columns)} features, target: {target_column}")
             if hasattr(self, 'best_accuracy'):
                 self.log(f"Best accuracy: {self.best_accuracy:.2f}%")
 
@@ -2698,15 +2696,9 @@ class DBNNCore:
     def load_model(self, model_path: str):
         """
         Load model from file with robust error handling - supports both binary and JSON formats.
-        Enhanced to handle the new memory optimization features and match save_model structure.
-
-        Args:
-            model_path: Path to model file
-
-        Returns:
-            bool: Success status
         """
         try:
+            # [Existing detection and loading code remains the same...]
             # Detect format and load accordingly
             if model_path.endswith('.gz') or model_path.endswith('.bin'):
                 # Binary format
@@ -2721,6 +2713,7 @@ class DBNNCore:
 
             self.log(f"Loading model from: {model_path}")
 
+            # [All existing array loading code remains the same...]
             # NEW: Detect and set training mode BEFORE loading arrays
             training_mode = model_data.get('training_mode', 'standard')
             if training_mode == 'tensor':
@@ -2733,6 +2726,7 @@ class DBNNCore:
             # Load basic configuration FIRST
             self.config = model_data.get('config', {})
 
+            # [All array loading code remains exactly the same...]
             # Handle array loading based on format
             if 'arrays_format' in model_data and model_data['arrays_format'] == 'numpy':
                 # Binary format with numpy arrays
@@ -2775,6 +2769,7 @@ class DBNNCore:
                         except Exception as e:
                             self.log(f"Error loading {field_name}: {e}")
 
+            # [Tensor arrays loading remains the same...]
             # NEW: Load tensor arrays if available and in tensor mode
             if self.tensor_mode and self.tensor_core and 'tensor_arrays' in model_data:
                 tensor_data = model_data['tensor_arrays']
@@ -2785,6 +2780,7 @@ class DBNNCore:
                         setattr(self.tensor_core, array_name, array_data)
                         self.log(f"Loaded tensor array {array_name}: shape {array_data.shape}")
 
+            # [Dimension inference remains the same...]
             # FIX: Infer dimensions from ACTUAL loaded arrays, not from metadata
             if hasattr(self, 'anti_net') and self.anti_net is not None:
                 # Infer from anti_net shape: (innodes+2, resol+2, innodes+2, resol+2, outnodes+2)
@@ -2808,62 +2804,36 @@ class DBNNCore:
             if 'best_round' in model_data:
                 self.best_round = model_data['best_round']
 
-            # ENHANCED FEATURE CONFIGURATION LOADING WITH ROBUST FALLBACKS
+            # SIMPLIFIED & ROBUST FEATURE CONFIGURATION LOADING
             self.feature_columns = model_data.get('feature_columns', [])
             self.target_column = model_data.get('target_column', '')
 
-            # CRITICAL FIX: If no feature columns found, try multiple recovery strategies
+            # CRITICAL FIX: Guaranteed feature configuration recovery
             if not self.feature_columns:
-                self.log("⚠️ No feature configuration found in trained model")
-                self.log("🔧 Attempting feature configuration recovery...")
-
-                # Strategy 1: Check if we have feature information from metadata
-                if 'feature_columns' in model_data and model_data['feature_columns']:
-                    self.feature_columns = model_data['feature_columns']
-                    self.log(f"✅ Recovered feature columns from metadata: {len(self.feature_columns)} features")
-
-                # Strategy 2: Infer from model dimensions
-                elif hasattr(self, 'innodes') and self.innodes > 0:
+                self.log("🔧 No feature columns in saved model, generating from dimensions...")
+                # Always generate feature names from actual dimensions
+                if hasattr(self, 'innodes') and self.innodes > 0:
                     self.feature_columns = [f'feature_{i+1}' for i in range(self.innodes)]
-                    self.log(f"✅ Inferred {self.innodes} generic feature names from model dimensions")
-
-                # Strategy 3: Check for feature information in config
-                elif 'config' in model_data and 'feature_columns' in model_data['config']:
-                    self.feature_columns = model_data['config']['feature_columns']
-                    self.log(f"✅ Recovered feature columns from config: {len(self.feature_columns)} features")
-
+                    self.log(f"✅ Generated {self.innodes} feature names from model dimensions")
                 else:
-                    self.log("❌ Could not recover feature configuration - manual setup required")
+                    self.log("❌ Cannot generate features: unknown input dimension")
 
-            # Validate feature columns consistency
-            if self.feature_columns and hasattr(self, 'innodes'):
-                if len(self.feature_columns) != self.innodes:
-                    self.log(f"⚠️ Feature count mismatch: {len(self.feature_columns)} features vs {self.innodes} input nodes")
-                    # Auto-correct by truncating or extending feature list
-                    if len(self.feature_columns) > self.innodes:
-                        self.feature_columns = self.feature_columns[:self.innodes]
-                        self.log(f"✅ Truncated feature columns to match input nodes: {len(self.feature_columns)} features")
-                    else:
-                        # Add generic feature names for missing ones
-                        missing_count = self.innodes - len(self.feature_columns)
-                        for i in range(missing_count):
-                            self.feature_columns.append(f'feature_{len(self.feature_columns) + 1}')
-                        self.log(f"✅ Extended feature columns with generic names: {len(self.feature_columns)} features")
+            # Validate and auto-correct feature count if needed
+            if self.feature_columns and hasattr(self, 'innodes') and len(self.feature_columns) != self.innodes:
+                self.log(f"🔧 Adjusting feature count: {len(self.feature_columns)} -> {self.innodes}")
+                if len(self.feature_columns) > self.innodes:
+                    self.feature_columns = self.feature_columns[:self.innodes]
+                else:
+                    # Extend with generic names
+                    for i in range(len(self.feature_columns), self.innodes):
+                        self.feature_columns.append(f'feature_{i+1}')
 
-            # ENHANCED TARGET COLUMN RECOVERY
+            # Ensure target column exists
             if not self.target_column:
-                self.log("⚠️ No target column information found")
-                # Try to recover from various sources
-                if 'target_column' in model_data and model_data['target_column']:
-                    self.target_column = model_data['target_column']
-                    self.log(f"✅ Recovered target column: {self.target_column}")
-                elif 'config' in model_data and 'target_column' in model_data['config']:
-                    self.target_column = model_data['config']['target_column']
-                    self.log(f"✅ Recovered target column from config: {self.target_column}")
-                else:
-                    self.target_column = 'target'  # Default fallback
-                    self.log(f"✅ Using default target column name: {self.target_column}")
+                self.target_column = 'target'
+                self.log("✅ Using default target column name")
 
+            # [Rest of the method remains exactly the same...]
             # Load memory optimization state
             self.memory_optimized = model_data.get('memory_optimized', False)
             self.disk_backed_training = model_data.get('disk_backed_training', False)
@@ -2873,6 +2843,7 @@ class DBNNCore:
             if self.disk_backed_training:
                 self.log("✅ Disk-backed training model loaded")
 
+            # [Class encoder loading remains exactly the same...]
             # ENHANCED CLASS ENCODER LOADING WITH COMPREHENSIVE RECOVERY
             class_encoder_mapping = model_data.get('class_encoder', {})
             if class_encoder_mapping:
@@ -2942,6 +2913,7 @@ class DBNNCore:
                         except Exception as recovery_error:
                             self.log(f"❌ Emergency recovery failed: {recovery_error}")
 
+            # [Validation and final reporting remains exactly the same...]
             # COMPREHENSIVE MODEL VALIDATION
             self.log("🔍 Performing comprehensive model validation...")
 
@@ -14831,7 +14803,7 @@ model learns to separate different classes over time.
                 ('correlation', self.generate_correlation_matrix),
                 ('feature_explorer', self.generate_basic_3d_visualization),
                 ('animated', self.generate_animated_training),
-                ('standard_dashboard', self.create_training_dashboard)
+                ('standard_dashboard', self.visualizer.create_training_dashboard)
             ]
 
             for name, method in viz_methods:
