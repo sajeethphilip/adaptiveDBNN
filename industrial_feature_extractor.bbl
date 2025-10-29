@@ -1,0 +1,514 @@
+% $ biblatex auxiliary file $
+% $ biblatex bbl format version 3.3 $
+% Do not modify the above lines!
+%
+% This is an auxiliary file used by the 'biblatex' package.
+% This file may safely be deleted. It will be recreated by
+% biber as required.
+%
+\begingroup
+\makeatletter
+\@ifundefined{ver@biblatex.sty}
+  {\@latex@error
+     {Missing 'biblatex' package}
+     {The bibliography requires the 'biblatex' package.}
+      \aftergroup\endinput}
+  {}
+\endgroup
+
+
+\refsection{0}
+  \datalist[entry]{none/global//global/global/global}
+    \entry{zhou2012ensemble}{book}{}{}
+      \name{author}{1}{}{%
+        {{hash=6b1a37e820a730061851a81dcca2d154}{%
+           family={Zhou},
+           familyi={Z\bibinitperiod},
+           given={Zhi-Hua},
+           giveni={Z\bibinithyphendelim H\bibinitperiod}}}%
+      }
+      \list{publisher}{2}{%
+        {Chapman}%
+        {Hall/CRC}%
+      }
+      \strng{namehash}{6b1a37e820a730061851a81dcca2d154}
+      \strng{fullhash}{6b1a37e820a730061851a81dcca2d154}
+      \strng{fullhashraw}{6b1a37e820a730061851a81dcca2d154}
+      \strng{bibnamehash}{6b1a37e820a730061851a81dcca2d154}
+      \strng{authorbibnamehash}{6b1a37e820a730061851a81dcca2d154}
+      \strng{authornamehash}{6b1a37e820a730061851a81dcca2d154}
+      \strng{authorfullhash}{6b1a37e820a730061851a81dcca2d154}
+      \strng{authorfullhashraw}{6b1a37e820a730061851a81dcca2d154}
+      \field{sortinit}{1}
+      \field{sortinithash}{4f6aaa89bab872aa0999fec09ff8e98a}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{note}{Comprehensive reference on ensemble learning methods}
+      \field{title}{Ensemble methods: foundations and algorithms}
+      \field{year}{2012}
+      \verb{urlraw}
+      \verb https://www.routledge.com/Ensemble-Methods-Foundations-and-Algorithms/Zhou/p/book/9781439830031
+      \endverb
+      \verb{url}
+      \verb https://www.routledge.com/Ensemble-Methods-Foundations-and-Algorithms/Zhou/p/book/9781439830031
+      \endverb
+    \endentry
+    \entry{daugman1985uncertainty}{article}{}{}
+      \name{author}{1}{}{%
+        {{hash=f3cad33e59f13d81d2e3c8afb26b83b1}{%
+           family={Daugman},
+           familyi={D\bibinitperiod},
+           given={John\bibnamedelima G},
+           giveni={J\bibinitperiod\bibinitdelim G\bibinitperiod}}}%
+      }
+      \list{publisher}{1}{%
+        {Optica Publishing Group}%
+      }
+      \strng{namehash}{f3cad33e59f13d81d2e3c8afb26b83b1}
+      \strng{fullhash}{f3cad33e59f13d81d2e3c8afb26b83b1}
+      \strng{fullhashraw}{f3cad33e59f13d81d2e3c8afb26b83b1}
+      \strng{bibnamehash}{f3cad33e59f13d81d2e3c8afb26b83b1}
+      \strng{authorbibnamehash}{f3cad33e59f13d81d2e3c8afb26b83b1}
+      \strng{authornamehash}{f3cad33e59f13d81d2e3c8afb26b83b1}
+      \strng{authorfullhash}{f3cad33e59f13d81d2e3c8afb26b83b1}
+      \strng{authorfullhashraw}{f3cad33e59f13d81d2e3c8afb26b83b1}
+      \field{sortinit}{2}
+      \field{sortinithash}{8b555b3791beccb63322c22f3320aa9a}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{journaltitle}{Journal of the Optical Society of America A}
+      \field{note}{Seminal paper on Gabor filters and their biological basis}
+      \field{number}{7}
+      \field{title}{Uncertainty relation for resolution in space, spatial frequency, and orientation optimized by two-dimensional visual cortical filters}
+      \field{volume}{2}
+      \field{year}{1985}
+      \field{pages}{1160\bibrangedash 1169}
+      \range{pages}{10}
+      \verb{urlraw}
+      \verb https://opg.optica.org/josaa/abstract.cfm?uri=josaa-2-7-1160
+      \endverb
+      \verb{url}
+      \verb https://opg.optica.org/josaa/abstract.cfm?uri=josaa-2-7-1160
+      \endverb
+    \endentry
+    \entry{ojala2002multiresolution}{article}{}{}
+      \name{author}{3}{}{%
+        {{hash=b0483cd486d1e6f4e40503191aa7817b}{%
+           family={Ojala},
+           familyi={O\bibinitperiod},
+           given={Timo},
+           giveni={T\bibinitperiod}}}%
+        {{hash=9f01d72b772651a0eaa57c9b22e31b85}{%
+           family={Pietikäinen},
+           familyi={P\bibinitperiod},
+           given={Matti},
+           giveni={M\bibinitperiod}}}%
+        {{hash=12af62dc62e6258a61a556c9e7e43922}{%
+           family={Mäenpää},
+           familyi={M\bibinitperiod},
+           given={Topi},
+           giveni={T\bibinitperiod}}}%
+      }
+      \list{publisher}{1}{%
+        {IEEE}%
+      }
+      \strng{namehash}{6de03e4869aabb52e4c54b0010934073}
+      \strng{fullhash}{6a3b5938a7f54affe40b263dce14609d}
+      \strng{fullhashraw}{6a3b5938a7f54affe40b263dce14609d}
+      \strng{bibnamehash}{6a3b5938a7f54affe40b263dce14609d}
+      \strng{authorbibnamehash}{6a3b5938a7f54affe40b263dce14609d}
+      \strng{authornamehash}{6de03e4869aabb52e4c54b0010934073}
+      \strng{authorfullhash}{6a3b5938a7f54affe40b263dce14609d}
+      \strng{authorfullhashraw}{6a3b5938a7f54affe40b263dce14609d}
+      \field{sortinit}{3}
+      \field{sortinithash}{ad6fe7482ffbd7b9f99c9e8b5dccd3d7}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{journaltitle}{IEEE Transactions on pattern analysis and machine intelligence}
+      \field{note}{Foundational paper on LBP for texture analysis}
+      \field{number}{7}
+      \field{title}{Multiresolution gray-scale and rotation invariant texture classification with local binary patterns}
+      \field{volume}{24}
+      \field{year}{2002}
+      \field{pages}{971\bibrangedash 987}
+      \range{pages}{17}
+      \verb{urlraw}
+      \verb https://ieeexplore.ieee.org/document/1017623
+      \endverb
+      \verb{url}
+      \verb https://ieeexplore.ieee.org/document/1017623
+      \endverb
+    \endentry
+    \entry{haralick1973texture}{article}{}{}
+      \name{author}{3}{}{%
+        {{hash=66d80b3b1c68fe14c878e56b6942be35}{%
+           family={Haralick},
+           familyi={H\bibinitperiod},
+           given={Robert\bibnamedelima M},
+           giveni={R\bibinitperiod\bibinitdelim M\bibinitperiod}}}%
+        {{hash=c8f89c4fae12a38dbeb8f4c80f11fcb4}{%
+           family={Shanmugam},
+           familyi={S\bibinitperiod},
+           given={Karthikeyan},
+           giveni={K\bibinitperiod}}}%
+        {{hash=b38b0bb0d12d3673235d5fa692d78e82}{%
+           family={Dinstein},
+           familyi={D\bibinitperiod},
+           given={Its'Hak},
+           giveni={I\bibinitperiod}}}%
+      }
+      \list{publisher}{1}{%
+        {IEEE}%
+      }
+      \strng{namehash}{cffa642189a2c1659baff84c87634ecc}
+      \strng{fullhash}{48ddc0a37077d8c13ab02df1284b2e3f}
+      \strng{fullhashraw}{48ddc0a37077d8c13ab02df1284b2e3f}
+      \strng{bibnamehash}{48ddc0a37077d8c13ab02df1284b2e3f}
+      \strng{authorbibnamehash}{48ddc0a37077d8c13ab02df1284b2e3f}
+      \strng{authornamehash}{cffa642189a2c1659baff84c87634ecc}
+      \strng{authorfullhash}{48ddc0a37077d8c13ab02df1284b2e3f}
+      \strng{authorfullhashraw}{48ddc0a37077d8c13ab02df1284b2e3f}
+      \field{sortinit}{4}
+      \field{sortinithash}{9381316451d1b9788675a07e972a12a7}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{journaltitle}{IEEE Transactions on systems, man, and cybernetics}
+      \field{note}{Classic paper introducing GLCM and texture features}
+      \field{number}{6}
+      \field{title}{Textural features for image classification}
+      \field{year}{1973}
+      \field{pages}{610\bibrangedash 621}
+      \range{pages}{12}
+      \verb{urlraw}
+      \verb https://ieeexplore.ieee.org/document/4309314
+      \endverb
+      \verb{url}
+      \verb https://ieeexplore.ieee.org/document/4309314
+      \endverb
+    \endentry
+    \entry{dalal2005histograms}{inproceedings}{}{}
+      \name{author}{2}{}{%
+        {{hash=56b04d8128bc6b04002f2bba11177d2d}{%
+           family={Dalal},
+           familyi={D\bibinitperiod},
+           given={Navneet},
+           giveni={N\bibinitperiod}}}%
+        {{hash=7edc70f9ce27f4a800aa68cbd1625f51}{%
+           family={Triggs},
+           familyi={T\bibinitperiod},
+           given={Bill},
+           giveni={B\bibinitperiod}}}%
+      }
+      \list{organization}{1}{%
+        {IEEE}%
+      }
+      \strng{namehash}{061fc00534f121cc44884e9acda158db}
+      \strng{fullhash}{061fc00534f121cc44884e9acda158db}
+      \strng{fullhashraw}{061fc00534f121cc44884e9acda158db}
+      \strng{bibnamehash}{061fc00534f121cc44884e9acda158db}
+      \strng{authorbibnamehash}{061fc00534f121cc44884e9acda158db}
+      \strng{authornamehash}{061fc00534f121cc44884e9acda158db}
+      \strng{authorfullhash}{061fc00534f121cc44884e9acda158db}
+      \strng{authorfullhashraw}{061fc00534f121cc44884e9acda158db}
+      \field{sortinit}{5}
+      \field{sortinithash}{20e9b4b0b173788c5dace24730f47d8c}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{booktitle}{2005 IEEE computer society conference on computer vision and pattern recognition (CVPR'05)}
+      \field{note}{Landmark paper introducing HOG features}
+      \field{title}{Histograms of oriented gradients for human detection}
+      \field{volume}{1}
+      \field{year}{2005}
+      \field{pages}{886\bibrangedash 893}
+      \range{pages}{8}
+      \verb{urlraw}
+      \verb https://ieeexplore.ieee.org/document/1467360
+      \endverb
+      \verb{url}
+      \verb https://ieeexplore.ieee.org/document/1467360
+      \endverb
+    \endentry
+    \entry{soille2003morphological}{book}{}{}
+      \name{author}{1}{}{%
+        {{hash=7a59df4bfcd431f8cb3c617f387e15fb}{%
+           family={Soille},
+           familyi={S\bibinitperiod},
+           given={Pierre},
+           giveni={P\bibinitperiod}}}%
+      }
+      \list{publisher}{1}{%
+        {Springer Science \& Business Media}%
+      }
+      \strng{namehash}{7a59df4bfcd431f8cb3c617f387e15fb}
+      \strng{fullhash}{7a59df4bfcd431f8cb3c617f387e15fb}
+      \strng{fullhashraw}{7a59df4bfcd431f8cb3c617f387e15fb}
+      \strng{bibnamehash}{7a59df4bfcd431f8cb3c617f387e15fb}
+      \strng{authorbibnamehash}{7a59df4bfcd431f8cb3c617f387e15fb}
+      \strng{authornamehash}{7a59df4bfcd431f8cb3c617f387e15fb}
+      \strng{authorfullhash}{7a59df4bfcd431f8cb3c617f387e15fb}
+      \strng{authorfullhashraw}{7a59df4bfcd431f8cb3c617f387e15fb}
+      \field{sortinit}{6}
+      \field{sortinithash}{b33bc299efb3c36abec520a4c896a66d}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{note}{Comprehensive reference on mathematical morphology}
+      \field{title}{Morphological image analysis: principles and applications}
+      \field{year}{2003}
+      \verb{urlraw}
+      \verb https://link.springer.com/book/10.1007/978-3-662-05088-0
+      \endverb
+      \verb{url}
+      \verb https://link.springer.com/book/10.1007/978-3-662-05088-0
+      \endverb
+    \endentry
+    \entry{he2016deep}{inproceedings}{}{}
+      \name{author}{4}{}{%
+        {{hash=6b4b60e909e78633945f3f9c9dc83e01}{%
+           family={He},
+           familyi={H\bibinitperiod},
+           given={Kaiming},
+           giveni={K\bibinitperiod}}}%
+        {{hash=5e72bc22dbcf0984c6d113d280e36990}{%
+           family={Zhang},
+           familyi={Z\bibinitperiod},
+           given={Xiangyu},
+           giveni={X\bibinitperiod}}}%
+        {{hash=bb295293acacd54387339079ebbe4ead}{%
+           family={Ren},
+           familyi={R\bibinitperiod},
+           given={Shaoqing},
+           giveni={S\bibinitperiod}}}%
+        {{hash=f85751488058842b5777c7b4074077b5}{%
+           family={Sun},
+           familyi={S\bibinitperiod},
+           given={Jian},
+           giveni={J\bibinitperiod}}}%
+      }
+      \strng{namehash}{6edb98fe38401d2fe4a026f5ce6e8451}
+      \strng{fullhash}{42c4b52dc3a62cebabbc11c73e1afb53}
+      \strng{fullhashraw}{42c4b52dc3a62cebabbc11c73e1afb53}
+      \strng{bibnamehash}{42c4b52dc3a62cebabbc11c73e1afb53}
+      \strng{authorbibnamehash}{42c4b52dc3a62cebabbc11c73e1afb53}
+      \strng{authornamehash}{6edb98fe38401d2fe4a026f5ce6e8451}
+      \strng{authorfullhash}{42c4b52dc3a62cebabbc11c73e1afb53}
+      \strng{authorfullhashraw}{42c4b52dc3a62cebabbc11c73e1afb53}
+      \field{sortinit}{7}
+      \field{sortinithash}{108d0be1b1bee9773a1173443802c0a3}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{booktitle}{Proceedings of the IEEE conference on computer vision and pattern recognition}
+      \field{note}{Introduces ResNet architecture with residual connections}
+      \field{title}{Deep residual learning for image recognition}
+      \field{year}{2016}
+      \field{pages}{770\bibrangedash 778}
+      \range{pages}{9}
+      \verb{urlraw}
+      \verb https://openaccess.thecvf.com/content_cvpr_2016/html/He_Deep_Residual_Learning_CVPR_2016_paper.html
+      \endverb
+      \verb{url}
+      \verb https://openaccess.thecvf.com/content_cvpr_2016/html/He_Deep_Residual_Learning_CVPR_2016_paper.html
+      \endverb
+    \endentry
+    \entry{tan2019efficientnet}{inproceedings}{}{}
+      \name{author}{2}{}{%
+        {{hash=1e7d6abb8225099acc71f672b9ec336e}{%
+           family={Tan},
+           familyi={T\bibinitperiod},
+           given={Mingxing},
+           giveni={M\bibinitperiod}}}%
+        {{hash=c636f146591d51579a8119b777394878}{%
+           family={Le},
+           familyi={L\bibinitperiod},
+           given={Quoc\bibnamedelima V},
+           giveni={Q\bibinitperiod\bibinitdelim V\bibinitperiod}}}%
+      }
+      \list{organization}{1}{%
+        {PMLR}%
+      }
+      \strng{namehash}{d029e8131f7a0bef056d7edc726f1529}
+      \strng{fullhash}{d029e8131f7a0bef056d7edc726f1529}
+      \strng{fullhashraw}{d029e8131f7a0bef056d7edc726f1529}
+      \strng{bibnamehash}{d029e8131f7a0bef056d7edc726f1529}
+      \strng{authorbibnamehash}{d029e8131f7a0bef056d7edc726f1529}
+      \strng{authornamehash}{d029e8131f7a0bef056d7edc726f1529}
+      \strng{authorfullhash}{d029e8131f7a0bef056d7edc726f1529}
+      \strng{authorfullhashraw}{d029e8131f7a0bef056d7edc726f1529}
+      \field{sortinit}{7}
+      \field{sortinithash}{108d0be1b1bee9773a1173443802c0a3}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{booktitle}{International conference on machine learning}
+      \field{note}{Introduces EfficientNet with compound scaling}
+      \field{title}{Efficientnet: Rethinking model scaling for convolutional neural networks}
+      \field{year}{2019}
+      \field{pages}{6105\bibrangedash 6114}
+      \range{pages}{10}
+      \verb{urlraw}
+      \verb https://proceedings.mlr.press/v97/tan19a.html
+      \endverb
+      \verb{url}
+      \verb https://proceedings.mlr.press/v97/tan19a.html
+      \endverb
+    \endentry
+    \entry{tabernik2020segmentation}{article}{}{}
+      \name{author}{4}{}{%
+        {{hash=63936f6f5b993ea114406afc4c7f835f}{%
+           family={Tabernik},
+           familyi={T\bibinitperiod},
+           given={Domen},
+           giveni={D\bibinitperiod}}}%
+        {{hash=5f9a0b2ef46d11b67f285b5fbf83ef46}{%
+           family={Šela},
+           familyi={Š\bibinitperiod},
+           given={Samo},
+           giveni={S\bibinitperiod}}}%
+        {{hash=d6bffda9768d874594d49e47b13f5b90}{%
+           family={Skvarč},
+           familyi={S\bibinitperiod},
+           given={Jure},
+           giveni={J\bibinitperiod}}}%
+        {{hash=e2d71d8ab48fd39658dfd93636494494}{%
+           family={Skočaj},
+           familyi={S\bibinitperiod},
+           given={Danijel},
+           giveni={D\bibinitperiod}}}%
+      }
+      \list{publisher}{1}{%
+        {Springer}%
+      }
+      \strng{namehash}{b8f4b56e19ed2a75c2ea664e0358e775}
+      \strng{fullhash}{315e95ac8ee12b18f6005ec665a1d044}
+      \strng{fullhashraw}{315e95ac8ee12b18f6005ec665a1d044}
+      \strng{bibnamehash}{315e95ac8ee12b18f6005ec665a1d044}
+      \strng{authorbibnamehash}{315e95ac8ee12b18f6005ec665a1d044}
+      \strng{authornamehash}{b8f4b56e19ed2a75c2ea664e0358e775}
+      \strng{authorfullhash}{315e95ac8ee12b18f6005ec665a1d044}
+      \strng{authorfullhashraw}{315e95ac8ee12b18f6005ec665a1d044}
+      \field{sortinit}{8}
+      \field{sortinithash}{a231b008ebf0ecbe0b4d96dcc159445f}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{journaltitle}{Journal of Intelligent Manufacturing}
+      \field{note}{Recent work on deep learning for industrial defect detection}
+      \field{number}{3}
+      \field{title}{Segmentation-based deep-learning approach for surface-defect detection}
+      \field{volume}{31}
+      \field{year}{2020}
+      \field{pages}{759\bibrangedash 776}
+      \range{pages}{18}
+      \verb{urlraw}
+      \verb https://link.springer.com/article/10.1007/s10845-019-01476-x
+      \endverb
+      \verb{url}
+      \verb https://link.springer.com/article/10.1007/s10845-019-01476-x
+      \endverb
+    \endentry
+    \entry{wei2020surface}{article}{}{}
+      \name{author}{3}{}{%
+        {{hash=d27acba8525c55d391db0030f50694ac}{%
+           family={Wei},
+           familyi={W\bibinitperiod},
+           given={Ruyi},
+           giveni={R\bibinitperiod}}}%
+        {{hash=e692f2c2b4e39525ec6f3a2d6ab2990b}{%
+           family={Song},
+           familyi={S\bibinitperiod},
+           given={Yubing},
+           giveni={Y\bibinitperiod}}}%
+        {{hash=28f91f3a4b62ce57b7a533e742e8aae1}{%
+           family={Zhang},
+           familyi={Z\bibinitperiod},
+           given={Yan},
+           giveni={Y\bibinitperiod}}}%
+      }
+      \list{publisher}{1}{%
+        {Springer}%
+      }
+      \strng{namehash}{a7b21d0d45e1acd947bcf10536eac62e}
+      \strng{fullhash}{51a97b0d9b24784683502864f2cde36a}
+      \strng{fullhashraw}{51a97b0d9b24784683502864f2cde36a}
+      \strng{bibnamehash}{51a97b0d9b24784683502864f2cde36a}
+      \strng{authorbibnamehash}{51a97b0d9b24784683502864f2cde36a}
+      \strng{authornamehash}{a7b21d0d45e1acd947bcf10536eac62e}
+      \strng{authorfullhash}{51a97b0d9b24784683502864f2cde36a}
+      \strng{authorfullhashraw}{51a97b0d9b24784683502864f2cde36a}
+      \field{sortinit}{8}
+      \field{sortinithash}{a231b008ebf0ecbe0b4d96dcc159445f}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{journaltitle}{The International Journal of Advanced Manufacturing Technology}
+      \field{note}{Application of ensemble learning for surface defect detection}
+      \field{title}{Surface defect detection based on ensemble learning}
+      \field{volume}{107}
+      \field{year}{2020}
+      \field{pages}{1\bibrangedash 14}
+      \range{pages}{14}
+      \verb{urlraw}
+      \verb https://link.springer.com/article/10.1007/s00170-020-05070-x
+      \endverb
+      \verb{url}
+      \verb https://link.springer.com/article/10.1007/s00170-020-05070-x
+      \endverb
+    \endentry
+    \entry{luo2021machine}{article}{}{}
+      \name{author}{5}{}{%
+        {{hash=dcc814e1726caf239cbbaf160c829bf6}{%
+           family={Luo},
+           familyi={L\bibinitperiod},
+           given={Qingsong},
+           giveni={Q\bibinitperiod}}}%
+        {{hash=1a1434cb16983fe23cee4e9cfb4d2bf8}{%
+           family={Fang},
+           familyi={F\bibinitperiod},
+           given={Xu},
+           giveni={X\bibinitperiod}}}%
+        {{hash=5d07f51a51d9c2c1363bab089c022727}{%
+           family={Liu},
+           familyi={L\bibinitperiod},
+           given={Lin},
+           giveni={L\bibinitperiod}}}%
+        {{hash=93f08fe07d3c3539a029104c572eaa73}{%
+           family={Yang},
+           familyi={Y\bibinitperiod},
+           given={Ce},
+           giveni={C\bibinitperiod}}}%
+        {{hash=ff4ca77a3c71fdeb3b4fb01b11a23e40}{%
+           family={Sun},
+           familyi={S\bibinitperiod},
+           given={Yuning},
+           giveni={Y\bibinitperiod}}}%
+      }
+      \list{publisher}{1}{%
+        {IEEE}%
+      }
+      \strng{namehash}{5bd9c57412fe25d978e965f3a81c3079}
+      \strng{fullhash}{909d21d8a53171b4c9e798c10a81ae73}
+      \strng{fullhashraw}{909d21d8a53171b4c9e798c10a81ae73}
+      \strng{bibnamehash}{909d21d8a53171b4c9e798c10a81ae73}
+      \strng{authorbibnamehash}{909d21d8a53171b4c9e798c10a81ae73}
+      \strng{authornamehash}{5bd9c57412fe25d978e965f3a81c3079}
+      \strng{authorfullhash}{909d21d8a53171b4c9e798c10a81ae73}
+      \strng{authorfullhashraw}{909d21d8a53171b4c9e798c10a81ae73}
+      \field{sortinit}{8}
+      \field{sortinithash}{a231b008ebf0ecbe0b4d96dcc159445f}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{journaltitle}{IEEE Transactions on Industrial Informatics}
+      \field{note}{Comprehensive survey of ML methods for industrial defect detection}
+      \field{number}{4}
+      \field{title}{Machine learning for industrial visual defect detection: A survey}
+      \field{volume}{18}
+      \field{year}{2021}
+      \field{pages}{2200\bibrangedash 2212}
+      \range{pages}{13}
+      \verb{urlraw}
+      \verb https://ieeexplore.ieee.org/document/9523398
+      \endverb
+      \verb{url}
+      \verb https://ieeexplore.ieee.org/document/9523398
+      \endverb
+    \endentry
+  \enddatalist
+\endrefsection
+\endinput
+
