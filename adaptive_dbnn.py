@@ -28,12 +28,10 @@ from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.colors import ListedColormap
 import imageio
 from scipy.spatial import ConvexHull
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
+
 import dbnn
 
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
+
 import pandas as pd
 import numpy as np
 import json
@@ -92,7 +90,12 @@ import json
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Any, Optional
-
+try:
+        # Import tkinter for GUI
+        import tkinter as tk
+        from tkinter import ttk, filedialog, messagebox, scrolledtext
+except:
+    pass
 
 class TOPCATIntegration:
     """
@@ -4517,7 +4520,6 @@ def launch_adaptive_gui():
         except Exception as e2:
             print(f"ERROR in alternative approach: {e2}")
 
-
 class DatasetConfig:
     """Dataset configuration handler"""
 
@@ -7320,9 +7322,11 @@ def run_gui_mode():
     print("\n🎨 Launching GUI Mode...")
 
     try:
+
         # Check if GUI dependencies are available
         import tkinter as tk
-        from adaptive_dbnn_gui import launch_adaptive_gui
+        #from adaptive_dbnn_gui import launch_adaptive_gui
+        from tkinter import ttk, filedialog, messagebox, scrolledtext
 
         print("✅ GUI dependencies available")
         launch_adaptive_gui()
