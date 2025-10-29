@@ -2820,73 +2820,8 @@ class AdaptiveDBNNGUI:
             return self.fallback_prediction_handling(predictions)
 
     def load_adaptive_model_for_prediction(self, model_path):
-        """Load adaptive_dbnn model using the actual structure it saves"""
-        try:
-            import gzip
-            import pickle
-
-            self.log_output(f"📥 Loading adaptive model: {model_path}")
-
-            # Load the model data using the same method as adaptive_dbnn
-            with gzip.open(model_path, 'rb') as f:
-                model_data = pickle.load(f)
-
-            self.log_output(f"📦 Model data keys: {list(model_data.keys())}")
-
-            # Extract the adaptive model components
-            self.adaptive_model = AdaptiveDBNN("prediction_mode")
-
-            # FIXED: The model data is stored directly, not under 'model' key
-            # Create the model wrapper and load core data directly
-            self.adaptive_model.model = DBNNWrapper("prediction_mode")
-            self.adaptive_model.model.core = dbnn.DBNNCore()
-
-            # Load the core model data directly from the model_data
-            self.load_core_model_data(self.adaptive_model.model.core, model_data)
-
-            # Load feature information
-            if 'feature_columns' in model_data:
-                self.adaptive_model.feature_columns = model_data['feature_columns']
-                self.log_output(f"📊 Loaded feature columns: {self.adaptive_model.feature_columns}")
-            else:
-                self.log_output("❌ No feature_columns found in model")
-                return False
-
-            if 'target_column' in model_data:
-                self.adaptive_model.target_column = model_data['target_column']
-                self.log_output(f"🎯 Target column: {self.adaptive_model.target_column}")
-            else:
-                self.log_output("❌ No target_column found in model")
-                return False
-
-            # Load configuration and training results
-            if 'config' in model_data:
-                self.adaptive_model.config = model_data['config']
-                self.log_output("⚙️ Model configuration loaded")
-
-            # Load training results for acid test comparison
-            if 'best_accuracy' in model_data:
-                self.adaptive_model.best_accuracy = model_data['best_accuracy']
-                self.log_output(f"🏆 Best accuracy from model: {self.adaptive_model.best_accuracy:.4f}")
-            else:
-                self.adaptive_model.best_accuracy = 0.0
-                self.log_output("⚠️ No best_accuracy found in model")
-
-            if 'is_trained' in model_data:
-                self.adaptive_model.model.core.is_trained = model_data['is_trained']
-                self.log_output(f"🔧 Model trained flag: {model_data['is_trained']}")
-
-            # CRITICAL: Verify the model is actually trained and encoder is fitted
-            self.validate_loaded_model()
-
-            self.log_output("✅ Adaptive model components loaded successfully")
-            return True
-
-        except Exception as e:
-            self.log_output(f"❌ Error loading adaptive model: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
+        """Load adaptive_dbnn model using the common ModelLoader"""
+        return ModelLoader.load_adaptive_model_for_prediction(self.adaptive_model, model_path)
 
     def load_core_model_data(self, core_instance, model_data):
         """Load core model data with proper encoder handling"""
@@ -3096,60 +3031,25 @@ class AdaptiveDBNNGUI:
             return False
 
     def predict_with_adaptive_model(self):
-        """Make predictions using the loaded adaptive model with comprehensive validation"""
-        try:
-            if not hasattr(self, 'adaptive_model') or not self.adaptive_model:
-                self.log_output("❌ No adaptive model loaded")
-                return None
+        """Make predictions using the common ModelLoader"""
+        if not hasattr(self, 'adaptive_model') or not self.adaptive_model:
+            self.log_output("❌ No adaptive model loaded")
+            return None
 
-            # Prepare data for prediction
-            if self.original_data is None:
-                self.log_output("❌ No data available for prediction")
-                return None
+        if self.original_data is None:
+            self.log_output("❌ No data available for prediction")
+            return None
 
-            # CRITICAL: Verify feature column order matches training
-            feature_columns = self.verify_feature_columns()
-            if not feature_columns:
-                return None
+        predictions, message = ModelLoader.predict_with_adaptive_model(
+            self.adaptive_model,
+            self.original_data
+        )
 
-            # Create feature matrix with exact same order as training
-            X_pred = self.original_data[feature_columns].values
-
-            self.log_output(f"📊 Making predictions on {len(X_pred)} samples...")
-
-            # DEBUG: Log first few samples to verify data
-            self.debug_prediction_data(X_pred, feature_columns)
-
-            # Use the adaptive model's predict method
-            if hasattr(self.adaptive_model, 'model') and self.adaptive_model.model:
-                predictions = self.adaptive_model.model.predict(X_pred)
-
-                # CRITICAL: Verify and decode predictions
-                decoded_predictions = self.verify_and_decode_predictions(predictions, X_pred)
-
-                if decoded_predictions is not None:
-                    self.log_output(f"✅ Generated {len(decoded_predictions)} predictions")
-
-                    # VALIDATION: Compare with actual labels if available (handles missing targets gracefully)
-                    self.validate_predictions_accuracy(decoded_predictions)
-
-                    # COMPARISON: Compare with acid test results if possible
-                    self.compare_with_acid_test(decoded_predictions)
-
-                    # Show prediction summary (always works, even without targets)
-                    self.show_prediction_summary(decoded_predictions)
-
-                    return decoded_predictions
-                else:
-                    return None
-            else:
-                self.log_output("❌ No model available for prediction")
-                return None
-
-        except Exception as e:
-            self.log_output(f"❌ Prediction error: {e}")
-            import traceback
-            traceback.print_exc()
+        if predictions is not None:
+            self.log_output(f"✅ {message}")
+            return predictions
+        else:
+            self.log_output(f"❌ {message}")
             return None
 
     def show_prediction_summary(self, decoded_predictions):
@@ -3464,62 +3364,20 @@ class AdaptiveDBNNGUI:
             self.log_output(f"⚠️ Discrepancy investigation error: {e}")
 
     def load_model(self):
-        """Load a model - UPDATED to handle both regular and adaptive_dbnn models"""
-        model_path = filedialog.askopenfilename(
-            title="Load Model",
-            filetypes=[("Model files", "*.bin"), ("JSON files", "*.json"), ("All files", "*.*")]
-        )
+        """Load a model using the common ModelLoader"""
+        success, message = ModelLoader.load_model(self.adaptive_model, gui_mode=True)
 
-        if model_path:
-            try:
-                self.log_output(f"📥 Loading model: {model_path}")
+        if success:
+            self.log_output("✅ Model loaded successfully!")
+            # Enable predict button if data is loaded
+            if self.data_loaded:
+                self.log_output("🎯 Model ready for prediction on current data")
+            else:
+                self.log_output("💡 Load data to make predictions")
+        else:
+            self.log_output(f"❌ {message}")
 
-                # First try to load as adaptive_dbnn model
-                success = self.load_adaptive_model_for_prediction(model_path)
-
-                if success:
-                    self.log_output("✅ Adaptive DBNN model loaded successfully!")
-                    self.model_loaded = True
-                    self.model_type = "adaptive"
-
-                    # Log model information
-                    if hasattr(self.adaptive_model, 'feature_columns') and self.adaptive_model.feature_columns:
-                        self.log_output(f"📊 Model features: {len(self.adaptive_model.feature_columns)}")
-                        self.log_output(f"📊 Feature names: {self.adaptive_model.feature_columns}")
-                    if hasattr(self.adaptive_model, 'target_column'):
-                        self.log_output(f"🎯 Target column: {self.adaptive_model.target_column}")
-
-                else:
-                    # Fall back to regular DBNN model loading
-                    self.log_output("🔄 Trying regular DBNN model format...")
-                    cmd_interface = dbnn.DBNNCommandLine()
-                    success = cmd_interface.load_model(model_path)
-
-                    if success:
-                        self.log_output("✅ Regular DBNN model loaded successfully!")
-                        self.cmd_interface = cmd_interface
-                        self.model_loaded = True
-                        self.model_type = "regular"
-
-                        # Log basic model info
-                        if hasattr(cmd_interface.core, 'innodes'):
-                            self.log_output(f"📊 Input nodes: {cmd_interface.core.innodes}")
-                        if hasattr(cmd_interface.core, 'outnodes'):
-                            self.log_output(f"📊 Output nodes: {cmd_interface.core.outnodes}")
-                    else:
-                        self.log_output("❌ Failed to load model in any format")
-                        return
-
-                # Enable predict button if data is loaded
-                if self.data_loaded:
-                    self.log_output("🎯 Model ready for prediction on current data")
-                else:
-                    self.log_output("💡 Load data to make predictions")
-
-            except Exception as e:
-                self.log_output(f"❌ Error loading model: {e}")
-                import traceback
-                traceback.print_exc()
+        return success
 
     def predict_with_loaded_model(self):
         """Predict using whichever model is loaded (adaptive or regular)"""
@@ -4497,28 +4355,6 @@ class AdaptiveDBNNGUI:
             print(f"adaptive_model.X_full: {hasattr(self.adaptive_model, 'X_full')}")
             if hasattr(self.adaptive_model, 'X_full'):
                 print(f"X_full: {self.adaptive_model.X_full.shape if self.adaptive_model.X_full is not None else 'None'}")
-
-def launch_adaptive_gui():
-    """Launch the Adaptive DBNN GUI."""
-    print("DEBUG: Starting GUI launch...")
-    try:
-        root = tk.Tk()
-        print("DEBUG: Root window created")
-        app = AdaptiveDBNNGUI(root)
-        print("DEBUG: AdaptiveDBNNGUI instance created")
-        root.mainloop()
-        print("DEBUG: GUI mainloop ended")
-    except Exception as e:
-        print(f"ERROR in GUI launch: {e}")
-        import traceback
-        traceback.print_exc()
-        # Try alternative approach
-        try:
-            print("DEBUG: Trying alternative approach...")
-            app = AdaptiveDBNNGUI()
-            app.root.mainloop()
-        except Exception as e2:
-            print(f"ERROR in alternative approach: {e2}")
 
 class DatasetConfig:
     """Dataset configuration handler"""
@@ -5841,6 +5677,707 @@ class DBNNWrapper:
 
         return self.train_with_data(X_train, y_train, reset_weights=False)
 
+class ModelLoader:
+    """Common model loading utilities for both GUI and command line"""
+
+    @staticmethod
+    def predict_with_adaptive_model(adaptive_model, original_data=None):
+        """Make predictions using the loaded adaptive model with comprehensive validation"""
+        try:
+            if not hasattr(adaptive_model, 'model') or not adaptive_model.model:
+                return None, "No adaptive model loaded"
+
+            # Prepare data for prediction
+            if original_data is None:
+                if hasattr(adaptive_model, 'original_data'):
+                    original_data = adaptive_model.original_data
+                elif hasattr(adaptive_model, 'data'):
+                    original_data = adaptive_model.data
+                else:
+                    return None, "No data available for prediction"
+
+            # CRITICAL: Verify feature column order matches training
+            feature_columns = ModelLoader._verify_feature_columns(adaptive_model, original_data)
+            if not feature_columns:
+                return None, "Feature column verification failed"
+
+            # Create feature matrix with exact same order as training
+            X_pred = original_data[feature_columns].values
+
+            print(f"📊 Making predictions on {len(X_pred)} samples...")
+
+            # DEBUG: Log first few samples to verify data
+            ModelLoader._debug_prediction_data(X_pred, feature_columns)
+
+            # Use the adaptive model's predict method
+            if hasattr(adaptive_model.model, 'predict'):
+                predictions = adaptive_model.model.predict(X_pred)
+
+                # CRITICAL: Verify and decode predictions
+                decoded_predictions = ModelLoader._verify_and_decode_predictions(adaptive_model, predictions, X_pred)
+
+                if decoded_predictions is not None:
+                    print(f"✅ Generated {len(decoded_predictions)} predictions")
+
+                    # VALIDATION: Compare with actual labels if available (handles missing targets gracefully)
+                    ModelLoader._validate_predictions_accuracy(adaptive_model, decoded_predictions, original_data)
+
+                    # Show prediction summary (always works, even without targets)
+                    ModelLoader._show_prediction_summary(decoded_predictions)
+
+                    return decoded_predictions, "Predictions generated successfully"
+                else:
+                    return None, "Prediction decoding failed"
+            else:
+                return None, "No model available for prediction"
+
+        except Exception as e:
+            error_msg = f"Prediction error: {e}"
+            print(f"❌ {error_msg}")
+            import traceback
+            traceback.print_exc()
+            return None, error_msg
+
+    @staticmethod
+    def _verify_feature_columns(adaptive_model, original_data):
+        """Verify feature columns exactly match training configuration"""
+        try:
+            # Get model's feature columns
+            model_features = getattr(adaptive_model, 'feature_columns', [])
+
+            if not model_features:
+                print("❌ No feature columns found in model")
+                return None
+
+            # Get current data columns
+            current_columns = list(original_data.columns)
+
+            print("🔍 VERIFYING FEATURE COLUMNS:")
+            print(f"   Model features ({len(model_features)}): {model_features}")
+            print(f"   Data columns ({len(current_columns)}): {current_columns}")
+
+            # Check if all model features exist in current data
+            missing_features = [f for f in model_features if f not in current_columns]
+            if missing_features:
+                print(f"❌ Missing features in data: {missing_features}")
+                return None
+
+            # Check for exact order match
+            if model_features != [col for col in current_columns if col in model_features]:
+                print("⚠️ Feature order doesn't match! Reordering...")
+                # Reorder columns to match model exactly
+                reordered_data = original_data[model_features]
+                print(f"✅ Columns reordered to match model: {list(reordered_data.columns)}")
+                return model_features
+            else:
+                print("✅ Feature columns and order match exactly!")
+                return model_features
+
+        except Exception as e:
+            print(f"❌ Feature verification error: {e}")
+            return None
+
+    @staticmethod
+    def _debug_prediction_data(X_pred, feature_columns):
+        """Debug the prediction data to ensure it matches training format"""
+        try:
+            print("🔍 PREDICTION DATA DEBUG:")
+            print(f"   Data shape: {X_pred.shape}")
+            print(f"   Feature order: {feature_columns[:5]}..." if len(feature_columns) > 5 else feature_columns)
+
+            # Show first sample values
+            if len(X_pred) > 0:
+                sample = X_pred[0]
+                print(f"   First sample: {sample[:5]}..." if len(sample) > 5 else sample)
+
+            # Show data statistics
+            print(f"   Data range: [{X_pred.min():.3f}, {X_pred.max():.3f}]")
+            print(f"   Data mean: {X_pred.mean():.3f}")
+
+        except Exception as e:
+            print(f"⚠️ Debug data error: {e}")
+
+    @staticmethod
+    def _verify_and_decode_predictions(adaptive_model, predictions, X_pred):
+        """Verify predictions and handle label decoding with comprehensive checks"""
+        try:
+            print("🔍 VERIFYING PREDICTIONS:")
+            print(f"   Raw predictions: {predictions[:10]}..." if len(predictions) > 10 else predictions)
+
+            # Check encoder status
+            core = adaptive_model.model.core
+            if hasattr(core, 'class_encoder') and core.class_encoder.is_fitted:
+                print("✅ Class encoder is fitted")
+
+                # Debug encoder mapping
+                ModelLoader._debug_encoder_mapping(core.class_encoder)
+
+                # Try to decode predictions
+                try:
+                    decoded_predictions = core.class_encoder.inverse_transform(predictions)
+                    print(f"✅ Predictions decoded successfully")
+
+                    # Verify decoding worked correctly
+                    unique_raw = set(predictions[:100])  # Check first 100 samples
+                    unique_decoded = set(decoded_predictions[:100])
+                    print(f"   Unique raw values: {unique_raw}")
+                    print(f"   Unique decoded values: {unique_decoded}")
+
+                    return decoded_predictions
+
+                except Exception as decode_error:
+                    print(f"❌ Decoding failed: {decode_error}")
+                    return ModelLoader._fallback_prediction_handling(predictions)
+            else:
+                print("❌ Class encoder not fitted properly")
+                return ModelLoader._fallback_prediction_handling(predictions)
+
+        except Exception as e:
+            print(f"❌ Prediction verification error: {e}")
+            return ModelLoader._fallback_prediction_handling(predictions)
+
+    @staticmethod
+    def _debug_encoder_mapping(encoder):
+        """Debug the encoder mapping to ensure labels match"""
+        try:
+            if hasattr(encoder, 'encoded_to_class') and encoder.encoded_to_class:
+                print("🔤 ENCODER MAPPING:")
+                for encoded_val, class_name in sorted(encoder.encoded_to_class.items()):
+                    print(f"   {encoded_val} -> {class_name}")
+
+        except Exception as e:
+            print(f"⚠️ Encoder debug error: {e}")
+
+    @staticmethod
+    def _fallback_prediction_handling(predictions):
+        """Fallback when encoder decoding fails"""
+        try:
+            print("🔄 Using fallback prediction handling")
+
+            # Convert to string representations
+            decoded = []
+            for pred in predictions:
+                if isinstance(pred, (int, float)):
+                    decoded.append(f"Class_{int(pred)}")
+                else:
+                    decoded.append(str(pred))
+
+            print(f"✅ Fallback decoding applied to {len(decoded)} predictions")
+            return decoded
+
+        except Exception as e:
+            print(f"❌ Fallback handling failed: {e}")
+            return [str(p) for p in predictions]
+
+    @staticmethod
+    def _validate_predictions_accuracy(adaptive_model, decoded_predictions, original_data):
+        """Validate prediction accuracy if ground truth is available, handle gracefully if not"""
+        try:
+            # Check if we have target column for validation
+            target_column = getattr(adaptive_model, 'target_column', None)
+
+            if not target_column:
+                print("ℹ️ No target column defined in model - skipping accuracy validation")
+                return
+
+            if target_column not in original_data.columns:
+                print("ℹ️ Target column not found in prediction data - skipping accuracy validation")
+                return
+
+            actual_labels = original_data[target_column].values
+
+            # Ensure we have the same number of predictions and actual labels
+            if len(decoded_predictions) != len(actual_labels):
+                print("⚠️ Prediction/actual count mismatch - cannot validate accuracy")
+                return
+
+            # Calculate accuracy
+            correct = sum(1 for pred, actual in zip(decoded_predictions, actual_labels)
+                        if str(pred) == str(actual))
+            accuracy = (correct / len(actual_labels)) * 100
+
+            print(f"🎯 PREDICTION ACCURACY VALIDATION:")
+            print(f"   Correct: {correct}/{len(actual_labels)}")
+            print(f"   Accuracy: {accuracy:.2f}%")
+
+            # Show confusion for first few mismatches (only if we have significant errors)
+            if correct < len(actual_labels):  # If there are errors
+                mismatches = []
+                for i, (pred, actual) in enumerate(zip(decoded_predictions, actual_labels)):
+                    if str(pred) != str(actual):
+                        mismatches.append((i, pred, actual))
+                    if len(mismatches) >= 3:  # Show only first 3 mismatches
+                        break
+
+                if mismatches:
+                    print("   Sample mismatches (index, predicted, actual):")
+                    for idx, pred, actual in mismatches:
+                        print(f"     [{idx}]: {pred} != {actual}")
+            else:
+                print("   ✅ Perfect prediction match!")
+
+        except Exception as e:
+            print(f"⚠️ Accuracy validation error: {e}")
+
+    @staticmethod
+    def _show_prediction_summary(decoded_predictions):
+        """Show prediction summary that works regardless of target availability"""
+        try:
+            from collections import Counter
+
+            # Count predictions
+            pred_counts = Counter(decoded_predictions)
+            total_samples = len(decoded_predictions)
+
+            print("\n🎯 PREDICTION SUMMARY:")
+            print("=" * 40)
+            print(f"Total samples predicted: {total_samples}")
+
+            # Show prediction distribution
+            print("\nPrediction Distribution:")
+            for pred, count in pred_counts.most_common():
+                percentage = (count / total_samples) * 100
+                print(f"  {pred}: {count} samples ({percentage:.1f}%)")
+
+            print(f"\nPrediction completed successfully!")
+            print("=" * 40)
+
+        except Exception as e:
+            print(f"⚠️ Prediction summary error: {e}")
+
+    @staticmethod
+    def load_model(adaptive_model, model_path=None, gui_mode=False):
+        """Load a model - handles both regular and adaptive_dbnn models"""
+        if model_path is None:
+            # If no path provided, show file dialog in GUI mode
+            if gui_mode:
+                from tkinter import filedialog
+                model_path = filedialog.askopenfilename(
+                    title="Load Model",
+                    filetypes=[("Model files", "*.bin"), ("JSON files", "*.json"), ("All files", "*.*")]
+                )
+                if not model_path:
+                    return False, "No file selected"
+            else:
+                return False, "No model path provided"
+
+        try:
+            print(f"📥 Loading model: {model_path}")
+
+            # First try to load as adaptive_dbnn model
+            success = ModelLoader.load_adaptive_model_for_prediction(adaptive_model, model_path)
+
+            if success:
+                print("✅ Adaptive DBNN model loaded successfully!")
+                adaptive_model.model_loaded = True
+                adaptive_model.model_type = "adaptive"
+
+                # Log model information
+                if hasattr(adaptive_model, 'feature_columns') and adaptive_model.feature_columns:
+                    print(f"📊 Model features: {len(adaptive_model.feature_columns)}")
+                    print(f"📊 Feature names: {adaptive_model.feature_columns}")
+                if hasattr(adaptive_model, 'target_column'):
+                    print(f"🎯 Target column: {adaptive_model.target_column}")
+
+                return True, "Adaptive DBNN model loaded successfully"
+
+            else:
+                # Fall back to regular DBNN model loading
+                print("🔄 Trying regular DBNN model format...")
+                cmd_interface = dbnn.DBNNCommandLine()
+                success = cmd_interface.load_model(model_path)
+
+                if success:
+                    print("✅ Regular DBNN model loaded successfully!")
+                    adaptive_model.cmd_interface = cmd_interface
+                    adaptive_model.model_loaded = True
+                    adaptive_model.model_type = "regular"
+
+                    # Log basic model info
+                    if hasattr(cmd_interface.core, 'innodes'):
+                        print(f"📊 Input nodes: {cmd_interface.core.innodes}")
+                    if hasattr(cmd_interface.core, 'outnodes'):
+                        print(f"📊 Output nodes: {cmd_interface.core.outnodes}")
+
+                    return True, "Regular DBNN model loaded successfully"
+                else:
+                    return False, "Failed to load model in any format"
+
+        except Exception as e:
+            error_msg = f"Error loading model: {e}"
+            print(f"❌ {error_msg}")
+            import traceback
+            traceback.print_exc()
+            return False, error_msg
+
+    @staticmethod
+    def load_adaptive_model_for_prediction(adaptive_model, model_path):
+        """Load adaptive_dbnn model using the actual structure it saves"""
+        try:
+            import gzip
+            import pickle
+
+            print(f"📥 Loading adaptive model: {model_path}")
+
+            # Load the model data using the same method as adaptive_dbnn
+            with gzip.open(model_path, 'rb') as f:
+                model_data = pickle.load(f)
+
+            print(f"📦 Model data keys: {list(model_data.keys())}")
+
+            # Extract the adaptive model components
+            adaptive_model.model = DBNNWrapper("prediction_mode")
+
+            # Create the model wrapper and load core data directly
+            adaptive_model.model.core = dbnn.DBNNCore()
+
+            # Load the core model data directly from the model_data
+            ModelLoader._load_core_model_data(adaptive_model.model.core, model_data)
+
+            # Load feature information
+            if 'feature_columns' in model_data:
+                adaptive_model.feature_columns = model_data['feature_columns']
+                print(f"📊 Loaded feature columns: {adaptive_model.feature_columns}")
+            else:
+                print("❌ No feature_columns found in model")
+                return False
+
+            if 'target_column' in model_data:
+                adaptive_model.target_column = model_data['target_column']
+                print(f"🎯 Target column: {adaptive_model.target_column}")
+            else:
+                print("❌ No target_column found in model")
+                return False
+
+            # Load configuration and training results
+            if 'config' in model_data:
+                adaptive_model.config = model_data['config']
+                print("⚙️ Model configuration loaded")
+
+            # Load training results for acid test comparison
+            if 'best_accuracy' in model_data:
+                adaptive_model.best_accuracy = model_data['best_accuracy']
+                print(f"🏆 Best accuracy from model: {adaptive_model.best_accuracy:.4f}")
+            else:
+                adaptive_model.best_accuracy = 0.0
+                print("⚠️ No best_accuracy found in model")
+
+            if 'is_trained' in model_data:
+                adaptive_model.model.core.is_trained = model_data['is_trained']
+                print(f"🔧 Model trained flag: {model_data['is_trained']}")
+
+            # CRITICAL: Verify the model is actually trained and encoder is fitted
+            ModelLoader._validate_loaded_model(adaptive_model)
+
+            print("✅ Adaptive model components loaded successfully")
+            return True
+
+        except Exception as e:
+            print(f"❌ Error loading adaptive model: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    @staticmethod
+    def _load_core_model_data(core_instance, model_data):
+        """Load core model data with proper encoder handling"""
+        try:
+            # Load basic configuration
+            if 'config' in model_data:
+                core_instance.config = model_data['config']
+
+            # Load arrays - handle both direct arrays and the actual data structure
+            array_mappings = [
+                ('anti_net', np.int32),
+                ('anti_wts', np.float64),
+                ('binloc', np.float64),
+                ('max_val', np.float64),
+                ('min_val', np.float64),
+                ('class_labels', np.float64),
+                ('resolution_arr', np.int32)
+            ]
+
+            for field_name, dtype in array_mappings:
+                if field_name in model_data and model_data[field_name] is not None:
+                    if isinstance(model_data[field_name], (list, np.ndarray)):
+                        if isinstance(model_data[field_name], list):
+                            loaded_array = np.array(model_data[field_name], dtype=dtype)
+                        else:
+                            loaded_array = model_data[field_name].astype(dtype)
+                        setattr(core_instance, field_name, loaded_array)
+                        print(f"   Loaded {field_name}: shape {loaded_array.shape}")
+                    else:
+                        print(f"⚠️ {field_name} is not a list/array: {type(model_data[field_name])}")
+
+            # Infer dimensions from arrays
+            if hasattr(core_instance, 'anti_net') and core_instance.anti_net is not None:
+                core_instance.innodes = core_instance.anti_net.shape[0] - 2
+                core_instance.outnodes = core_instance.anti_net.shape[4] - 2
+                print(f"📊 Model dimensions: {core_instance.innodes} inputs, {core_instance.outnodes} outputs")
+            elif 'innodes' in model_data and 'outnodes' in model_data:
+                core_instance.innodes = model_data['innodes']
+                core_instance.outnodes = model_data['outnodes']
+                print(f"📊 Model dimensions from metadata: {core_instance.innodes} inputs, {core_instance.outnodes} outputs")
+
+            # Load class encoder with robust error handling
+            if 'class_encoder' in model_data:
+                encoder_data = model_data['class_encoder']
+                ModelLoader._load_class_encoder(core_instance.class_encoder, encoder_data)
+            else:
+                print("❌ No class_encoder found in model data")
+                # Try to infer encoder from class_labels
+                ModelLoader._infer_encoder_from_class_labels(core_instance)
+
+            # Set training status
+            if 'is_trained' in model_data:
+                core_instance.is_trained = model_data['is_trained']
+            else:
+                core_instance.is_trained = True  # Assume trained if we have arrays
+
+            return True
+
+        except Exception as e:
+            print(f"❌ Error loading core model data: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    @staticmethod
+    def _load_class_encoder(encoder_instance, encoder_data):
+        """Load class encoder with proper error handling"""
+        try:
+            print("🔤 Loading class encoder...")
+
+            if isinstance(encoder_data, dict):
+                if 'encoded_to_class' in encoder_data and 'class_to_encoded' in encoder_data:
+                    # Convert keys to appropriate types
+                    encoded_to_class = {}
+                    for k, v in encoder_data['encoded_to_class'].items():
+                        try:
+                            if isinstance(k, str):
+                                # Handle string keys - try to convert to float
+                                key = float(k) if k.replace('.', '').replace('-', '').isdigit() else k
+                            else:
+                                key = float(k) if isinstance(k, (int, float)) else k
+                            encoded_to_class[key] = v
+                        except (ValueError, TypeError) as e:
+                            print(f"⚠️ Could not convert encoder key {k}: {e}")
+                            encoded_to_class[k] = v  # Keep as is
+
+                    class_to_encoded = {}
+                    for k, v in encoder_data['class_to_encoded'].items():
+                        try:
+                            if isinstance(v, str):
+                                # Handle string values - try to convert to float
+                                value = float(v) if v.replace('.', '').replace('-', '').isdigit() else v
+                            else:
+                                value = float(v) if isinstance(v, (int, float)) else v
+                            class_to_encoded[k] = value
+                        except (ValueError, TypeError) as e:
+                            print(f"⚠️ Could not convert encoder value {v}: {e}")
+                            class_to_encoded[k] = v  # Keep as is
+
+                    encoder_instance.encoded_to_class = encoded_to_class
+                    encoder_instance.class_to_encoded = class_to_encoded
+                    encoder_instance.is_fitted = True
+
+                    print(f"✅ Class encoder loaded with {len(encoded_to_class)} classes")
+                    if encoded_to_class:
+                        sample = list(encoded_to_class.items())[:3]
+                        print(f"📋 Sample classes: {sample}")
+                else:
+                    print("❌ No encoder mapping found in encoder_data")
+                    encoder_instance.is_fitted = False
+            else:
+                print(f"❌ encoder_data is not a dict: {type(encoder_data)}")
+                encoder_instance.is_fitted = False
+
+        except Exception as e:
+            print(f"❌ Error loading class encoder: {e}")
+            encoder_instance.is_fitted = False
+
+    @staticmethod
+    def _infer_encoder_from_class_labels(core_instance):
+        """Infer encoder from class_labels values as fallback"""
+        try:
+            if hasattr(core_instance, 'class_labels') and core_instance.class_labels is not None:
+                # Extract class values from class_labels (skip margin at index 0)
+                class_values = []
+                for i in range(1, min(len(core_instance.class_labels), core_instance.outnodes + 1)):
+                    if core_instance.class_labels[i] != 0:  # Skip zero values
+                        class_values.append(core_instance.class_labels[i])
+
+                if class_values:
+                    # Create basic encoder mapping
+                    encoded_to_class = {}
+                    class_to_encoded = {}
+                    for i, class_val in enumerate(class_values, 1):
+                        encoded_to_class[float(i)] = f"Class_{class_val}"
+                        class_to_encoded[f"Class_{class_val}"] = float(i)
+
+                    core_instance.class_encoder.encoded_to_class = encoded_to_class
+                    core_instance.class_encoder.class_to_encoded = class_to_encoded
+                    core_instance.class_encoder.is_fitted = True
+
+                    print(f"✅ Inferred encoder from class_labels with {len(class_values)} classes")
+                    return True
+
+            print("⚠️ Could not infer encoder from class_labels")
+            core_instance.class_encoder.is_fitted = False
+            return False
+
+        except Exception as e:
+            print(f"❌ Error inferring encoder from class_labels: {e}")
+            core_instance.class_encoder.is_fitted = False
+            return False
+
+    @staticmethod
+    def _validate_loaded_model(adaptive_model):
+        """Validate that the loaded model is properly trained and has fitted encoder"""
+        try:
+            core = adaptive_model.model.core
+
+            print("🔍 MODEL VALIDATION:")
+
+            # Check if model is trained
+            if hasattr(core, 'is_trained'):
+                print(f"   Model trained: {core.is_trained}")
+            else:
+                print("❌ Model training status unknown")
+
+            # Check encoder status
+            if hasattr(core, 'class_encoder'):
+                encoder = core.class_encoder
+                if hasattr(encoder, 'is_fitted'):
+                    print(f"   Encoder fitted: {encoder.is_fitted}")
+
+                    if encoder.is_fitted:
+                        # Check encoder contents
+                        if hasattr(encoder, 'encoded_to_class') and encoder.encoded_to_class:
+                            print(f"   Encoded classes: {len(encoder.encoded_to_class)}")
+                            for encoded, class_name in sorted(encoder.encoded_to_class.items()):
+                                print(f"     {encoded} -> {class_name}")
+                        else:
+                            print("❌ Encoder has no class mappings")
+                            encoder.is_fitted = False
+                    else:
+                        print("❌ Encoder is not fitted - attempting emergency recovery")
+                        ModelLoader._emergency_encoder_recovery(adaptive_model, core)
+                else:
+                    print("❌ Encoder fitted status unknown")
+            else:
+                print("❌ No class encoder found")
+
+            # Check model arrays
+            required_arrays = ['anti_net', 'anti_wts', 'class_labels']
+            arrays_loaded = True
+            for array_name in required_arrays:
+                if hasattr(core, array_name) and getattr(core, array_name) is not None:
+                    array = getattr(core, array_name)
+                    if hasattr(array, 'shape'):
+                        print(f"   {array_name}: shape {array.shape}")
+                    else:
+                        print(f"   {array_name}: loaded but no shape info")
+                else:
+                    print(f"❌ Missing required array: {array_name}")
+                    arrays_loaded = False
+
+            if not arrays_loaded:
+                print("❌ Critical model arrays missing - model may not work")
+
+        except Exception as e:
+            print(f"⚠️ Model validation error: {e}")
+
+    @staticmethod
+    def _emergency_encoder_recovery(adaptive_model, core):
+        """Emergency recovery for unfitted encoder"""
+        try:
+            print("🔄 Attempting emergency encoder recovery...")
+
+            # Method 1: Try to get classes from class_labels
+            if hasattr(core, 'class_labels') and core.class_labels is not None:
+                class_labels = core.class_labels
+                print(f"   class_labels values: {[class_labels[i] for i in range(min(10, len(class_labels)))]}")
+
+                # Extract class values from class_labels (skip margin at index 0)
+                class_values = []
+                for i in range(1, min(len(class_labels), getattr(core, 'outnodes', 10) + 1)):
+                    if class_labels[i] != 0 and not np.isnan(class_labels[i]):
+                        class_values.append(class_labels[i])
+
+                if class_values:
+                    print(f"   Found {len(class_values)} classes in class_labels: {class_values}")
+
+                    # Create encoder mapping
+                    core.class_encoder.encoded_to_class = {}
+                    core.class_encoder.class_to_encoded = {}
+
+                    for i, class_val in enumerate(class_values, 1):
+                        encoded_val = float(i)
+                        class_name = f"Class_{class_val}"
+                        core.class_encoder.encoded_to_class[encoded_val] = class_name
+                        core.class_encoder.class_to_encoded[class_name] = encoded_val
+
+                    core.class_encoder.is_fitted = True
+                    print(f"✅ Emergency recovery: Created encoder with {len(class_values)} classes")
+                    print(f"   Encoder mapping: {core.class_encoder.encoded_to_class}")
+                    return True
+
+            # Method 2: If we have target data, infer from it
+            if hasattr(adaptive_model, 'data') and hasattr(adaptive_model, 'target_column') and adaptive_model.target_column in adaptive_model.data.columns:
+                unique_classes = adaptive_model.data[adaptive_model.target_column].unique()
+                print(f"   Found {len(unique_classes)} unique classes in target data: {list(unique_classes)}")
+
+                core.class_encoder.encoded_to_class = {}
+                core.class_encoder.class_to_encoded = {}
+
+                for i, class_val in enumerate(unique_classes, 1):
+                    encoded_val = float(i)
+                    core.class_encoder.encoded_to_class[encoded_val] = str(class_val)
+                    core.class_encoder.class_to_encoded[str(class_val)] = encoded_val
+
+                core.class_encoder.is_fitted = True
+                print(f"✅ Emergency recovery: Created encoder from target data with {len(unique_classes)} classes")
+                return True
+
+            print("❌ Emergency encoder recovery failed")
+            return False
+
+        except Exception as e:
+            print(f"❌ Emergency recovery error: {e}")
+            return False
+
+
+    @staticmethod
+    def get_available_model_files():
+        """Get list of available model files"""
+        model_files = glob.glob("Models/*.bin") + glob.glob("Models/*.pkl") + glob.glob("*.bin") + glob.glob("*.pkl")
+        return model_files
+
+    @staticmethod
+    def select_model_file_interactive():
+        """Interactive model file selection for command line"""
+        model_files = ModelLoader.get_available_model_files()
+
+        if not model_files:
+            print("❌ No model files found.")
+            return None
+
+        print("Available models:")
+        for i, file in enumerate(model_files, 1):
+            print(f"  {i}. {os.path.basename(file)}")
+
+        try:
+            choice = int(input(f"\nSelect model (1-{len(model_files)}): "))
+            if 1 <= choice <= len(model_files):
+                return model_files[choice - 1]
+            else:
+                print("❌ Invalid selection.")
+                return None
+        except ValueError:
+            print("❌ Please enter a valid number.")
+            return None
+
 class AdaptiveDBNN:
     """
     Advanced Adaptive Learning DBNN with comprehensive feature support
@@ -6905,7 +7442,6 @@ class AdaptiveDBNNCommandLine:
         except Exception as e:
             print(f"❌ Error reading configuration: {e}")
 
-
     def configure_parameters(self):
         """Configure adaptive learning parameters including target and features"""
         if not self.adaptive_model:
@@ -6991,23 +7527,28 @@ class AdaptiveDBNNCommandLine:
         print("\n🎛️  ADAPTIVE LEARNING PARAMETERS")
         print("Configure adaptive learning parameters (press Enter to keep current value):")
 
-        # Current configuration
+        # Current configuration - combine both adaptive_config and config
         current_config = self.adaptive_model.adaptive_config.copy()
+        current_config.update(self.adaptive_model.config)
 
         params = {
-            'initial_samples_per_class': ('Initial samples per class', 'int'),
-            'max_adaptive_rounds': ('Maximum adaptive rounds', 'int'),
-            'max_margin_samples_per_class': ('Max margin samples per class', 'int'),
-            'margin_tolerance': ('Margin tolerance', 'float'),
-            'patience': ('Early stopping patience', 'int'),
-            'min_improvement': ('Minimum improvement threshold', 'float'),
-            'enable_acid_test': ('Enable acid test (True/False)', 'bool'),
-            'enable_visualization': ('Enable visualization (True/False)', 'bool')
+            'initial_samples_per_class': ('Initial samples per class', 'int', 10),
+            'max_adaptive_rounds': ('Maximum adaptive rounds', 'int', 200),
+            'max_margin_samples_per_class': ('Max margin samples per class', 'int', 300),
+            'margin_tolerance': ('Margin tolerance', 'float', 0.15),
+            'patience': ('Early stopping patience', 'int', 10),
+            'min_improvement': ('Minimum improvement threshold', 'float', 0.0000001),
+            'enable_acid_test': ('Enable acid test (True/False)', 'bool', True),
+            'enable_visualization': ('Enable visualization (True/False)', 'bool', True),
+            'resol': ('Resolution', 'int', 100),
+            'gain': ('Gain', 'float', 2.0),
+            'margin': ('Margin', 'float', 0.2),
+            'max_epochs': ('Max epochs', 'int', 100)
         }
 
         new_config = {}
-        for key, (description, param_type) in params.items():
-            current = current_config.get(key, '')
+        for key, (description, param_type, default) in params.items():
+            current = current_config.get(key, default)
             new_value = input(f"{description} [{current}]: ").strip()
 
             if new_value:
@@ -7027,11 +7568,26 @@ class AdaptiveDBNNCommandLine:
                         new_config[key] = new_value
                 except ValueError:
                     print(f"⚠️  Invalid value for {key}, keeping current.")
+            else:
+                # Keep current value if user pressed Enter
+                new_config[key] = current
 
-        # Update configuration
+        # Update configurations
         if new_config:
-            self.adaptive_model.adaptive_config.update(new_config)
-            self.adaptive_model.config.update(new_config)
+            # Update adaptive config
+            adaptive_keys = ['initial_samples_per_class', 'max_adaptive_rounds', 'max_margin_samples_per_class',
+                            'margin_tolerance', 'patience', 'min_improvement', 'enable_acid_test', 'enable_visualization']
+            for key in adaptive_keys:
+                if key in new_config:
+                    self.adaptive_model.adaptive_config[key] = new_config[key]
+
+            # Update model config
+            model_keys = ['resol', 'gain', 'margin', 'max_epochs']
+            for key in model_keys:
+                if key in new_config:
+                    self.adaptive_model.config[key] = new_config[key]
+                    self.adaptive_model.model.config[key] = new_config[key]
+
             print("✅ Configuration updated!")
 
         # Save configuration to file
@@ -7120,12 +7676,24 @@ class AdaptiveDBNNCommandLine:
             config_data = self._load_configuration(dataset_name)
 
             if config_data:
-                # Use existing configuration
+                # Use existing configuration to create the adaptive model
                 print("🎯 Using saved configuration...")
-                self.adaptive_model = AdaptiveDBNN(dataset_name, config_data.get('model_config', {}))
+
+                # Create model config from saved configuration
+                model_config = config_data.get('model_config', {})
+                model_config.update({
+                    'target_column': config_data.get('target_column', 'target'),
+                    'feature_columns': config_data.get('feature_columns', [])
+                })
+
+                # Create adaptive model with the loaded configuration
+                self.adaptive_model = AdaptiveDBNN(dataset_name, model_config)
+
+                # Apply all saved configurations
                 self.adaptive_model.target_column = config_data.get('target_column', 'target')
                 self.adaptive_model.feature_columns = config_data.get('feature_columns', [])
                 self.adaptive_model.adaptive_config.update(config_data.get('adaptive_config', {}))
+                self.adaptive_model.config.update(config_data.get('model_config', {}))
 
                 print(f"✅ Loaded configuration:")
                 print(f"   Target: {self.adaptive_model.target_column}")
@@ -7156,6 +7724,11 @@ class AdaptiveDBNNCommandLine:
             if not config_data:
                 print("\n🔧 Configuration required before training.")
                 self.configure_parameters()
+            else:
+                # Even with saved config, allow user to modify if needed
+                modify_config = input("\n🔧 Modify configuration? (y/n): ").strip().lower()
+                if modify_config == 'y':
+                    self.configure_parameters()
 
         except Exception as e:
             print(f"❌ Error loading dataset: {e}")
@@ -7171,16 +7744,34 @@ class AdaptiveDBNNCommandLine:
         print("\n🎯 RUNNING ADAPTIVE LEARNING")
         print("-" * 30)
 
+        # Verify configuration is set
+        if not hasattr(self.adaptive_model, 'feature_columns') or not self.adaptive_model.feature_columns:
+            print("❌ No feature columns configured. Please configure parameters first.")
+            return
+
+        if not hasattr(self.adaptive_model, 'target_column') or not self.adaptive_model.target_column:
+            print("❌ No target column configured. Please configure parameters first.")
+            return
+
         try:
-            # Initialize with full data
+            # Show current configuration
+            print("🔧 Current Configuration:")
+            print(f"   Target: {self.adaptive_model.target_column}")
+            print(f"   Features: {len(self.adaptive_model.feature_columns)} columns")
+            print(f"   Adaptive Rounds: {self.adaptive_model.adaptive_config.get('max_adaptive_rounds', 200)}")
+            print(f"   Initial Samples/Class: {self.adaptive_model.adaptive_config.get('initial_samples_per_class', 10)}")
+
+            # Initialize with full data using the configured feature columns
             print("🏗️ Initializing DBNN architecture...")
-            self.adaptive_model.initialize_with_full_data()
+            self.adaptive_model.initialize_with_full_data(self.adaptive_model.feature_columns)
 
             # Run adaptive learning
             print("🚀 Starting adaptive learning...")
             start_time = time.time()
 
-            X_train, y_train, X_test, y_test = self.adaptive_model.adaptive_learn()
+            X_train, y_train, X_test, y_test = self.adaptive_model.adaptive_learn(
+                feature_columns=self.adaptive_model.feature_columns
+            )
 
             training_time = time.time() - start_time
 
@@ -7251,69 +7842,62 @@ class AdaptiveDBNNCommandLine:
             print(f"❌ Error saving model: {e}")
 
     def load_model(self):
-        """Load saved model"""
-        model_files = glob.glob("Models/*.bin") + glob.glob("Models/*.pkl")
+        """Load saved model using common ModelLoader"""
+        model_path = ModelLoader.select_model_file_interactive()
 
-        if not model_files:
-            print("❌ No model files found in Models directory.")
+        if not model_path:
             return
 
-        print("Available models:")
-        for i, file in enumerate(model_files, 1):
-            print(f"  {i}. {os.path.basename(file)}")
+        # Initialize adaptive model for loading if not already done
+        if not self.adaptive_model:
+            self.adaptive_model = AdaptiveDBNN("loaded_model")
 
-        try:
-            choice = int(input(f"\nSelect model (1-{len(model_files)}): "))
-            if 1 <= choice <= len(model_files):
-                model_path = model_files[choice - 1]
-                print(f"📥 Loading model: {model_path}")
+        # Load using the common ModelLoader
+        success, message = ModelLoader.load_model(self.adaptive_model, model_path, gui_mode=False)
 
-                # Initialize adaptive model for loading
-                self.adaptive_model = AdaptiveDBNN("loaded_model")
+        if success:
+            print("✅ Model loaded successfully!")
+            if hasattr(self.adaptive_model, 'best_accuracy'):
+                print(f"🏆 Model accuracy: {self.adaptive_model.best_accuracy:.4f}")
 
-                # Load using the model's load functionality
-                success = self.adaptive_model.load_adaptive_model_for_prediction(model_path)
-
-                if success:
-                    print("✅ Model loaded successfully!")
-                    if hasattr(self.adaptive_model, 'best_accuracy'):
-                        print(f"🏆 Model accuracy: {self.adaptive_model.best_accuracy:.4f}")
-                else:
-                    print("❌ Failed to load model.")
-            else:
-                print("❌ Invalid selection.")
-        except ValueError:
-            print("❌ Please enter a valid number.")
-        except Exception as e:
-            print(f"❌ Error loading model: {e}")
+            # Show model information
+            if hasattr(self.adaptive_model, 'feature_columns'):
+                print(f"📊 Features: {len(self.adaptive_model.feature_columns)}")
+            if hasattr(self.adaptive_model, 'target_column'):
+                print(f"🎯 Target: {self.adaptive_model.target_column}")
+        else:
+            print(f"❌ {message}")
 
     def make_predictions(self):
-        """Make predictions with loaded model"""
+        """Make predictions with loaded model using common ModelLoader"""
         if not self.adaptive_model:
             print("❌ Please load a model or dataset first.")
             return
 
         # Check if we have data for prediction
-        if not hasattr(self.adaptive_model, 'X_full') or self.adaptive_model.X_full is None:
+        if not hasattr(self.adaptive_model, 'X_full') and not hasattr(self.adaptive_model, 'data'):
             print("❌ No data available for prediction.")
             return
 
         try:
             print("🔮 Making predictions...")
-            predictions = self.adaptive_model.predict_with_adaptive_model()
+
+            # Get the data for prediction
+            original_data = None
+            if hasattr(self.adaptive_model, 'original_data'):
+                original_data = self.adaptive_model.original_data
+            elif hasattr(self.adaptive_model, 'data'):
+                original_data = self.adaptive_model.data
+
+            predictions, message = ModelLoader.predict_with_adaptive_model(
+                self.adaptive_model,
+                original_data
+            )
 
             if predictions is not None:
-                print(f"✅ Generated {len(predictions)} predictions")
+                print(f"✅ {message}")
 
-                # Show prediction distribution
-                from collections import Counter
-                pred_counts = Counter(predictions)
-                print("\n📊 Prediction Distribution:")
-                for pred, count in pred_counts.most_common():
-                    percentage = (count / len(predictions)) * 100
-                    print(f"  {pred}: {count} samples ({percentage:.1f}%)")
-
-                # Save predictions
+                # Save predictions option
                 save_choice = input("\n💾 Save predictions to file? (y/n): ").lower()
                 if save_choice == 'y':
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -7323,20 +7907,23 @@ class AdaptiveDBNNCommandLine:
                         'Prediction': predictions
                     })
 
-                    if hasattr(self.adaptive_model, 'X_full'):
-                        # Add features if available
-                        for i, col in enumerate(self.adaptive_model.feature_columns):
-                            if i < self.adaptive_model.X_full.shape[1]:
-                                results_df[col] = self.adaptive_model.X_full[:, i]
+                    if original_data is not None:
+                        # Add original data if available
+                        results_df = pd.concat([original_data.reset_index(drop=True), results_df], axis=1)
 
                     results_df.to_csv(output_file, index=False)
                     print(f"✅ Predictions saved to: {output_file}")
 
+                return predictions
             else:
-                print("❌ Prediction failed.")
+                print(f"❌ {message}")
+                return None
 
         except Exception as e:
             print(f"❌ Error during prediction: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     def generate_visualizations(self):
         """Generate comprehensive visualizations"""
@@ -7371,12 +7958,35 @@ class AdaptiveDBNNCommandLine:
             print(f"❌ Error generating visualizations: {e}")
 
 
+#=====================main function begins =============================
+
+def launch_adaptive_gui():
+        """Launch the Adaptive DBNN GUI."""
+        print("DEBUG: Starting GUI launch...")
+        try:
+            root = tk.Tk()
+            print("DEBUG: Root window created")
+            app = AdaptiveDBNNGUI(root)
+            print("DEBUG: AdaptiveDBNNGUI instance created")
+            root.mainloop()
+            print("DEBUG: GUI mainloop ended")
+        except Exception as e:
+            print(f"ERROR in GUI launch: {e}")
+            import traceback
+            traceback.print_exc()
+            # Try alternative approach
+            try:
+                print("DEBUG: Trying alternative approach...")
+                app = AdaptiveDBNNGUI()
+                app.root.mainloop()
+            except Exception as e2:
+                print(f"ERROR in alternative approach: {e2}")
+
 def launch_command_line():
     """Launch command line interface"""
     print("💻 Starting Command Line Mode...")
     cli = AdaptiveDBNNCommandLine()
     cli.run()
-
 
 def main():
     """Enhanced main function for adaptive DBNN with multiple operation modes"""
@@ -7418,7 +8028,6 @@ def main():
             break
         else:
             print("❌ Invalid choice. Please try again.")
-
 
 def run_gui_mode():
     """Launch the GUI interface"""
