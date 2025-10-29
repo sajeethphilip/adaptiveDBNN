@@ -4979,12 +4979,173 @@ class HybridDBNNCore(DBNNCore):
         # For dense mode, use parent's safe implementation
         return super()._process_training_batch_cpu_parallel(features_batch, targets_batch)
 
-
     def _process_training_batch_cpu_parallel_aggressive(self, features_batch, targets_batch):
         """Alias for main method - preserves algorithm"""
         return self._process_training_batch_cpu_parallel(features_batch, targets_batch)
 
+    def _compile_gpu_kernels(self):
+        """Compile GPU kernels for hybrid core - delegate to parent"""
+        try:
+            # Call parent implementation if it exists
+            if hasattr(super(), '_compile_gpu_kernels'):
+                super()._compile_gpu_kernels()
+            else:
+                self.log("ℹ️ Parent GPU kernel compilation not available")
+        except Exception as e:
+            self.log(f"⚠️ GPU kernel compilation warning: {e}")
 
+    def _allocate_gpu_memory(self):
+        """Allocate GPU memory for hybrid core"""
+        if not self.gpu_enabled or not cuda.is_available():
+            return False
+
+        try:
+            # For sparse mode, use sparse GPU allocation
+            if self.use_sparse_mode and self.ultra_sparse_core:
+                return self._allocate_sparse_gpu_memory()
+
+            # For dense mode, use parent allocation
+            if hasattr(super(), '_allocate_gpu_memory'):
+                return super()._allocate_gpu_memory()
+
+            # Fallback allocation
+            self.log("🔧 Allocating GPU memory for hybrid operations...")
+
+            # Transfer main arrays to GPU
+            if hasattr(self, 'anti_net') and self.anti_net is not None:
+                self.d_anti_net = cuda.to_device(self.anti_net.astype(np.int32))
+            if hasattr(self, 'anti_wts') and self.anti_wts is not None:
+                self.d_anti_wts = cuda.to_device(self.anti_wts.astype(np.float32))
+            if hasattr(self, 'binloc') and self.binloc is not None:
+                self.d_binloc = cuda.to_device(self.binloc.astype(np.float32))
+            if hasattr(self, 'min_val') and self.min_val is not None:
+                self.d_min_val = cuda.to_device(self.min_val.astype(np.float32))
+            if hasattr(self, 'max_val') and self.max_val is not None:
+                self.d_max_val = cuda.to_device(self.max_val.astype(np.float32))
+            if hasattr(self, 'class_labels') and self.class_labels is not None:
+                self.d_class_labels = cuda.to_device(self.class_labels.astype(np.float32))
+            if hasattr(self, 'resolution_arr') and self.resolution_arr is not None:
+                self.d_resolution_arr = cuda.to_device(self.resolution_arr.astype(np.int32))
+
+            self.gpu_arrays_initialized = True
+            self.log("✅ GPU memory allocated successfully")
+            return True
+
+        except Exception as e:
+            self.log(f"❌ GPU memory allocation failed: {e}")
+            self.gpu_enabled = False
+            return False
+
+    def _allocate_sparse_gpu_memory(self):
+        """Allocate GPU memory for sparse operations"""
+        try:
+            if not self.use_sparse_mode or not self.ultra_sparse_core:
+                return False
+
+            self.log("🔧 Allocating GPU memory for sparse operations...")
+
+            # For sparse mode, we need to convert sparse dictionaries to GPU-friendly formats
+            # This is a simplified approach - in practice you might use different sparse representations
+
+            # Transfer common arrays that are still used
+            if hasattr(self, 'min_val') and self.min_val is not None:
+                self.d_min_val = cuda.to_device(self.min_val.astype(np.float32))
+            if hasattr(self, 'max_val') and self.max_val is not None:
+                self.d_max_val = cuda.to_device(self.max_val.astype(np.float32))
+            if hasattr(self, 'class_labels') and self.class_labels is not None:
+                self.d_class_labels = cuda.to_device(self.class_labels.astype(np.float32))
+            if hasattr(self, 'resolution_arr') and self.resolution_arr is not None:
+                self.d_resolution_arr = cuda.to_device(self.resolution_arr.astype(np.int32))
+            if hasattr(self, 'binloc') and self.binloc is not None:
+                self.d_binloc = cuda.to_device(self.binloc.astype(np.float32))
+
+            self.sparse_gpu_initialized = True
+            self.log("✅ Sparse GPU memory allocated")
+            return True
+
+        except Exception as e:
+            self.log(f"❌ Sparse GPU memory allocation failed: {e}")
+            return False
+
+    def _enable_real_gpu_processing(self):
+        """Enable real GPU processing for hybrid core"""
+        try:
+            if not cuda.is_available():
+                self.gpu_enabled = False
+                self.log("❌ CUDA not available - GPU disabled")
+                return False
+
+            # Initialize CUDA context
+            cuda.current_context()
+
+            # Compile kernels
+            self._compile_gpu_kernels()
+
+            # Allocate GPU memory
+            if not self._allocate_gpu_memory():
+                return False
+
+            # Initialize CUDA streams for concurrent execution
+            self._initialize_cuda_streams()
+
+            self.gpu_enabled = True
+            self.gpu_initialized = True
+            gpu_name = cuda.gpus[0].name if cuda.gpus else "Unknown GPU"
+            self.log(f"✅ Real GPU processing enabled: {gpu_name}")
+            return True
+
+        except Exception as e:
+            self.log(f"❌ Real GPU processing failed: {e}")
+            self.gpu_enabled = False
+            return False
+
+    def _initialize_cuda_streams(self):
+        """Initialize CUDA streams for hybrid core"""
+        if not self.gpu_enabled:
+            return
+
+        try:
+            from numba import cuda
+
+            # Create multiple streams for concurrent execution
+            self.cuda_streams = [cuda.stream() for _ in range(2)]  # 2 concurrent streams
+            self.current_stream_index = 0
+
+            # Update global references for GPU kernels
+            if hasattr(self, 'd_anti_net'):
+                process_training_sample.d_anti_net = self.d_anti_net
+                compute_class_probabilities_numba.d_anti_net = self.d_anti_net
+
+            if hasattr(self, 'd_anti_wts'):
+                process_training_sample.d_anti_wts = self.d_anti_wts
+                compute_class_probabilities_numba.d_anti_wts = self.d_anti_wts
+
+            if hasattr(self, 'd_binloc'):
+                process_training_sample.d_binloc = self.d_binloc
+                compute_class_probabilities_numba.d_binloc = self.d_binloc
+
+            if hasattr(self, 'd_min_val'):
+                process_training_sample.d_min_val = self.d_min_val
+                compute_class_probabilities_numba.d_min_val = self.d_min_val
+
+            if hasattr(self, 'd_max_val'):
+                process_training_sample.d_max_val = self.d_max_val
+                compute_class_probabilities_numba.d_max_val = self.d_max_val
+
+            if hasattr(self, 'd_class_labels'):
+                process_training_sample.d_class_labels = self.d_class_labels
+                compute_class_probabilities_numba.d_class_labels = self.d_class_labels
+
+            if hasattr(self, 'd_resolution_arr'):
+                process_training_sample.d_resolution_arr = self.d_resolution_arr
+                compute_class_probabilities_numba.d_resolution_arr = self.d_resolution_arr
+
+            self.cuda_streams_initialized = True
+            self.log("✅ CUDA streams initialized for hybrid execution")
+
+        except Exception as e:
+            self.log(f"⚠️ CUDA stream initialization failed: {e}")
+            self.cuda_streams_initialized = False
 
     def _init_hybrid_execution(self):
         """
@@ -16656,6 +16817,8 @@ model learns to separate different classes over time.
             print(f"Error generating tensor visualizations: {e}")
             return {}
 
+
+
 # =========================================================================
 # OPTIMIZED SPARSE PROCESSOR FOR HIGH-DIMENSIONAL DATA
 # =========================================================================
@@ -17365,6 +17528,7 @@ DBNNCore.log = _enhanced_log
 # =========================================================================
 # MAIN EXECUTION GUARD
 # =========================================================================
+
 
 
 if __name__ == "__main__":
