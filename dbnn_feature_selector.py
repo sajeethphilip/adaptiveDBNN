@@ -53,7 +53,7 @@ class ResourceManager:
         # Memory calculation for 5D tensor
         bytes_per_element = 4  # float32
         elements_per_feature = (resolution + 2) ** 2 * (num_classes + 2)
-        memory_per_feature_gb = elements_per_element * bytes_per_element / (1024**3)
+        memory_per_feature_gb = elements_per_feature * bytes_per_element / (1024**3)
 
         # Account for both anti_net and anti_wts
         total_memory_per_feature_gb = memory_per_feature_gb * 2
@@ -333,11 +333,11 @@ class PortfolioBuilder:
     def build_feature_portfolio(self, feature_scores: Dict[int, float],
                               pair_scores: Dict[Tuple[int, int], float],
                               max_features: int) -> Dict[str, Any]:
-        """Construct optimal feature portfolio"""
+        """Construct optimal feature portfolio - ENHANCED WITH STRICT LIMITS"""
         # Sort features by score
         sorted_features = sorted(feature_scores.items(), key=lambda x: x[1], reverse=True)
 
-        # Select top features
+        # STRICT LIMIT: Only select up to max_features
         selected_features = [feat_idx for feat_idx, score in sorted_features[:max_features]]
         selected_scores = {feat_idx: score for feat_idx, score in sorted_features[:max_features]}
 
@@ -353,6 +353,16 @@ class PortfolioBuilder:
         for pair, score in pair_scores.items():
             if pair[0] in selected_features and pair[1] in selected_features:
                 portfolio_pairs[pair] = score
+
+        # VERIFICATION: Ensure we didn't select more than requested
+        actual_selected = len(selected_features)
+        if actual_selected > max_features:
+            print(f"❌ ERROR: Selected {actual_selected} features but requested {max_features}")
+            # Force truncation
+            selected_features = selected_features[:max_features]
+            selected_scores = {k: v for k, v in list(selected_scores.items())[:max_features]}
+
+        print(f"✅ Portfolio built: {len(selected_features)} features selected (requested: {max_features})")
 
         return {
             'selected_features': selected_features,
@@ -374,7 +384,6 @@ class DBNNFeatureSelector:
 
         self.results = {}
 
-
     def run_feature_selection(self, num_triplet_samples: int = 1000,
                             target_feature_count: Optional[int] = None,
                             resolution: int = 60) -> Dict[str, Any]:
@@ -382,11 +391,28 @@ class DBNNFeatureSelector:
         print("🚀 Starting DBNN Feature Selection Pipeline")
         start_time = time.time()
 
-        # Step 1: Calculate resource constraints
+        # Step 1: Set target feature count - FIXED TO USE THE PARAMETER
         if target_feature_count is None:
-            target_feature_count = self.resource_manager.calculate_max_features(self.num_classes, resolution)
+            # Smart default based on dataset size
+            if self.num_features <= 100:
+                target_feature_count = max(10, self.num_features // 2)
+            elif self.num_features <= 500:
+                target_feature_count = 80
+            else:
+                target_feature_count = 100
+            print(f"🎯 Auto-setting target: {target_feature_count} features (default for {self.num_features} input features)")
+        else:
+            # Ensure we don't select more features than available
+            target_feature_count = min(target_feature_count, self.num_features)
+            print(f"🎯 User specified: {target_feature_count} features")
 
-        print(f"🎯 Target: Select {target_feature_count} best features from {self.num_features}")
+        # Calculate theoretical maximum for information only
+        theoretical_max = self.resource_manager.calculate_max_features(self.num_classes, resolution)
+        if target_feature_count > theoretical_max:
+            print(f"⚠️  Warning: Requested {target_feature_count} features but theoretical max is {theoretical_max}")
+            print(f"   The system will proceed but may use more memory than recommended")
+
+        print(f"🎯 Final target: Select {target_feature_count} best features from {self.num_features}")
 
         # Step 2: Individual feature scoring
         print("📊 Step 1: Computing individual feature discrimination...")
@@ -415,7 +441,15 @@ class DBNNFeatureSelector:
             individual_scores, triplet_aggregates
         )
 
-        # Step 5: Build optimal portfolio
+        # Step 5: Build optimal portfolio - FIXED TO USE target_feature_count
+        # Ensure we have enough features with scores
+        features_with_scores = len(composite_scores)
+        if features_with_scores < target_feature_count:
+            print(f"⚠️  Warning: Only {features_with_scores} features have scores, but requested {target_feature_count}")
+            actual_target = min(target_feature_count, features_with_scores)
+            print(f"   Adjusting target to: {actual_target} features")
+            target_feature_count = actual_target
+
         print("🏗️  Step 4: Building optimal feature portfolio...")
         portfolio = self.portfolio_builder.build_feature_portfolio(
             composite_scores, triplet_aggregates['pair_scores'], target_feature_count
@@ -467,7 +501,7 @@ class DBNNFeatureSelector:
     def export_selected_features(self, output_path: str = None,
                                export_original_data: bool = False,
                                original_csv_path: str = None) -> str:
-        """Export selected features with dataset-based naming and target column included"""
+        """Export ONLY selected features with dataset-based naming and target column included"""
         if not self.results:
             raise ValueError("No feature selection results available. Run selection first.")
 
@@ -483,24 +517,31 @@ class DBNNFeatureSelector:
                 base_name = "selected_features"
             output_path = f"{base_name}_SelectedFeatures.csv"
 
-        # Create the output DataFrame with target column included
-        if export_original_data and original_csv_path:
-            # Export original data with only selected features + target
-            original_df = pd.read_csv(original_csv_path)
-            # Ensure target column is included
-            columns_to_export = selected_names + [self.target_name]
-            # Filter to only existing columns
-            columns_to_export = [col for col in columns_to_export if col in original_df.columns]
-            selected_df = original_df[columns_to_export]
-        else:
-            # Create new DataFrame with selected features + target
-            selected_features = self.features[:, selected_indices]
-            selected_df = pd.DataFrame(selected_features, columns=selected_names)
-            selected_df[self.target_name] = self.targets
+        print(f"🔍 Exporting {len(selected_names)} selected features + target '{self.target_name}'")
+
+        # Create the output DataFrame with ONLY selected features + target column
+        selected_features_data = self.features[:, selected_indices]
+        selected_df = pd.DataFrame(selected_features_data, columns=selected_names)
+        selected_df[self.target_name] = self.targets
+
+        # Verify we have the right number of columns
+        expected_columns = len(selected_names) + 1  # features + target
+        actual_columns = len(selected_df.columns)
+
+        if actual_columns != expected_columns:
+            print(f"⚠️  Warning: Expected {expected_columns} columns, got {actual_columns}")
 
         # Save to CSV
         selected_df.to_csv(output_path, index=False)
-        print(f"💾 Selected features + target saved to: {output_path}")
+        print(f"💾 Selected features saved to: {output_path}")
+        print(f"   📊 File contains: {len(selected_names)} features + 1 target = {actual_columns} total columns")
+        print(f"   📏 Dimensions: {len(selected_df)} samples × {actual_columns} columns")
+
+        # Show first few column names as verification
+        sample_columns = selected_df.columns.tolist()[:5]
+        if len(selected_df.columns) > 5:
+            sample_columns.append("...")
+        print(f"   📋 Columns: {', '.join(map(str, sample_columns))}")
 
         return output_path
 
@@ -601,6 +642,18 @@ def main():
 EXAMPLES:
 
 ═══════════════════════════════════════════════════════════════════════════════
+FEATURE COUNT CONTROL:
+───────────────────────────────────────────────────────────────────────────────
+  # Select exactly 80 features
+  python dbnn_feature_selector.py -i data.csv -fc 80
+
+  # Select 150 features with high resolution
+  python dbnn_feature_selector.py -i genomics.csv -fc 150 -r 80
+
+  # Quick test with only 50 features
+  python dbnn_feature_selector.py -i large_data.csv -fc 50 -n 5000
+
+═══════════════════════════════════════════════════════════════════════════════
 BASIC USAGE (Auto-detection):
 ───────────────────────────────────────────────────────────────────────────────
   # Process any CSV with automatic column detection
@@ -613,64 +666,25 @@ BASIC USAGE (Auto-detection):
 SPECIFIC DATASET TYPES:
 ───────────────────────────────────────────────────────────────────────────────
   # Genomics data (high-dimensional)
-  python dbnn_feature_selector.py --input genomics_data.csv --target "phenotype" --output-features 200 --triplets 2000
+  python dbnn_feature_selector.py --input genomics_data.csv --target "phenotype" --feature-count 200 --triplets 2000
 
   # Financial data with specific features
-  python dbnn_feature_selector.py --input stock_data.csv --features "open high low volume" --target "trend" --samples 10000
+  python dbnn_feature_selector.py --input stock_data.csv --features "open high low volume" --target "trend" --feature-count 50
 
   # Medical data with conservative settings
-  python dbnn_feature_selector.py --input patient_data.csv --target "diagnosis" --safety-margin 0.3 --resolution 80
-
-  # Image features (like MNIST)
-  python dbnn_feature_selector.py --input image_features.csv --target "label" --output-features 100
-
-═══════════════════════════════════════════════════════════════════════════════
-RESOURCE MANAGEMENT:
-───────────────────────────────────────────────────────────────────────────────
-  # Large dataset with sampling
-  python dbnn_feature_selector.py --input huge_dataset.csv --samples 5000 --triplets 1500
-
-  # Conservative memory usage
-  python dbnn_feature_selector.py --input data.csv --safety-margin 0.3 --gpu-memory 32
-
-  # High-resolution analysis
-  python dbnn_feature_selector.py --input data.csv --resolution 100 --triplets 2000
-
-═══════════════════════════════════════════════════════════════════════════════
-FILE FORMATS:
-───────────────────────────────────────────────────────────────────────────────
-  # Tab-delimited files
-  python dbnn_feature_selector.py --input data.tsv --delimiter tab
-
-  # Semicolon-delimited files
-  python dbnn_feature_selector.py --input data_european.csv --delimiter semicolon
-
-  # Space-delimited files
-  python dbnn_feature_selector.py --input data.txt --delimiter space
-
-═══════════════════════════════════════════════════════════════════════════════
-ADVANCED USAGE:
-───────────────────────────────────────────────────────────────────────────────
-  # Export original data structure with selected features
-  python dbnn_feature_selector.py --input original_data.csv --export-original
-
-  # Force specific number of output features
-  python dbnn_feature_selector.py --input data.csv --output-features 50
-
-  # Comprehensive analysis with all parameters
-  python dbnn_feature_selector.py --input research_data.csv --target "outcome" --samples 15000 --triplets 2500 --resolution 90 --output-features 120 --safety-margin 0.25
+  python dbnn_feature_selector.py --input patient_data.csv --target "diagnosis" --feature-count 100 --safety-margin 0.3
 
 ═══════════════════════════════════════════════════════════════════════════════
 QUICK START (Most Common Use Cases):
 ───────────────────────────────────────────────────────────────────────────────
   # Quick analysis on standard dataset
-  python dbnn_feature_selector.py -i my_data.csv
+  python dbnn_feature_selector.py -i my_data.csv -fc 100
 
   # High-dimensional data with many features
-  python dbnn_feature_selector.py -i high_dim_data.csv -o 150 -r 70 -n 10000
+  python dbnn_feature_selector.py -i high_dim_data.csv -fc 150 -r 70 -n 10000
 
   # Quick test run on large dataset
-  python dbnn_feature_selector.py -i big_data.csv -n 2000 -t 500
+  python dbnn_feature_selector.py -i big_data.csv -fc 80 -n 2000 -trip 500
         '''
     )
 
@@ -692,8 +706,8 @@ QUICK START (Most Common Use Cases):
     # Algorithm parameters
     parser.add_argument('--triplets', '-trip', type=int, default=1000,
                        help='Number of triplets to sample (default: 1000)')
-    parser.add_argument('--output-features', '-o', type=int,
-                       help='Number of features to select (auto-calculated based on GPU memory if not specified)')
+    parser.add_argument('--feature-count', '-fc', type=int,
+                       help='Number of features to SELECT and RETAIN (recommended: 50-200)')
     parser.add_argument('--resolution', '-r', type=int, default=60,
                        help='Histogram resolution (default: 60, range: 20-150)')
 
@@ -724,18 +738,6 @@ QUICK START (Most Common Use Cases):
     print("=" * 60)
 
     try:
-        # Show configuration
-        print(f"📋 Configuration:")
-        print(f"   Input: {args.input}")
-        print(f"   Target: {args.target or 'Auto-detect'}")
-        print(f"   Features: {len(args.features) if args.features else 'All except target'}")
-        print(f"   Samples: {args.samples or 'All available'}")
-        print(f"   Triplets: {args.triplets}")
-        print(f"   Output features: {args.output_features or 'Auto-calculated'}")
-        print(f"   Resolution: {args.resolution}")
-        print(f"   GPU Memory: {args.gpu_memory}GB, Safety: {args.safety_margin*100}%")
-        print()
-
         # Initialize selector
         selector = DBNNFeatureSelector(
             target_resolution=args.resolution,
@@ -752,10 +754,37 @@ QUICK START (Most Common Use Cases):
             delimiter=delimiter
         )
 
+        # Determine feature count
+        if args.feature_count is None:
+            # Smart default based on dataset size
+            if selector.num_features <= 100:
+                feature_count = max(10, selector.num_features // 2)  # Keep half for small datasets
+            elif selector.num_features <= 500:
+                feature_count = 80  # Good balance for medium datasets
+            else:
+                feature_count = 100  # Standard for large datasets
+            print(f"🎯 Auto-setting feature count: {feature_count} (default for {selector.num_features} input features)")
+        else:
+            feature_count = min(args.feature_count, selector.num_features)
+            if feature_count < args.feature_count:
+                print(f"⚠️  Adjusted feature count: {args.feature_count} → {feature_count} (max available)")
+
+        # Show configuration
+        print(f"📋 Configuration:")
+        print(f"   Input: {args.input}")
+        print(f"   Target: {args.target or 'Auto-detect'}")
+        print(f"   Features: {len(args.features) if args.features else 'All except target'}")
+        print(f"   Samples: {args.samples or 'All available'}")
+        print(f"   Triplets: {args.triplets}")
+        print(f"   Feature count: {feature_count} (to retain)")
+        print(f"   Resolution: {args.resolution}")
+        print(f"   GPU Memory: {args.gpu_memory}GB, Safety: {args.safety_margin*100}%")
+        print()
+
         # Run feature selection
         results = selector.run_feature_selection(
             num_triplet_samples=args.triplets,
-            target_feature_count=args.output_features,
+            target_feature_count=feature_count,
             resolution=args.resolution
         )
 
@@ -785,7 +814,7 @@ QUICK START (Most Common Use Cases):
         print(f"📈 Portfolio score: {results['portfolio']['portfolio_score']:.4f}")
 
         print(f"\n📁 OUTPUT FILES:")
-        print(f"   ✅ {final_csv_path} - Selected features + target (ready for DBNN training)")
+        print(f"   ✅ {final_csv_path} - {feature_count} selected features + target (ready for DBNN training)")
         print(f"   ✅ {json_output} - Selection metadata and scores")
 
         print(f"\n🚀 NEXT STEPS:")
@@ -811,9 +840,8 @@ QUICK START (Most Common Use Cases):
         print(f"   • Verify column names match your CSV")
         print(f"   • Try --delimiter tab for TSV files")
         print(f"   • Reduce --samples if memory issues occur")
+        print(f"   • Use --feature-count to control how many features to keep")
         raise
 
-if __name__ == "__main__":
-    main()
 if __name__ == "__main__":
     main()
