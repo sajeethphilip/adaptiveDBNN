@@ -864,462 +864,311 @@ class RetinopathyFeatureExtractor:
 class QuadrantRetinopathyAnalyzer:
     """Advanced quadrant-based analysis for diabetic retinopathy"""
 
-    def __init__(self, base_extractor, use_gpu=True):
-        self.base_extractor = base_extractor
-        self.use_gpu = use_gpu
+    def __init__(self, feature_extractor: RetinopathyFeatureExtractor):
+        self.feature_extractor = feature_extractor
         self.quadrant_names = ['LT', 'RT', 'LB', 'RB']  # Left-Top, Right-Top, Left-Bottom, Right-Bottom
-        self.setup_quadrant_feature_sizes()
 
-    def setup_quadrant_feature_sizes(self):
-        """Optimal feature sizes for 128x128 quadrant images"""
-        # Reduced sizes for quadrants but maintaining diagnostic capability
-        self.quadrant_feature_sizes = {
-            'vessel': 96,        # Vessel patterns in smaller regions
-            'exudates': 64,      # Localized exudates
-            'hemorrhages': 64,   # Localized hemorrhages
-            'microaneurysms': 128, # CRITICAL: Small lesions need good resolution
-            'optic_disc': 48,    # Usually in one quadrant
-            'macula': 48,        # Usually central
-            'retinal_texture': 128, # Local texture patterns
-            'color_analysis': 64, # Regional color changes
-            'deep_retinal': 256, # Deep features for quadrants
-            'retinal_statistics': 32
+    def segment_quadrants(self, image: np.ndarray) -> Dict[str, np.ndarray]:
+        """Segment retinal image into 4 quadrants"""
+        height, width = image.shape[:2]
+        mid_x, mid_y = width // 2, height // 2
+
+        quadrants = {
+            'LT': image[:mid_y, :mid_x],      # Left-Top
+            'RT': image[:mid_y, mid_x:],      # Right-Top
+            'LB': image[mid_y:, :mid_x],      # Left-Bottom
+            'RB': image[mid_y:, mid_x:]       # Right-Bottom
         }
-
-        # Per-quadrant features: ~900 features (4 quadrants × ~225 features)
-        # Total with fusion: ~1800 features (similar to original but more detailed)
-
-    def segment_image_into_quadrants(self, image: np.ndarray) -> Dict[str, np.ndarray]:
-        """Segment image into 4 quadrants with overlap for context"""
-        h, w = image.shape[:2]
-
-        # Add 10% overlap to preserve context at boundaries
-        overlap_h = h // 10
-        overlap_w = w // 10
-
-        quadrants = {}
-
-        # Left-Top quadrant
-        quadrants['LT'] = image[0:h//2 + overlap_h, 0:w//2 + overlap_w]
-
-        # Right-Top quadrant
-        quadrants['RT'] = image[0:h//2 + overlap_h, w//2 - overlap_w:w]
-
-        # Left-Bottom quadrant
-        quadrants['LB'] = image[h//2 - overlap_h:h, 0:w//2 + overlap_w]
-
-        # Right-Bottom quadrant
-        quadrants['RB'] = image[h//2 - overlap_h:h, w//2 - overlap_w:w]
-
-        # Resize all to 128x128 for consistent processing
-        for quadrant_name in quadrants:
-            quadrants[quadrant_name] = cv2.resize(quadrants[quadrant_name], (128, 128))
 
         return quadrants
 
-    def extract_quadrant_features(self, image: np.ndarray, image_name: str) -> Dict[str, Dict[str, np.ndarray]]:
-        """Extract features for each quadrant separately"""
-        print(f"🔍 Segmenting {image_name} into quadrants...")
-
-        # Segment image
-        quadrants = self.segment_image_into_quadrants(image)
-
+    def analyze_quadrants(self, image: np.ndarray) -> Dict[str, Dict[str, np.ndarray]]:
+        """Analyze each quadrant for retinopathy features"""
+        quadrants = self.segment_quadrants(image)
         quadrant_features = {}
 
         for quadrant_name, quadrant_image in quadrants.items():
             print(f"   Processing quadrant {quadrant_name}...")
-
-            # Extract features for this quadrant with quadrant-optimized sizes
-            features = self.base_extractor.extract_individual_features(
-                quadrant_image,
-                self.quadrant_feature_sizes
-            )
-
+            features = self.feature_extractor.extract_individual_features(quadrant_image)
             quadrant_features[quadrant_name] = features
+            print(f"      ✅ {quadrant_name}: {len(features)} feature types extracted")
 
         return quadrant_features
 
     def fuse_quadrant_features(self, quadrant_features: Dict[str, Dict[str, np.ndarray]]) -> Tuple[np.ndarray, List[str]]:
-        """Intelligently fuse features from all quadrants"""
+        """Fuse features from all quadrants with intelligent weighting - FIXED"""
         all_features = []
         feature_metadata = []
 
-        # Feature fusion strategies
-        fusion_strategies = {
-            'microaneurysms': 'max_pooling',  # Any quadrant having MAs is important
-            'hemorrhages': 'max_pooling',     # Same for hemorrhages
-            'exudates': 'max_pooling',        # And exudates
-            'vessel': 'average',              # Vessel patterns across retina
-            'retinal_texture': 'average',     # Overall texture
-            'color_analysis': 'average',      # Overall color
-            'retinal_statistics': 'average',  # Statistical summary
-        }
+        # Check if quadrant_features has the expected structure
+        if not quadrant_features or not isinstance(quadrant_features, dict):
+            print("❌ Invalid quadrant_features structure")
+            return np.array([]), []
 
-        for feature_type in quadrant_features['LT'].keys():
-            strategy = fusion_strategies.get(feature_type, 'average')
-            quadrant_feats = []
+        # Get the first quadrant to understand the feature structure
+        first_quadrant = next(iter(quadrant_features.values()))
+        if not isinstance(first_quadrant, dict):
+            print("❌ Invalid quadrant data structure")
+            return np.array([]), []
+
+        # Process each feature type across all quadrants
+        for feature_type in first_quadrant.keys():
+            quadrant_feature_vectors = []
 
             for quadrant_name in self.quadrant_names:
                 if quadrant_name in quadrant_features and feature_type in quadrant_features[quadrant_name]:
-                    quadrant_feats.append(quadrant_features[quadrant_name][feature_type])
+                    features = quadrant_features[quadrant_name][feature_type]
+                    if len(features) > 0:
+                        quadrant_feature_vectors.append(features)
 
-            if quadrant_feats:
-                if strategy == 'max_pooling':
-                    # For lesions: take maximum across quadrants
-                    fused = np.max(quadrant_feats, axis=0)
-                elif strategy == 'average':
-                    # For patterns: take average
-                    fused = np.mean(quadrant_feats, axis=0)
-                else:
-                    fused = np.mean(quadrant_feats, axis=0)
+            if quadrant_feature_vectors:
+                # Stack features from all quadrants for this feature type
+                stacked_features = np.stack(quadrant_feature_vectors, axis=0)
+                fused = self._fuse_quadrant_feature_type(stacked_features)
 
                 all_features.extend(fused)
-                feature_metadata.extend([f"fused_{feature_type}_{i}" for i in range(len(fused))])
+                feature_metadata.extend([f"quadrant_{feature_type}_{i}" for i in range(len(fused))])
 
+        print(f"🎯 Quadrant feature fusion: {len(all_features)} total features")
         return np.array(all_features), feature_metadata
 
-    def save_quadrant_features(self, quadrant_features: Dict[str, Dict[str, np.ndarray]],
-                             base_filename: str, labels: List, image_names: List[str]):
-        """Save quadrant features to organized folder structure"""
-        base_path = Path(base_filename).parent
-        dataset_name = Path(base_filename).stem
+    def _fuse_quadrant_feature_type(self, quadrant_features: np.ndarray) -> np.ndarray:
+        """Fuse features for a specific feature type across quadrants"""
+        fused_features = []
 
-        # Create quadrant folder structure
-        quadrant_folders = {}
-        for quadrant in self.quadrant_names:
-            quadrant_path = base_path / "quadrant_features" / quadrant / dataset_name
-            quadrant_path.mkdir(parents=True, exist_ok=True)
-            quadrant_folders[quadrant] = quadrant_path
+        # Mean across quadrants
+        fused_features.extend(np.mean(quadrant_features, axis=0))
 
-        # Save features for each quadrant separately
-        for quadrant_name, quadrant_path in quadrant_folders.items():
-            quadrant_features_list = []
+        # Standard deviation across quadrants (variability)
+        fused_features.extend(np.std(quadrant_features, axis=0))
 
-            for img_idx, image_name in enumerate(image_names):
-                if quadrant_name in quadrant_features[img_idx]:
-                    features = quadrant_features[img_idx][quadrant_name]
-                    # Flatten all features for this quadrant
-                    flat_features = []
-                    for feature_type, feature_vec in features.items():
-                        flat_features.extend(feature_vec)
+        # Max values across quadrants
+        fused_features.extend(np.max(quadrant_features, axis=0))
 
-                    quadrant_features_list.append(flat_features)
-                else:
-                    # Pad with zeros if quadrant missing
-                    total_size = sum(self.quadrant_feature_sizes.values())
-                    quadrant_features_list.append(np.zeros(total_size))
+        # Min values across quadrants
+        fused_features.extend(np.min(quadrant_features, axis=0))
 
-            # Create feature names
-            feature_names = []
-            for feature_type, size in self.quadrant_feature_sizes.items():
-                feature_names.extend([f"{quadrant_name}_{feature_type}_{i}" for i in range(size)])
+        # Range (max-min) across quadrants
+        fused_features.extend(np.ptp(quadrant_features, axis=0))
 
-            # Save quadrant-specific CSV
-            df_quadrant = pd.DataFrame(quadrant_features_list, columns=feature_names)
-            df_quadrant['retinopathy_grade'] = labels
-            df_quadrant['image_name'] = image_names
+        return np.array(fused_features)
 
-            output_file = quadrant_path / f"{dataset_name}_{quadrant_name}_features.csv"
-            df_quadrant.to_csv(output_file, index=False)
-            print(f"💾 Quadrant features saved: {output_file}")
+class RetinopathyPipeline:
+    """Complete pipeline for diabetic retinopathy analysis"""
 
-class DiabeticRetinopathyPipeline:
-    """Complete pipeline for diabetic retinopathy feature extraction"""
-
-    def __init__(self, use_gpu=True):
-        self.extractor = RetinopathyFeatureExtractor(use_gpu=use_gpu)
+    def __init__(self, use_gpu=True, max_workers=None):
+        self.feature_extractor = RetinopathyFeatureExtractor(use_gpu=use_gpu, max_workers=max_workers)
+        self.quadrant_analyzer = QuadrantRetinopathyAnalyzer(self.feature_extractor)
         self.dataset_manager = RetinopathyDatasetManager()
-        self.feature_names = []
 
-    def process_retinal_images(self, images: List[np.ndarray], labels: List,
-                             output_csv: str = "retinopathy_features.csv") -> str:
-        """Process retinal images and extract comprehensive features"""
-        print("🚀 Starting Diabetic Retinopathy Feature Extraction Pipeline")
-        print("=" * 60)
-        print("🎯 Target: Early detection of diabetic retinopathy")
-
-        all_features = []
-        total_images = len(images)
-
-        for i, (image, label) in enumerate(zip(images, labels)):
-            if i % 10 == 0:
-                print(f"📊 Processing retinal image {i+1}/{total_images}...")
-
-            feature_dict = self.extractor.extract_retinopathy_features(image)
-            fused_features, feature_metadata = self.extractor.fuse_retinopathy_features(feature_dict)
-
-            all_features.append(fused_features)
-            if i == 0:
-                self.feature_names = feature_metadata
-
-        df = pd.DataFrame(all_features, columns=self.feature_names)
-        df['retinopathy_grade'] = labels
-        df.to_csv(output_csv, index=False)
-
-        print(f"\n✅ Retinopathy feature extraction complete!")
-        print(f"📊 Results: {len(all_features)} samples, {len(self.feature_names)} features")
-        print(f"💾 Saved to: {output_csv}")
-
-        return output_csv
-
-    def load_dataset_from_folder(self, dataset_path: Path) -> Tuple[List[np.ndarray], List]:
-        """Load retinal images from organized grade folders"""
+    def load_retinal_images(self, dataset_path: Path) -> Tuple[List[np.ndarray], List[int], List[str]]:
+        """Load retinal images organized by grade folders"""
         images = []
         labels = []
+        image_names = []
 
         grade_folders = sorted([f for f in dataset_path.iterdir() if f.is_dir() and f.name.startswith('grade_')])
 
+        if not grade_folders:
+            print(f"❌ No grade folders found in {dataset_path}")
+            return [], [], []
+
         print(f"📁 Found {len(grade_folders)} retinopathy grade folders:")
+
         for grade_folder in grade_folders:
-            grade = int(grade_folder.name.split('_')[1])
-            image_files = list(grade_folder.glob('*.png')) + list(grade_folder.glob('*.jpg')) + list(grade_folder.glob('*.jpeg'))
+            try:
+                grade = int(grade_folder.name.split('_')[1])
+                print(f"   📂 {grade_folder.name} (Grade {grade})")
 
-            print(f"   📂 {grade_folder.name} (Grade {grade})")
-            print(f"      📷 Loading {len(image_files)} retinal images")
+                image_files = []
+                for ext in ['*.png', '*.jpg', '*.jpeg', '*.tiff']:
+                    image_files.extend(grade_folder.glob(ext))
+                    image_files.extend(grade_folder.glob(ext.upper()))
 
-            for img_file in image_files:
-                try:
-                    image = cv2.imread(str(img_file))
-                    if image is not None:
-                        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                        images.append(image)
-                        labels.append(grade)
-                except Exception as e:
-                    print(f"      ❌ Failed to load {img_file}: {e}")
+                if not image_files:
+                    print(f"      ⚠️  No images found in {grade_folder}")
+                    continue
 
-            print(f"      ✅ Loaded {len(image_files)} images from {grade_folder.name}")
+                print(f"      📷 Loading {len(image_files)} retinal images")
+
+                loaded_count = 0
+                for img_file in image_files:
+                    try:
+                        image = cv2.imread(str(img_file))
+                        if image is not None:
+                            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                            images.append(image)
+                            labels.append(grade)
+                            image_names.append(img_file.name)
+                            loaded_count += 1
+
+                            if loaded_count >= 10:  # Limit for sample datasets
+                                break
+                    except Exception as e:
+                        print(f"      ❌ Failed to load {img_file}: {e}")
+                        continue
+
+                print(f"      ✅ Loaded {loaded_count} images from {grade_folder.name}")
+
+            except Exception as e:
+                print(f"   ❌ Error processing {grade_folder}: {e}")
+                continue
 
         print(f"\n📊 Total: {len(images)} retinal images loaded from {len(grade_folders)} grades")
-        return images, labels
+        return images, labels, image_names
 
-    def auto_pipeline(self, dataset_id: str, output_csv: str = None) -> str:
-        """Automated pipeline for dataset processing - FIXED with better error handling"""
-        print(f"🩺 Diabetic Retinopathy Early Detection System - Auto Dataset Mode")
-        print("=" * 60)
-        print(f"🚀 Starting automated pipeline for dataset: {dataset_id}")
+    def process_retinal_images(self, images: List[np.ndarray], labels: List[int], image_names: List[str], output_csv: str) -> pd.DataFrame:
+        """Process retinal images with quadrant analysis"""
+        if len(images) == 0:
+            print("❌ No images to process")
+            return pd.DataFrame()
 
-        try:
-            # Setup dataset
-            dataset_path = self.dataset_manager.setup_dataset(dataset_id)
-            if dataset_path is None:
-                print(f"❌ Failed to setup dataset: {dataset_id}")
-                print("💡 Creating sample dataset instead...")
-                dataset_path = self.dataset_manager.downloader._create_sample_dataset(
-                    self.dataset_manager.data_root / dataset_id, dataset_id
-                )
-                if dataset_path is None:
-                    raise ValueError(f"Could not create sample dataset for {dataset_id}")
-
-            # Organize dataset
-            organized_path = self.dataset_manager.organize_dataset(dataset_path, dataset_id)
-            if organized_path is None:
-                raise ValueError(f"Failed to organize dataset: {dataset_id}")
-
-            # Load images
-            images, labels = self.load_dataset_from_folder(organized_path)
-
-            if len(images) == 0:
-                print("⚠️  No images found, creating synthetic data...")
-                images, labels = self._create_synthetic_data()
-
-            # Set default output filename
-            if output_csv is None:
-                output_csv = f"retinopathy_features_{dataset_id}.csv"
-
-            # Process images
-            return self.process_retinal_images(images, labels, output_csv)
-
-        except Exception as e:
-            print(f"❌ Pipeline failed for {dataset_id}: {e}")
-            raise
-
-    def _create_synthetic_data(self) -> Tuple[List[np.ndarray], List]:
-        """Create synthetic data when no real data is available"""
-        images = []
-        labels = []
-        for grade in range(5):
-            for i in range(5):  # 5 images per grade
-                img = self.dataset_manager.downloader._create_synthetic_retinal_image(grade, i)
-                images.append(img)
-                labels.append(grade)
-        return images, labels
-
-# Enhanced DiabeticRetinopathyPipeline with quadrant support
-class EnhancedDiabeticRetinopathyPipeline(DiabeticRetinopathyPipeline):
-    """Enhanced pipeline with quadrant-based analysis"""
-
-    def __init__(self, use_gpu=True, enable_quadrants=True):
-        super().__init__(use_gpu=use_gpu)
-        self.enable_quadrants = enable_quadrants
-        if enable_quadrants:
-            self.quadrant_analyzer = QuadrantRetinopathyAnalyzer(self.extractor, use_gpu)
-
-    def process_retinal_images(self, images: List[np.ndarray], labels: List,
-                             image_names: List[str] = None,
-                             output_csv: str = "retinopathy_features.csv") -> str:
-        """Enhanced processing with quadrant analysis"""
-
-        if image_names is None:
-            image_names = [f"image_{i}" for i in range(len(images))]
-
-        if self.enable_quadrants:
-            return self._process_with_quadrants(images, labels, image_names, output_csv)
-        else:
-            return super().process_retinal_images(images, labels, output_csv)
-
-    def _process_with_quadrants(self, images: List[np.ndarray], labels: List,
-                              image_names: List[str], output_csv: str) -> str:
-        """Process images with quadrant-based analysis"""
         print("🚀 Starting Quadrant-Based Diabetic Retinopathy Analysis")
         print("=" * 70)
-        print("🎯 Processing each image as 4 quadrants for detailed regional analysis")
 
-        all_combined_features = []
-        all_quadrant_features = []
+        return self._process_with_quadrants(images, labels, image_names, output_csv)
 
-        for i, (image, label, img_name) in enumerate(zip(images, labels, image_names)):
-            if i % 5 == 0:  # Reduced frequency due to 4x processing
-                print(f"📊 Processing image {i+1}/{len(images)}: {img_name}")
+    def _process_with_quadrants(self, images: List[np.ndarray], labels: List[int], image_names: List[str], output_csv: str) -> pd.DataFrame:
+        """Process images with quadrant analysis"""
+        all_features = []
+        all_metadata = []
 
-            # Extract quadrant features
-            quadrant_features = self.quadrant_analyzer.extract_quadrant_features(image, img_name)
-            all_quadrant_features.append(quadrant_features)
+        for idx, (image, label, img_name) in enumerate(zip(images, labels, image_names)):
+            print(f"📊 Processing image {idx+1}/{len(images)}: {img_name}")
+            print(f"🔍 Segmenting {img_name} into quadrants...")
 
-            # Fuse quadrant features
-            fused_features, feature_metadata = self.quadrant_analyzer.fuse_quadrant_features(
-                {i: quadrant_features}  # Wrap in dict for compatibility
-            )
+            try:
+                # Analyze quadrants
+                quadrant_features = self.quadrant_analyzer.analyze_quadrants(image)
 
-            all_combined_features.append(fused_features)
+                # Fuse quadrant features - FIXED: Pass the correct structure
+                fused_features, feature_metadata = self.quadrant_analyzer.fuse_quadrant_features(quadrant_features)
 
-            if i == 0:
-                self.feature_names = feature_metadata
+                if len(fused_features) > 0:
+                    all_features.append(fused_features)
+                    all_metadata.append({
+                        'image_name': img_name,
+                        'label': label,
+                        'features': fused_features,
+                        'metadata': feature_metadata
+                    })
+                    print(f"✅ Successfully processed {img_name}")
 
-        # Save combined fused features
-        df_combined = pd.DataFrame(all_combined_features, columns=self.feature_names)
-        df_combined['retinopathy_grade'] = labels
-        df_combined['image_name'] = image_names
-        df_combined.to_csv(output_csv, index=False)
+                else:
+                    print(f"❌ Failed to extract features for {img_name}")
 
-        # Save individual quadrant features
-        self.quadrant_analyzer.save_quadrant_features(
-            all_quadrant_features, output_csv, labels, image_names
-        )
+            except Exception as e:
+                print(f"❌ Error processing {img_name}: {e}")
+                continue
 
-        # Generate analysis report
-        self._generate_quadrant_analysis_report(all_quadrant_features, output_csv)
+        if not all_features:
+            print("❌ No features extracted from any image")
+            return pd.DataFrame()
 
-        print(f"\n✅ Quadrant-based analysis complete!")
-        print(f"📊 Results: {len(images)} images → {len(images)*4} quadrants")
-        print(f"💾 Combined features: {output_csv}")
-        print(f"📁 Quadrant features: {Path(output_csv).parent / 'quadrant_features'}")
+        # Create DataFrame
+        feature_columns = all_metadata[0]['metadata'] if all_metadata else []
+        df_data = []
 
-        return output_csv
+        for metadata in all_metadata:
+            row_data = {
+                'image_name': metadata['image_name'],
+                'label': metadata['label']
+            }
+            row_data.update(dict(zip(metadata['metadata'], metadata['features'])))
+            df_data.append(row_data)
 
-    def _generate_quadrant_analysis_report(self, quadrant_features: List, output_csv: str):
-        """Generate detailed report on quadrant analysis"""
-        print("\n📋 QUADRANT ANALYSIS REPORT")
-        print("=" * 50)
+        df = pd.DataFrame(df_data)
 
-        # Analyze feature distribution across quadrants
-        quadrant_stats = {q: [] for q in self.quadrant_analyzer.quadrant_names}
+        # Save to CSV
+        df.to_csv(output_csv, index=False)
+        print(f"💾 Saved features to {output_csv}")
+        print(f"📊 Final dataset: {len(df)} images, {len(df.columns) - 2} features")
 
-        for img_features in quadrant_features:
-            for quadrant_name, features in img_features.items():
-                total_features = sum(len(feat) for feat in features.values())
-                quadrant_stats[quadrant_name].append(total_features)
+        return df
 
-        print("📈 Feature distribution across quadrants:")
-        for quadrant_name, stats in quadrant_stats.items():
-            if stats:
-                avg_features = np.mean(stats)
-                print(f"   {quadrant_name}: {avg_features:.1f} avg features per image")
+    def auto_pipeline(self, dataset_id: str, output_csv: str) -> pd.DataFrame:
+        """Automated pipeline for dataset processing"""
+        print(f"🚀 Starting automated pipeline for dataset: {dataset_id}")
 
-        total_quadrant_features = sum(np.mean(stats) for stats in quadrant_stats.values() if stats)
-        print(f"\n🎯 Total analytical power: {total_quadrant_features:.0f} features across 4 quadrants")
+        # Setup dataset
+        dataset_path = self.dataset_manager.setup_dataset(dataset_id)
+        if dataset_path is None:
+            print(f"❌ Failed to setup dataset: {dataset_id}")
+            return pd.DataFrame()
 
-        # Save detailed report
-        report_file = Path(output_csv).parent / "quadrant_analysis_report.txt"
-        with open(report_file, 'w') as f:
-            f.write("Quadrant-Based Diabetic Retinopathy Analysis Report\n")
-            f.write("=" * 50 + "\n\n")
-            f.write(f"Total images processed: {len(quadrant_features)}\n")
-            f.write(f"Total quadrants analyzed: {len(quadrant_features) * 4}\n")
-            f.write(f"Effective resolution: 128x128 per quadrant\n")
-            f.write(f"Feature preservation: ~4x original detail for small lesions\n")
+        # Organize dataset
+        organized_path = self.dataset_manager.organize_dataset(dataset_path, dataset_id)
+        if organized_path is None:
+            print(f"❌ Failed to organize dataset: {dataset_id}")
+            return pd.DataFrame()
+
+        # Load images
+        images, labels, image_names = self.load_retinal_images(organized_path)
+        if len(images) == 0:
+            print(f"❌ No images loaded for dataset: {dataset_id}")
+            return pd.DataFrame()
+
+        # Process images
+        return self.process_retinal_images(images, labels, image_names, output_csv)
 
 def main():
-    parser = argparse.ArgumentParser(description='Enhanced Diabetic Retinopathy Feature Extractor with Quadrant Analysis')
-    parser.add_argument('--get_data', action='store_true', help='Download and setup datasets')
-    parser.add_argument('--dataset', choices=['aptos2019', 'diaretdb1', 'idrid', 'messidor', 'all'],
-                       default='aptos2019', help='Dataset to process')
-    parser.add_argument('--output', type=str, help='Output CSV filename')
-    parser.add_argument('--no_gpu', action='store_true', help='Disable GPU acceleration')
-    parser.add_argument('--quadrant_analysis', action='store_true',
-                       help='Enable quadrant-based analysis (recommended for detailed detection)')
-    parser.add_argument('--list_datasets', action='store_true',
-                       help='List available datasets without processing')
+    """Main execution function"""
+    parser = argparse.ArgumentParser(description='Diabetic Retinopathy Feature Extractor with Quadrant Analysis')
+    parser.add_argument('--get_data', action='store_true', help='Download and process datasets')
+    parser.add_argument('--dataset', type=str, default='aptos2019', help='Dataset to process (aptos2019, messidor, idrid, diaretdb1, all)')
+    parser.add_argument('--quadrant_analysis', action='store_true', help='Enable quadrant-based analysis')
 
     args = parser.parse_args()
 
-    # Create dataset manager first to list datasets
-    dataset_manager = RetinopathyDatasetManager()
+    print("🩺 Diabetic Retinopathy Early Detection System - Auto Dataset Mode")
+    print("=" * 60)
 
-    if args.list_datasets:
-        dataset_manager.list_datasets()
-        return
-
-    pipeline = EnhancedDiabeticRetinopathyPipeline(
-        use_gpu=not args.no_gpu,
-        enable_quadrants=args.quadrant_analysis
-    )
+    pipeline = RetinopathyPipeline(use_gpu=True)
 
     if args.get_data:
-        print("🚀 Starting dataset download and processing...")
         if args.dataset == 'all':
-            for dataset in ['aptos2019', 'diaretdb1', 'idrid', 'messidor']:
-                try:
-                    print(f"\n{'='*80}")
-                    print(f"📦 Processing dataset: {dataset}")
-                    pipeline.auto_pipeline(dataset, f"retinopathy_features_{dataset}.csv")
-                except Exception as e:
-                    print(f"❌ Failed to process {dataset}: {e}")
-                    print("💡 Creating sample dataset instead...")
-                    # Force create sample dataset
-                    dataset_dir = pipeline.dataset_manager.downloader._create_sample_dataset(
-                        pipeline.dataset_manager.data_root / dataset, dataset
-                    )
-                    if dataset_dir:
-                        organized_path = pipeline.dataset_manager.organize_dataset(dataset_dir, dataset)
-                        if organized_path:
-                            images, labels = pipeline.load_dataset_from_folder(organized_path)
-                            output_csv = f"retinopathy_features_{dataset}.csv"
-                            pipeline.process_retinal_images(images, labels, output_csv)
+            datasets = ['aptos2019', 'messidor', 'idrid', 'diaretdb1']
         else:
+            datasets = [args.dataset]
+
+        for dataset in datasets:
+            print(f"\n{'='*80}")
+            print(f"📦 Processing dataset: {dataset}")
+            print(f"{'='*80}")
+
             try:
-                pipeline.auto_pipeline(args.dataset, args.output)
+                output_csv = f"retinopathy_features_{dataset}.csv"
+                df = pipeline.auto_pipeline(dataset, output_csv)
+
+                if df is not None and len(df) > 0:
+                    print(f"✅ Successfully processed {dataset}: {len(df)} images")
+                else:
+                    print(f"❌ Failed to process {dataset}")
+
             except Exception as e:
-                print(f"❌ Failed to process {args.dataset}: {e}")
+                print(f"❌ Pipeline failed for {dataset}: {e}")
                 print("💡 Creating sample dataset instead...")
-                dataset_dir = pipeline.dataset_manager.downloader._create_sample_dataset(
-                    pipeline.dataset_manager.data_root / args.dataset, args.dataset
-                )
-                if dataset_dir:
-                    organized_path = pipeline.dataset_manager.organize_dataset(dataset_dir, args.dataset)
-                    if organized_path:
-                        images, labels = pipeline.load_dataset_from_folder(organized_path)
-                        output_csv = args.output or f"retinopathy_features_{args.dataset}.csv"
-                        pipeline.process_retinal_images(images, labels, output_csv)
+
+                # Create emergency sample dataset
+                sample_dir = Path("retinopathy_datasets") / f"{dataset}_sample"
+                sample_dir.mkdir(exist_ok=True, parents=True)
+
+                # Create sample images
+                downloader = DatasetDownloader()
+                downloader._create_sample_dataset(sample_dir, dataset)
+
+                # Try processing again
+                try:
+                    images, labels, image_names = pipeline.load_retinal_images(sample_dir)
+                    if len(images) > 0:
+                        output_csv = f"retinopathy_features_{dataset}_sample.csv"
+                        pipeline.process_retinal_images(images, labels, image_names, output_csv)
+                except Exception as e2:
+                    print(f"❌ Even sample processing failed: {e2}")
+
     else:
-        print("🔍 Available commands:")
-        print("   --list_datasets    - List all available datasets")
-        print("   --get_data         - Download and process datasets")
-        print("   --dataset DATASET  - Choose specific dataset (default: aptos2019)")
-        print("   --quadrant_analysis - Enable quadrant-based processing")
-        print("\n💡 Example usage:")
-        print("   python script.py --list_datasets")
-        print("   python script.py --get_data --dataset aptos2019")
-        print("   python script.py --get_data --dataset all --quadrant_analysis")
+        print("💡 Use --get_data to download and process datasets")
+        pipeline.dataset_manager.list_datasets()
 
 if __name__ == "__main__":
     main()
