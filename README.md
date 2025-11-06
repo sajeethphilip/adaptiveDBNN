@@ -1,3 +1,5 @@
+## Important Note: This module is primarily designed for simple datasets, such as the iris dataset or any of the UCI repository datasets, for analysis. For cases where you have more features and want to perform advanced feature engineering to achieve the best results, use the IDBNN module. The DBNN code remains the same, but the pre-processing steps vary slightly. 
+
 ```
 Use python adaptive_dbnn.py --gui for setting up the configuration.
 
